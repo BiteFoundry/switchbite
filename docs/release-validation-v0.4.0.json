@@ -12,14 +12,11 @@
     "evaluation": "synthetic and missing-data regressions; no real-world quality claim",
     "last_completed_tests": 81,
     "legacy_api1": "covered",
-    "failed_tests": 0
+    "failed_tests": 0,
+    "clippy": "all targets, locked, deny warnings passed",
+    "build": "release locked passed"
   },
-  "pending": [
-    "Exact repaired-commit independent review",
-    "GitHub compiler/build validation",
-    "Published asset verification"
-  ],
-  "status": "candidate",
+  "status": "source_and_local_runtime_verified",
   "version": "0.4.0",
   "client_acceptance": [
     {
@@ -48,5 +45,32 @@
       "client": "OpenCode 2",
       "scope": "Connected after effective child config and workspace initialization; initial asynchronous pending resolved"
     }
-  ]
+  ],
+  "accepted_runtime_commit": "47679db53b3f7d1ed1c82f2a03fba00a1379ec96",
+  "independent_review": {
+    "model_requested": "gpt-6.1-sol",
+    "repairs": [
+      "Malformed provider output classification",
+      "Independent request and judgment size budgets",
+      "Missing release notes"
+    ],
+    "service_tier_requested": "fast",
+    "scope": "Exact immutable source acceptance, not independent runtime rerun",
+    "commit": "47679db53b3f7d1ed1c82f2a03fba00a1379ec96",
+    "result": "PASS",
+    "reasoning": "high"
+  },
+  "repaired_build_smoke": {
+    "notice": "Local acceptance artifact. Official GitHub build hashes can differ; use released SHA256SUMS.",
+    "version": "0.4.0",
+    "members": 14,
+    "local_binary_sha256": "cbd2723a12fe8302910243529f5c0dd267991bc275f9a3c3d8f984ed56316fb6",
+    "next_action": "recheck_and_dispatch",
+    "hashed_payloads": 13,
+    "candidate_id": "pool:implementation",
+    "local_archive_sha256": "a2eadf61c22e0c45ae2da0253ef6ae87741610e672b135bbc19f7ebe9fdb0f7c",
+    "native_live_jev": "ready"
+  },
+  "client_scope": "Full six-client checks used e15f164 before the judged-response repair. The repaired commit has fresh native live-Jev acceptance and in-process MCP regression coverage; the published artifact receives a separate final smoke test.",
+  "distribution_checks": "The tag workflow separately checks Rust 1.88, release compiler tests and packaging before publishing. Consult its run and release SHA256SUMS for official artifact status."
 }
