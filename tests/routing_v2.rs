@@ -546,6 +546,40 @@ fn alternatives_are_top_three_and_results_do_not_echo_backend_state() {
 }
 
 #[test]
+fn malformed_provider_output_is_a_judgment_error_not_a_caller_error() {
+    let malformed = |_: &Value| Ok(json!({"model":"jev-1.14.0","answers":{}}));
+    assert_eq!(
+        routing::route(&request(), Some(&malformed), 0).unwrap_err(),
+        ContractError::InvalidJudgment
+    );
+}
+
+#[test]
+fn large_request_and_valid_judgment_have_independent_size_budgets() {
+    let mut r = request();
+    r["task"]["objective"] = json!("x".repeat(24000));
+    r["preferences"] = json!("p".repeat(5000));
+    let mut target = r["pool"][0].clone();
+    target["description"] = json!("d".repeat(2000));
+    r["pool"] = json!(
+        (0..16)
+            .map(|i| {
+                let mut candidate = target.clone();
+                candidate["id"] = json!(format!("candidate:{i:02}"));
+                candidate
+            })
+            .collect::<Vec<_>>()
+    );
+    r["policy"] = json!({"tie_behavior":"stable_id"});
+    let normalized = routing::normalize(&r).unwrap();
+    let size = serde_json::to_vec(&normalized).unwrap().len();
+    assert!((60_000..65_536).contains(&size), "normalized size {size}");
+    let result = checked(&r, Some(&judge), 0);
+    assert_eq!(result["status"], "ready");
+    assert_eq!(result["candidate_id"], "candidate:00");
+}
+
+#[test]
 fn malformed_typed_judgments_and_provider_errors_are_static() {
     let failed = |_: &Value| Err(ContractError::InvalidJudgment);
     assert_eq!(

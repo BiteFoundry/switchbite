@@ -309,7 +309,7 @@ pub fn route(
             "Configure a judge to compare the eligible candidates.",
         ));
     }
-    let mut legacy = legacy_request(&normalized, &candidates);
+    let legacy = legacy_request(&normalized, &candidates);
     let judgment = if let Some(replay) = request.get("replay") {
         replay["judgment"].clone()
     } else {
@@ -318,10 +318,12 @@ pub fn route(
             .judge(&core::judgment_body(&legacy)?)
             .map_err(|_| ContractError::JudgeFailed)?
     };
-    legacy["judgment"] = judgment;
     // Plugin performs typed Jev validation. API1's fixed HOLD thresholds are
     // intentionally ignored; complete validated scores feed API2 policy.
-    let validated = Plugin::default().invoke("decide", &legacy)?;
+    // Keep request and response bounds independent and classify provider data
+    // through the typed-judgment validator, not caller-input validation.
+    let validated =
+        Plugin::with_judge(move |_: &Value| Ok(judgment.clone())).invoke("decide", &legacy)?;
     let context = n(&validated["scores"], "context_sufficient");
     let policy = &normalized["policy"];
     if context < n(policy, "min_context") {

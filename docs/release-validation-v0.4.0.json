@@ -10,15 +10,43 @@
   ],
   "checks": {
     "evaluation": "synthetic and missing-data regressions; no real-world quality claim",
-    "last_completed_tests": 78,
+    "last_completed_tests": 81,
     "legacy_api1": "covered",
     "failed_tests": 0
   },
   "pending": [
-    "Independent exact-commit review",
-    "Renamed agent-profile CLI acceptance",
+    "Exact repaired-commit independent review",
+    "GitHub compiler/build validation",
     "Published asset verification"
   ],
   "status": "candidate",
-  "version": "0.4.0"
+  "version": "0.4.0",
+  "client_acceptance": [
+    {
+      "client": "Claude Code",
+      "candidate": "pool:claude:implementation",
+      "scope": "All four tools invoked; live Jev route ready with recheck_and_dispatch"
+    },
+    {
+      "client": "Codex",
+      "candidate": "pool:claude:implementation",
+      "scope": "All four tools invoked; live Jev route ready with recheck_and_dispatch"
+    },
+    {
+      "client": "Antigravity",
+      "scope": "Offline status, route hold/configure_judge, cancelled feedback invoked"
+    },
+    {
+      "client": "Cursor",
+      "scope": "Four agent-profile tools and input arguments discovered"
+    },
+    {
+      "client": "Grok",
+      "scope": "Healthy MCP handshake and four tools"
+    },
+    {
+      "client": "OpenCode 2",
+      "scope": "Connected after effective child config and workspace initialization; initial asynchronous pending resolved"
+    }
+  ]
 }

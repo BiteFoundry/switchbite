@@ -36,6 +36,32 @@ fn agent_surface_is_four_tools_without_replay_or_digest_inputs() {
     assert!(agent::validate_arguments(&missing_fact).is_err());
 }
 
+#[test]
+fn agent_diagnostics_distinguish_provider_output_from_caller_input() {
+    let malformed: Arc<agent::AgentJudge> =
+        Arc::new(|_| Ok(json!({"model":"jev-1.14.0","answers":{}})));
+    let error = agent::route(&request(), Some(malformed), 0)
+        .unwrap_err()
+        .to_value();
+    assert_eq!(error["code"], "invalid_judgment");
+    assert_eq!(error["next_action"], "refresh_judgment");
+    let auth: Arc<agent::AgentJudge> = Arc::new(|_| {
+        Err(switchbite::runtime::RuntimeError {
+            code: "provider_auth_failed",
+            message: "UPSTREAM-PRIVATE-SENTINEL",
+            retryable: true,
+            retry_after_ms: Some(999999),
+        })
+    });
+    let error = agent::route(&request(), Some(auth), 0)
+        .unwrap_err()
+        .to_value();
+    assert_eq!(error["code"], "provider_auth_failed");
+    assert_eq!(error["next_action"], "configure_judge");
+    assert_eq!(error["retryable"], false);
+    assert!(!error.to_string().contains("UPSTREAM-PRIVATE-SENTINEL"));
+}
+
 #[tokio::test]
 async fn coordinator_discovers_routes_and_receives_one_clear_next_step_without_execution() {
     let (client, server) = tokio::io::duplex(262_144);
