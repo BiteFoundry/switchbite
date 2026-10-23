@@ -334,7 +334,9 @@ pub fn route(
         ));
     }
     let current = &normalized["continuity"]["current_candidate_id"];
-    let current_eligible = candidates.iter().any(|c| &c["id"] == current);
+    let current_eligible = candidates
+        .iter()
+        .any(|c| &c["id"] == current && c["has_context"] != false);
     let no_current = Value::Null;
     let active_current = if current_eligible {
         current
@@ -386,7 +388,7 @@ pub fn route(
     let top = n(&ranked[0]["breakdown"], "composite");
     let retained = ranked
         .iter()
-        .position(|entry| &entry["candidate_id"] == current)
+        .position(|entry| current_eligible && &entry["candidate_id"] == current)
         .filter(|i| top - n(&ranked[*i]["breakdown"], "composite") <= n(policy, "switch_margin"));
     let mut chosen = 0;
     let mut reason = "highest_policy_score";
@@ -467,9 +469,26 @@ pub fn route(
     }
     let mut selected = ranked.remove(chosen);
     selected["reason_codes"] = json!([reason]);
+    let summary = match reason {
+        "continuity_retained" => {
+            "Keep the current target: the alternative's improvement is below the switch margin."
+        }
+        "tie_resolved_lowest_cost" => {
+            "Policy scores are tied; prefer the lowest observed cost estimate under your tie policy."
+        }
+        "tie_resolved_lowest_latency" => {
+            "Policy scores are tied; prefer the lowest observed latency estimate under your tie policy."
+        }
+        "tie_resolved_stable_id" => {
+            "Policy scores are tied; your explicit stable-ID policy determines the proposed target."
+        }
+        _ => {
+            "Recommend the highest-scoring eligible target under this policy. Recheck its current availability before dispatch."
+        }
+    };
     finish(
         json!({"version":2,"status":"ready","candidate_id":selected["candidate_id"],
-        "next_action":"recheck_and_dispatch","summary":"Candidate proposed. Recheck pool facts and task state before dispatch.",
+        "next_action":"recheck_and_dispatch","summary":summary,
         "reason_codes":[reason],"selected":selected,"alternatives":ranked.into_iter().take(3).collect::<Vec<_>>(),
         "excluded":excluded,"snapshot":snapshot}),
     )

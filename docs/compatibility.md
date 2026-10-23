@@ -1,5 +1,9 @@
 # Client and host validation
 
+This page preserves v0.3 acceptance evidence. v0.4 uses the agent profile by
+default; its release-specific checks are recorded in
+[the v0.4 report](release-validation-v0.4.0.json).
+
 The configuration renderer supports Claude Code, Codex, Cursor, Grok,
 Antigravity, OpenCode 2 and generic MCP clients. It prints snippets only.
 No user-wide client configuration is changed by tests or packaging.

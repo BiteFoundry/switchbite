@@ -35,6 +35,30 @@ pub struct RuntimeError {
 impl RuntimeError {
     pub fn from_code(code: &str) -> Self {
         let (code, message, retryable, retry_after_ms) = match code {
+            "invalid_request" => (
+                "invalid_request",
+                "Supply task id/objective and a pool with factual id, description, capabilities and availability. Check the tool schema for optional policy fields.",
+                false,
+                None,
+            ),
+            "invalid_judgment" => (
+                "invalid_judgment",
+                "The typed judgment could not be validated. Refresh it through the host.",
+                false,
+                None,
+            ),
+            "judge_failed" => (
+                "judge_failed",
+                "The decision judge failed. Ask the host to check the routing service.",
+                false,
+                None,
+            ),
+            "cancelled" => (
+                "cancelled",
+                "Routing was cancelled. Any running provider call may still settle; its result will not assign work.",
+                false,
+                None,
+            ),
             "invalid_runtime_config" => (
                 "invalid_runtime_config",
                 "The decision limits are invalid.",
@@ -114,14 +138,14 @@ impl RuntimeError {
         // Re-canonicalize public fields so callers cannot accidentally echo upstream text.
         let safe = Self::from_code(self.code);
         let next_action = match safe.code {
-            "invalid_runtime_config" => {
-                "Use the default decision limits or ask the host to correct them."
-            }
-            "provider_auth_failed" => "Ask the host to check its provider credential.",
-            "provider_invalid_response" => "Ask the host to check the provider response format.",
-            "unsafe_request" => "Remove sensitive data and use the supported request format.",
-            _ if safe.retryable => "Wait for retry_after_ms, then ask the host to retry.",
-            _ => "Ask the host to check the decision service.",
+            "invalid_runtime_config" => "correct_configuration",
+            "invalid_request" => "correct_input",
+            "invalid_judgment" | "provider_invalid_response" => "refresh_judgment",
+            "provider_auth_failed" => "configure_judge",
+            "unsafe_request" => "remove_sensitive_data",
+            "cancelled" => "stop",
+            _ if safe.retryable => "retry_later",
+            _ => "check_service",
         };
         json!({
             "code": safe.code, "message": safe.message, "retryable": safe.retryable,

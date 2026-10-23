@@ -88,6 +88,34 @@ pub fn build(binary: &Path, output: &Path) -> Result<Value, Error> {
     }
     let mut payload = BTreeMap::from([
         (ENTRY.to_owned(), bytes),
+        (
+            "schemas/route-v2.json".to_owned(),
+            include_bytes!("../schemas/route-v2.json").to_vec(),
+        ),
+        (
+            "docs/coordinator.md".to_owned(),
+            include_bytes!("../docs/coordinator.md").to_vec(),
+        ),
+        (
+            "docs/agent-experience.ko.md".to_owned(),
+            include_bytes!("../docs/agent-experience.ko.md").to_vec(),
+        ),
+        (
+            "docs/evaluation.md".to_owned(),
+            include_bytes!("../docs/evaluation.md").to_vec(),
+        ),
+        (
+            "examples/agent-minimal.json".to_owned(),
+            include_bytes!("../examples/agent-minimal.json").to_vec(),
+        ),
+        (
+            "examples/evaluation-import-template.json".to_owned(),
+            include_bytes!("../examples/evaluation-import-template.json").to_vec(),
+        ),
+        (
+            "examples/evaluation-synthetic.json".to_owned(),
+            include_bytes!("../examples/evaluation-synthetic.json").to_vec(),
+        ),
         ("LICENSE".to_owned(), include_bytes!("../LICENSE").to_vec()),
         (
             "README.md".to_owned(),

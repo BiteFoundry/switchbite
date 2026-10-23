@@ -499,6 +499,11 @@ fn continuity_retains_context_but_never_moves_running_work() {
     let result = checked(&r, Some(&different), 0);
     assert_eq!(result["candidate_id"], "b");
     assert_eq!(result["reason_codes"], json!(["continuity_retained"]));
+    r["pool"][1]["has_context"] = json!(false);
+    let no_context = checked(&r, Some(&different), 0);
+    assert_eq!(no_context["candidate_id"], "a");
+    assert_eq!(no_context["selected"]["breakdown"]["switch_penalty"], 0.0);
+    r["pool"][1]["has_context"] = json!(true);
     assert_eq!(
         result["alternatives"][0]["breakdown"]["switch_penalty"],
         0.05

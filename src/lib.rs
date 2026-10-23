@@ -10,7 +10,7 @@ pub mod package;
 pub use contracts::{ContractError, MODEL, describe, parse_request};
 pub use core::{Judge, Plugin, candidate_key, judgment_body};
 
+pub mod agent;
+pub mod evaluation;
 pub mod routing;
 pub mod runtime;
-pub mod evaluation;
-pub mod agent;

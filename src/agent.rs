@@ -19,8 +19,50 @@ pub fn tools() -> Vec<Tool> {
         .annotate(cli_tools::annotations(true))];
     // Keep the two familiar offline operations and status; hide legacy replay
     // schemas from the default agent surface.
-    tools.extend(cli_tools::tools().into_iter().filter(|t| t.name != "switchbite_decide"));
+    tools.extend(
+        cli_tools::tools()
+            .into_iter()
+            .filter(|t| t.name != "switchbite_decide" && t.name != "switchbite_status"),
+    );
+    tools.push(Tool::new("switchbite_status", "Check setup and the next step. No provider call, credentials, quota claims or host mutation.",
+        json!({"type":"object","properties":{},"additionalProperties":false}).as_object().unwrap().clone())
+        .with_raw_output_schema(Arc::new(status_schema().as_object().unwrap().clone()))
+        .annotate(cli_tools::annotations(false)));
     tools
+}
+
+pub fn status(judge_configured: bool) -> Value {
+    let mut status = cli_tools::status(&crate::Plugin::default());
+    status["judge_configured"] = json!(judge_configured);
+    status["profile"] = json!("agent");
+    status["routing_api"] = json!(2);
+    status["primary_tool"] = json!("switchbite_route");
+    status["next_action"] = json!(if judge_configured {
+        "route_new_task"
+    } else {
+        "configure_judge"
+    });
+    status
+}
+
+pub fn status_schema() -> Value {
+    let mut schema = cli_tools::status_schema();
+    for (key, definition) in [
+        ("profile", json!({"type":"string","const":"agent"})),
+        ("routing_api", json!({"type":"integer","const":2})),
+        (
+            "primary_tool",
+            json!({"type":"string","const":"switchbite_route"}),
+        ),
+        (
+            "next_action",
+            json!({"type":"string","enum":["route_new_task","configure_judge"]}),
+        ),
+    ] {
+        schema["properties"][key] = definition;
+        schema["required"].as_array_mut().unwrap().push(json!(key));
+    }
+    schema
 }
 
 pub fn setup(client: &str, config: &str) -> Value {
@@ -37,25 +79,31 @@ pub fn validate_arguments(args: &Value) -> Result<(), contracts::ContractError> 
 }
 
 pub fn now_ms() -> u64 {
-    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)
-        .map(|v| v.as_millis().min(i64::MAX as u128) as u64).unwrap_or(0)
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|v| v.as_millis().min(i64::MAX as u128) as u64)
+        .unwrap_or(0)
 }
 
 /// Retain sanitized transport diagnostics per call; never use a global last error.
-pub fn route(request: &Value, judge: Option<Arc<AgentJudge>>, now: u64)
-    -> Result<Value, crate::runtime::RuntimeError>
-{
+pub fn route(
+    request: &Value,
+    judge: Option<Arc<AgentJudge>>,
+    now: u64,
+) -> Result<Value, crate::runtime::RuntimeError> {
     let failure = Arc::new(Mutex::new(None));
     let diagnostic = failure.clone();
     let configured = judge.is_some();
     let adapter = move |body: &Value| {
-        let Some(judge) = &judge else { return Err(contracts::ContractError::JudgeFailed); };
+        let Some(judge) = &judge else {
+            return Err(contracts::ContractError::JudgeFailed);
+        };
         judge(body).map_err(|error| {
             *diagnostic.lock().expect("request diagnostic") = Some(error);
             contracts::ContractError::JudgeFailed
         })
     };
-    let result = routing::route(request, if configured {Some(&adapter)} else {None}, now);
+    let result = routing::route(request, if configured { Some(&adapter) } else { None }, now);
     if let Some(error) = failure.lock().expect("request diagnostic").take() {
         return Err(error);
     }

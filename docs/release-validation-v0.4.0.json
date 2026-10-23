@@ -1,0 +1,24 @@
+{
+  "implemented": [
+    "Four-tool coordinator profile and one-call route",
+    "Bound expiring snapshots",
+    "Policy presets and hard estimate gates",
+    "Tie policies and deterministic explanations",
+    "Producer exclusion and context continuity",
+    "Bounded concurrency, cancellation, classified provider errors",
+    "Imported observed-result evaluation and paired baselines"
+  ],
+  "checks": {
+    "evaluation": "synthetic and missing-data regressions; no real-world quality claim",
+    "last_completed_tests": 78,
+    "legacy_api1": "covered",
+    "failed_tests": 0
+  },
+  "pending": [
+    "Independent exact-commit review",
+    "Renamed agent-profile CLI acceptance",
+    "Published asset verification"
+  ],
+  "status": "candidate",
+  "version": "0.4.0"
+}

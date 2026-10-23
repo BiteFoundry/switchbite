@@ -1,5 +1,10 @@
 # Model pools and multi-agent orchestration
 
+For current v0.4 policy, estimate limits, continuity, bound snapshots and the
+recommended four-tool agent profile, see [API2](api-v2.md) and
+[the coordinator guide](coordinator.md). The capability table and example below
+record the v0.3/API1 interface, which remains available for compatibility.
+
 Switchbite's `decide` operation already accepts an arbitrary candidate pool.
 Candidate IDs have no built-in provider or CLI meaning. Up to 16 candidates can
 be evaluated in one request. A pool can contain multiple models/settings for the

@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.4.0 — 2026-10-23
+
+- Recommended four-tool agent profile, coordinator instructions and read-only setup handoff.
+- Single-call routing API2 with concise next actions and readable MCP summaries.
+- Bound, expiring replay snapshots; configurable role policies, hard estimate limits,
+  producer exclusion, tie policies and context continuity without migrating running work.
+- Bounded concurrent decisions, finite queue/deadlines, cancellation-safe permits,
+  reusable HTTP connections, classified static errors and per-judge cooldowns.
+- Offline observed-result evaluation with missing coverage and paired baseline comparisons.
+- Node24 GitHub actions and a separate minimum-Rust check before publishing.
+
+Existing docking API1 and the original CLI profile remain available. Actual model
+discovery, worker execution and receipt verification remain host-owned.
+
 ## 0.3.0 — 2026-10-23
 
 First public preview under BiteFoundry, named Switchbite.

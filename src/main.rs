@@ -1,10 +1,9 @@
 use std::{fs::File, io::Read, sync::Arc};
 use switchbite::{
-    Plugin,
+    Plugin, agent,
     contracts::{self, MAX_JSON_BYTES},
     http::HttpJudge,
     mcp_server,
-    agent,
     runtime::{DecisionRuntime, RuntimeConfig},
 };
 
@@ -43,23 +42,38 @@ fn plugin() -> Plugin {
 }
 fn request_file(path: &str) -> Result<serde_json::Value, Box<dyn std::error::Error + Send + Sync>> {
     let mut bytes = Vec::new();
-    File::open(path)?.take(MAX_JSON_BYTES as u64 + 1).read_to_end(&mut bytes)?;
+    File::open(path)?
+        .take(MAX_JSON_BYTES as u64 + 1)
+        .read_to_end(&mut bytes)?;
     Ok(contracts::parse_request(&bytes)?)
 }
 fn agent_judge(offline: bool) -> Option<Arc<agent::AgentJudge>> {
-    if offline { return None; }
-    HttpJudge::from_env().map(|judge| Arc::new(move |body: &serde_json::Value| judge.judge_detailed(body)) as Arc<agent::AgentJudge>)
+    if offline {
+        return None;
+    }
+    HttpJudge::from_env().map(|judge| {
+        Arc::new(move |body: &serde_json::Value| judge.judge_detailed(body))
+            as Arc<agent::AgentJudge>
+    })
 }
-fn agent_config(args: &[String]) -> Result<(bool, RuntimeConfig), Box<dyn std::error::Error + Send + Sync>> {
+fn agent_config(
+    args: &[String],
+) -> Result<(bool, RuntimeConfig), Box<dyn std::error::Error + Send + Sync>> {
     let mut config = RuntimeConfig::default();
     let mut offline = false;
     let mut seen = std::collections::BTreeSet::new();
     let mut index = 3;
     while index < args.len() {
         let flag = args[index].as_str();
-        if !seen.insert(flag) { return Err("Repeated agent option.".into()); }
-        if flag == "--offline" { offline = true; index += 1; continue; }
-        let value = args.get(index+1).ok_or("Missing agent option value.")?;
+        if !seen.insert(flag) {
+            return Err("Repeated agent option.".into());
+        }
+        if flag == "--offline" {
+            offline = true;
+            index += 1;
+            continue;
+        }
+        let value = args.get(index + 1).ok_or("Missing agent option value.")?;
         match flag {
             "--max-concurrent" => config.max_concurrent = value.parse()?,
             "--max-queued" => config.max_queued = value.parse()?,
@@ -102,7 +116,7 @@ fn doctor(client: &str) -> Result<serde_json::Value, switchbite::connection::Con
         .copied()
         .filter(|name| std::env::var_os(name).is_some())
         .collect();
-    let mut result = switchbite::cli_tools::status(&plugin());
+    let mut result = agent::status(plugin().judge_configured());
     result["client"] = serde_json::json!(client);
     result["configuration_overrides_present"] = serde_json::json!(present);
     result["configuration_notice"] = serde_json::json!(
@@ -117,12 +131,22 @@ fn cli(args: &[String]) -> Result<(), Box<dyn std::error::Error + Send + Sync>> 
     }
     if args.first().is_some_and(|s| s == "setup") {
         let rendered = config(args)?;
-        let client = args.windows(2).find(|v| v[0] == "--client").map(|v| v[1].as_str()).ok_or("Missing client.")?;
-        println!("{}", serde_json::to_string_pretty(&agent::setup(client, &rendered))?);
+        let client = args
+            .windows(2)
+            .find(|v| v[0] == "--client")
+            .map(|v| v[1].as_str())
+            .ok_or("Missing client.")?;
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&agent::setup(client, &rendered))?
+        );
         return Ok(());
     }
     let result = match args {
-        [command] if command == "guide" => {print!("{}", agent::GUIDE); return Ok(());},
+        [command] if command == "guide" => {
+            print!("{}", agent::GUIDE);
+            return Ok(());
+        }
         [command, flag, path] if command == "snapshot" && flag == "--request-file" => {
             switchbite::routing::snapshot(&request_file(path)?, agent::now_ms())?
         }
@@ -132,12 +156,16 @@ fn cli(args: &[String]) -> Result<(), Box<dyn std::error::Error + Send + Sync>> 
         [command, flag, path] if command == "route" && flag == "--request-file" => {
             let request = request_file(path)?;
             let judge = agent_judge(false);
-            let runtime = tokio::runtime::Builder::new_multi_thread().enable_all().build()?;
+            let runtime = tokio::runtime::Builder::new_multi_thread()
+                .enable_all()
+                .build()?;
             let decisions = DecisionRuntime::new(RuntimeConfig::default())?;
-            runtime.block_on(decisions.execute(move || agent::route(&request, judge, agent::now_ms())))?
+            runtime.block_on(
+                decisions.execute(move || agent::route(&request, judge, agent::now_ms())),
+            )?
         }
         [command] if command == "describe" => contracts::describe(),
-        [command] if command == "doctor" => switchbite::cli_tools::status(&plugin()),
+        [command] if command == "doctor" => agent::status(plugin().judge_configured()),
         [command, flag, client] if command == "doctor" && flag == "--client" => doctor(client)?,
         [command, operation, flag, path] if command == "invoke" && flag == "--request-file" => {
             let mut bytes = Vec::new();
@@ -162,14 +190,27 @@ fn main() {
         );
         return;
     }
-    if args.first().is_some_and(|s| s == "serve") && args.get(1).is_some_and(|s| s == "--profile") && args.get(2).is_some_and(|s| s == "agent") {
+    if args.first().is_some_and(|s| s == "serve")
+        && args.get(1).is_some_and(|s| s == "--profile")
+        && args.get(2).is_some_and(|s| s == "agent")
+    {
         let result = (|| -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
             let (offline, config) = agent_config(&args)?;
             let judge = agent_judge(offline);
-            let runtime = tokio::runtime::Builder::new_multi_thread().enable_all().build()?;
-            runtime.block_on(mcp_server::serve_agent(judge, config, tokio::io::stdin(), tokio::io::stdout()))
+            let runtime = tokio::runtime::Builder::new_multi_thread()
+                .enable_all()
+                .build()?;
+            runtime.block_on(mcp_server::serve_agent(
+                judge,
+                config,
+                tokio::io::stdin(),
+                tokio::io::stdout(),
+            ))
         })();
-        if result.is_err() { eprintln!("Unable to start agent profile; check --help and bounded runtime settings."); std::process::exit(1); }
+        if result.is_err() {
+            eprintln!("Unable to start agent profile; check --help and bounded runtime settings.");
+            std::process::exit(1);
+        }
         return;
     }
     if args == ["--version"] {
