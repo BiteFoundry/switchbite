@@ -1,0 +1,71 @@
+{
+  "date": "2026-10-23",
+  "version": "0.3.0",
+  "product": "Switchbite",
+  "platform": "Windows x64 MSVC",
+  "rustc": "1.99.1 (58cf8f9c3 2026-10-13)",
+  "minimum_rust_version": {"declared": "1.88", "independently_tested": false},
+  "runtime_candidate_commit": "27bdbf8065c2a7a32b7b5c5e8ae0c4a697c358ee",
+  "checks": {
+    "cargo_test_locked": {"passed": 33, "failed": 0, "ignored": 0},
+    "cargo_fmt_check": "passed",
+    "cargo_clippy_all_targets_locked_deny_warnings": "passed",
+    "cargo_build_release_locked": "passed",
+    "cargo_about_0_9_2_locked_fail": "passed; Windows runtime and build dependency notices generated",
+    "source_boundary": "Curated initial snapshot; no private history, Python files, host code, environment files or test logs tracked",
+    "archive": "Native schema-2 ZIP; seven exact members, six hashed payloads; readback and deterministic packaging tested"
+  },
+  "local_candidate_artifact": {
+    "filename": "switchbite-0.3.0-windows-x64.zip",
+    "sha256": "619289975940c18f010e22e15fe873799e3be36c1a101d3c49b24549f464593b",
+    "binary_sha256": "89793a9eae9e1fb6f9047c88c8510ba8ddee5e951bb13a72958e5b69405363d4",
+    "notice": "Local acceptance build only. GitHub CI rebuilds the official release asset; verify that asset with the SHA256SUMS attached to its release. Binary reproducibility across machines is not claimed."
+  },
+  "renamed_client_acceptance": [
+    {"client":"Claude Code","version":"2.1.308","result":"All four switchbite_* tools invoked successfully with structured results; offline model-pool replay ready=true, candidate pool:claude:implementation"},
+    {"client":"Codex","version":"0.163.0","model_requested":"gpt-6.1-sol","reasoning_requested":"high","service_tier_requested":"fast","result":"All four switchbite_* tools invoked successfully with structured results; offline model-pool replay ready=true, candidate pool:claude:implementation"},
+    {"client":"Antigravity","version":"1.4.5","result":"Actual offline switchbite_status and switchbite_feedback calls succeeded from workspace print session; online key forwarding not tested"},
+    {"client":"Cursor CLI","version":"2026.10.19-6bbf2c4","result":"Fixture server enabled/approved; mcp list-tools discovered four switchbite_* tools and arguments; agent invocation not tested"},
+    {"client":"Grok CLI","version":"1.0.60","result":"mcp doctor reports healthy, handshake 2025-11-25 and four tools; agent invocation not tested"},
+    {"client":"OpenCode","version":"2.1.2","result":"switchbite connected in mcp list; child-only OPENCODE_CLI_CONFIG_CONTENT override; agent invocation not tested"}
+  ],
+  "client_conditions": {
+    "executable": "Extracted local ZIP under a path containing spaces",
+    "configuration": "Isolated fixture workspaces; no user-wide MCP server definitions changed",
+    "workspace_root": "Cursor/OpenCode fixtures initialized as independent Git roots; nested configuration under a parent repository was not initially discovered",
+    "approval": "Cursor fixture server approval and host trust policies remain client-owned",
+    "no_worker_execution": true
+  },
+  "model_pool": {
+    "regression_tests": 3,
+    "covers": ["Distinct profiles in the same harness", "Exact target IDs", "Availability and capability gates before judging", "Opaque metadata excluded from provider state and scores", "Input-order independence and snapshot immutability", "Changed eligible candidate set refuses old replay"],
+    "live_native_judge_call": {
+      "model":"jev-1.14.0",
+      "replay_supplied":false,
+      "task":"Synthetic self-contained Rust port parser implementation and regression tests",
+      "ready":true,
+      "candidate_id":"pool:claude:implementation",
+      "ranked":["pool:claude:implementation","pool:codex:review","pool:codex:general"],
+      "excluded":["pool:antigravity:writing","pool:claude:busy"],
+      "interpretation":"Provider/protocol and pool-routing acceptance, not a benchmark of worker performance or proof of optimality"
+    }
+  },
+  "independent_static_review": {
+    "model_requested":"gpt-6.1-sol",
+    "reasoning":"high",
+    "service_tier_requested":"fast",
+    "commit":"27bdbf8065c2a7a32b7b5c5e8ae0c4a697c358ee",
+    "p1_p2_findings":0,
+    "p3_findings":"Missing release-validation.json referenced by docs; resolved by adding this report",
+    "scope":"Read-only source/docs/workflow review; not a security audit or independent runtime rerun"
+  },
+  "not_implemented_or_verified": [
+    "Native Herdr, Orca or Stackbite adapters and host integration tests",
+    "Automatic model/account/quota discovery",
+    "Numeric cost/latency optimization, global assignment optimization or capacity reservations",
+    "Automatic decomposition, replanning or parallel DAG execution",
+    "Persistent feedback learning or calibrated task-success estimates",
+    "Bundled decision backends other than Jev 1.14",
+    "Linux/macOS release binaries"
+  ]
+}

@@ -31,6 +31,15 @@ regressions exercise distinct profiles in one harness, availability/capability
 exclusion, exact target identity, opaque metadata and changed-pool replay refusal.
 Release-specific checks are recorded in `docs/release-validation.json`.
 
+For the renamed Windows release candidate, Claude and Codex invoked all four
+tools with structured results and the model-pool replay. Antigravity invoked
+offline status/feedback; Cursor and Grok discovered all four tools; OpenCode
+reported connected. A separate native live Jev call evaluated the synthetic
+model pool successfully. The executable was extracted from the local ZIP under
+a path with spaces. These checks do not execute proposed workers or measure
+their quality. Cursor/OpenCode fixture folders needed their own Git roots for
+the intended nested workspace configuration to be discovered.
+
 ## Orchestrators
 
 No native Herdr, Orca or Stackbite integration has been exercised for this public
