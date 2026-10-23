@@ -1,0 +1,23 @@
+{
+  "task": {
+    "id": "csv:parse",
+    "objective": "Implement a Rust CSV import parser that rejects missing required columns and reports the failing row number. Add regression tests for valid rows and malformed input.",
+    "requirements": ["code.change"]
+  },
+  "pool": [
+    {
+      "id": "pool:implementation",
+      "description": "An implementation worker configured by the host for Rust feature work and regression tests.",
+      "capabilities": ["code.change"],
+      "available": true
+    },
+    {
+      "id": "pool:review",
+      "description": "An independent review worker, also able to make Rust code changes.",
+      "capabilities": ["code.change", "code.review"],
+      "available": true
+    }
+  ],
+  "preferences": "Prefer the implementation worker for feature implementation and reserve the review worker for independent review.",
+  "policy": {"profile": "implementation"}
+}

@@ -1,9 +1,11 @@
-use std::{fs::File, io::Read};
+use std::{fs::File, io::Read, sync::Arc};
 use switchbite::{
     Plugin,
     contracts::{self, MAX_JSON_BYTES},
     http::HttpJudge,
     mcp_server,
+    agent,
+    runtime::{DecisionRuntime, RuntimeConfig},
 };
 
 fn config(args: &[String]) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
@@ -38,6 +40,38 @@ fn plugin() -> Plugin {
     HttpJudge::from_env()
         .map(Plugin::with_judge)
         .unwrap_or_default()
+}
+fn request_file(path: &str) -> Result<serde_json::Value, Box<dyn std::error::Error + Send + Sync>> {
+    let mut bytes = Vec::new();
+    File::open(path)?.take(MAX_JSON_BYTES as u64 + 1).read_to_end(&mut bytes)?;
+    Ok(contracts::parse_request(&bytes)?)
+}
+fn agent_judge(offline: bool) -> Option<Arc<agent::AgentJudge>> {
+    if offline { return None; }
+    HttpJudge::from_env().map(|judge| Arc::new(move |body: &serde_json::Value| judge.judge_detailed(body)) as Arc<agent::AgentJudge>)
+}
+fn agent_config(args: &[String]) -> Result<(bool, RuntimeConfig), Box<dyn std::error::Error + Send + Sync>> {
+    let mut config = RuntimeConfig::default();
+    let mut offline = false;
+    let mut seen = std::collections::BTreeSet::new();
+    let mut index = 3;
+    while index < args.len() {
+        let flag = args[index].as_str();
+        if !seen.insert(flag) { return Err("Repeated agent option.".into()); }
+        if flag == "--offline" { offline = true; index += 1; continue; }
+        let value = args.get(index+1).ok_or("Missing agent option value.")?;
+        match flag {
+            "--max-concurrent" => config.max_concurrent = value.parse()?,
+            "--max-queued" => config.max_queued = value.parse()?,
+            "--queue-timeout-ms" => config.queue_timeout_ms = value.parse()?,
+            "--decision-timeout-ms" => config.decision_timeout_ms = value.parse()?,
+            _ => return Err("Unknown agent option.".into()),
+        }
+        index += 2;
+    }
+    // Validate before server startup and before reading a credential.
+    let _ = DecisionRuntime::new(config)?;
+    Ok((offline, config))
 }
 fn doctor(client: &str) -> Result<serde_json::Value, switchbite::connection::ConfigError> {
     if ![
@@ -81,7 +115,27 @@ fn cli(args: &[String]) -> Result<(), Box<dyn std::error::Error + Send + Sync>> 
         print!("{}", config(args)?);
         return Ok(());
     }
+    if args.first().is_some_and(|s| s == "setup") {
+        let rendered = config(args)?;
+        let client = args.windows(2).find(|v| v[0] == "--client").map(|v| v[1].as_str()).ok_or("Missing client.")?;
+        println!("{}", serde_json::to_string_pretty(&agent::setup(client, &rendered))?);
+        return Ok(());
+    }
     let result = match args {
+        [command] if command == "guide" => {print!("{}", agent::GUIDE); return Ok(());},
+        [command, flag, path] if command == "snapshot" && flag == "--request-file" => {
+            switchbite::routing::snapshot(&request_file(path)?, agent::now_ms())?
+        }
+        [command, flag, path] if command == "evaluate" && flag == "--request-file" => {
+            switchbite::evaluation::evaluate(&request_file(path)?)?
+        }
+        [command, flag, path] if command == "route" && flag == "--request-file" => {
+            let request = request_file(path)?;
+            let judge = agent_judge(false);
+            let runtime = tokio::runtime::Builder::new_multi_thread().enable_all().build()?;
+            let decisions = DecisionRuntime::new(RuntimeConfig::default())?;
+            runtime.block_on(decisions.execute(move || agent::route(&request, judge, agent::now_ms())))?
+        }
         [command] if command == "describe" => contracts::describe(),
         [command] if command == "doctor" => switchbite::cli_tools::status(&plugin()),
         [command, flag, client] if command == "doctor" && flag == "--client" => doctor(client)?,
@@ -104,8 +158,18 @@ fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     if args == ["--help"] || args == ["-h"] {
         println!(
-            "Switchbite native MCP plugin\nNo args: docking API1 MCP stdio\nserve --profile cli [--offline]: typed tools for CLI agents\ndescribe | doctor | invoke OP --request-file FILE\nconfig --client NAME [--executable ABS] [--offline]"
+            "Switchbite — the decision layer for your agents\nStart: setup --client NAME [--offline]\nRecommended MCP: serve --profile agent [--offline]\nAdvanced server options: --max-concurrent N --max-queued N --queue-timeout-ms N --decision-timeout-ms N\nroute | snapshot | evaluate --request-file FILE\nguide | doctor | config --client NAME [--executable ABS] [--offline]\nCompatibility: no args = docking API1; serve --profile cli = original typed tools; invoke OP --request-file FILE"
         );
+        return;
+    }
+    if args.first().is_some_and(|s| s == "serve") && args.get(1).is_some_and(|s| s == "--profile") && args.get(2).is_some_and(|s| s == "agent") {
+        let result = (|| -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+            let (offline, config) = agent_config(&args)?;
+            let judge = agent_judge(offline);
+            let runtime = tokio::runtime::Builder::new_multi_thread().enable_all().build()?;
+            runtime.block_on(mcp_server::serve_agent(judge, config, tokio::io::stdin(), tokio::io::stdout()))
+        })();
+        if result.is_err() { eprintln!("Unable to start agent profile; check --help and bounded runtime settings."); std::process::exit(1); }
         return;
     }
     if args == ["--version"] {
@@ -144,7 +208,10 @@ fn main() {
     };
     if let Err(error) = result {
         // Never echo paths, request bytes, credentials, network errors or provider text.
-        if let Some(domain) = error.downcast_ref::<contracts::ContractError>() {
+        if let Some(runtime) = error.downcast_ref::<switchbite::runtime::RuntimeError>() {
+            // The CLI has the same machine-readable next step as MCP.
+            println!("{}", runtime.to_value());
+        } else if let Some(domain) = error.downcast_ref::<contracts::ContractError>() {
             eprintln!("{domain}");
         } else if let Some(config) = error.downcast_ref::<switchbite::connection::ConfigError>() {
             eprintln!("{config}");

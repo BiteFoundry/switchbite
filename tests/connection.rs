@@ -44,7 +44,7 @@ fn json_dialects_preserve_paths_and_launch_typed_profile() {
             let value: Value =
                 serde_json::from_str(&render(client, &path, offline).unwrap()).unwrap();
             let server = json_server(&value, client);
-            let mut expected_args = vec!["serve", "--profile", "cli"];
+            let mut expected_args = vec!["serve", "--profile", "agent"];
             if offline {
                 expected_args.push("--offline");
             }
@@ -95,7 +95,7 @@ fn toml_dialects_preserve_paths_and_profile_arguments() {
                 serde_json::from_str::<String>(field("command")).unwrap(),
                 path.to_str().unwrap()
             );
-            let mut args = vec!["serve", "--profile", "cli"];
+            let mut args = vec!["serve", "--profile", "agent"];
             if offline {
                 args.push("--offline");
             }

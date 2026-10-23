@@ -38,7 +38,7 @@ pub fn render(client: &str, executable: &Path, offline: bool) -> Result<String, 
     if !executable.is_absolute() || executable_text.chars().any(char::is_control) {
         return Err(ConfigError::InvalidExecutable);
     }
-    let mut args = vec!["serve", "--profile", "cli"];
+    let mut args = vec!["serve", "--profile", "agent"];
     if offline {
         args.push("--offline");
     }

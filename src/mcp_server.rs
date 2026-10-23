@@ -16,6 +16,7 @@ pub const MAX_FRAME_BYTES: usize = 131_072;
 pub enum Profile {
     Docking,
     Cli,
+    Agent,
 }
 #[derive(Clone)]
 pub struct McpServer {
@@ -23,6 +24,8 @@ pub struct McpServer {
     permits: Arc<tokio::sync::Semaphore>,
     decisions: Arc<tokio::sync::Semaphore>,
     profile: Profile,
+    runtime: Arc<crate::runtime::DecisionRuntime>,
+    agent_judge: Option<Arc<crate::agent::AgentJudge>>,
 }
 impl McpServer {
     pub fn new(plugin: Plugin) -> Self {
@@ -38,6 +41,32 @@ impl McpServer {
             })),
             decisions: Arc::new(tokio::sync::Semaphore::new(1)),
             profile,
+            runtime: Arc::new(crate::runtime::DecisionRuntime::new(crate::runtime::RuntimeConfig::default()).expect("default runtime")),
+            agent_judge: None,
+        }
+    }
+    pub fn agent(judge: Option<Arc<crate::agent::AgentJudge>>, config: crate::runtime::RuntimeConfig)
+        -> Result<Self, crate::runtime::RuntimeError>
+    {
+        let mut server = Self::with_profile(Plugin::default(), Profile::Agent);
+        server.runtime = Arc::new(crate::runtime::DecisionRuntime::new(config)?);
+        server.agent_judge = judge;
+        Ok(server)
+    }
+    async fn route(&self, args: Value) -> CallToolResponse {
+        if crate::agent::validate_arguments(&args).is_err() {
+            return CallToolResult::structured_error(crate::runtime::RuntimeError::from_code("invalid_request").to_value()).into();
+        }
+        let judge = self.agent_judge.clone();
+        match self.runtime.execute(move || crate::agent::route(&args, judge, crate::agent::now_ms())).await {
+            Ok(value) => {
+                let text = format!("{}\nNext: {}\nCandidate: {}", value["summary"].as_str().unwrap_or("Routing proposal ready."),
+                    value["next_action"].as_str().unwrap_or("request_review"), value["candidate_id"].as_str().unwrap_or("none"));
+                let mut result = CallToolResult::structured(value);
+                result.content = vec![Content::text(text)];
+                result.into()
+            },
+            Err(error) => CallToolResult::structured_error(error.to_value()).into(),
         }
     }
     async fn invoke(&self, operation: String, request: Value) -> CallToolResponse {
@@ -80,7 +109,9 @@ impl ServerHandler for McpServer {
         let mut info = ServerConfig::default();
         info.capabilities = ServerCapabilities::builder().enable_tools().build();
         info.server_info = Implementation::new("Switchbite", env!("CARGO_PKG_VERSION"));
-        info.instructions = Some(if self.profile == Profile::Cli {
+        info.instructions = Some(if self.profile == Profile::Agent {
+            crate::agent::INSTRUCTIONS
+        } else if self.profile == Profile::Cli {
             "Use switchbite_decide to propose worker assignments, switchbite_validate_plan for supplied DAGs, switchbite_feedback for outcome proposals, and switchbite_status for configuration presence. Never execute or claim completion based only on a proposal."
         } else { "Proposal-only docking API 1. Host owns authorization and execution." }.into());
         info
@@ -91,7 +122,9 @@ impl ServerHandler for McpServer {
         _: RequestContext<RoleServer>,
     ) -> Result<ListToolsResult, ErrorData> {
         Ok(ListToolsResult {
-            tools: if self.profile == Profile::Cli {
+            tools: if self.profile == Profile::Agent {
+                crate::agent::tools()
+            } else if self.profile == Profile::Cli {
                 crate::cli_tools::tools()
             } else {
                 tools()
@@ -102,9 +135,34 @@ impl ServerHandler for McpServer {
     async fn call_tool(
         &self,
         call: CallToolRequestParams,
-        _: RequestContext<RoleServer>,
+        context: RequestContext<RoleServer>,
     ) -> Result<CallToolResponse, ErrorData> {
         let args = Value::Object(call.arguments.unwrap_or_default());
+        if self.profile == Profile::Agent {
+            if context.ct.is_cancelled() {
+                return Ok(CallToolResult::structured_error(crate::runtime::RuntimeError::from_code("cancelled").to_value()).into());
+            }
+            return Ok(match call.name.as_ref() {
+                "switchbite_route" => tokio::select! {
+                    biased;
+                    _ = context.ct.cancelled() => CallToolResult::structured_error(crate::runtime::RuntimeError::from_code("cancelled").to_value()).into(),
+                    result = self.route(args) => result,
+                },
+                "switchbite_status" if args.as_object().unwrap().is_empty() => {
+                    let mut status = crate::cli_tools::status(&self.plugin);
+                    status["judge_configured"] = json!(self.agent_judge.is_some());
+                    CallToolResult::structured(status).into()
+                },
+                "switchbite_validate_plan" | "switchbite_feedback" => {
+                    let operation = if call.name == "switchbite_feedback" {"feedback"} else {"validate_plan"};
+                    match crate::cli_tools::normalize(operation, &args) {
+                        Ok(request) => self.invoke(operation.into(), request).await,
+                        Err(failure) => error(failure),
+                    }
+                },
+                _ => error(ContractError::UnknownOperation),
+            });
+        }
         if self.profile == Profile::Cli {
             if call.name == "switchbite_status" {
                 return Ok(if args.as_object().unwrap().is_empty() {
@@ -199,13 +257,34 @@ where
     R: AsyncRead + Send + Unpin + 'static,
     W: AsyncWrite + Send + Unpin + 'static,
 {
+    serve_server(McpServer::with_profile(plugin, profile), reader, writer).await
+}
+
+pub async fn serve_agent<R, W>(
+    judge: Option<Arc<crate::agent::AgentJudge>>,
+    config: crate::runtime::RuntimeConfig,
+    reader: R,
+    writer: W,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>>
+where
+    R: AsyncRead + Send + Unpin + 'static,
+    W: AsyncWrite + Send + Unpin + 'static,
+{
+    serve_server(McpServer::agent(judge, config)?, reader, writer).await
+}
+
+async fn serve_server<R, W>(server: McpServer, reader: R, writer: W)
+    -> Result<(), Box<dyn std::error::Error + Send + Sync>>
+where
+    R: AsyncRead + Send + Unpin + 'static,
+    W: AsyncWrite + Send + Unpin + 'static,
+{
     let (checked, forward) = tokio::io::duplex(MAX_FRAME_BYTES);
     let guard = tokio::spawn(guarded_input(reader, forward));
     let transport = AsyncRwTransport::<RoleServer, _, _>::new(checked, writer)
         .with_max_line_length(MAX_FRAME_BYTES);
     let result = async {
-        McpServer::with_profile(plugin, profile)
-            .serve(transport)
+        server.serve(transport)
             .await?
             .waiting()
             .await?;
