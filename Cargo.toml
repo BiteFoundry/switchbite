@@ -1,6 +1,6 @@
 [package]
 name = "switchbite"
-version = "0.4.0"
+version = "0.5.0"
 edition = "2024"
 rust-version = "1.88"
 description = "The decision layer for your agents: portable worker and model-pool routing over MCP"
@@ -22,11 +22,13 @@ name = "package-plugin"
 path = "src/bin/package_plugin.rs"
 
 [dependencies]
+jsonc-parser = { version = "=0.34.0", features = ["cst", "serde_json"] }
 regex = "1.12"
 reqwest = { version = "=0.13.5", default-features = false, features = ["blocking", "rustls"] }
 rmcp = { version = "=3.7.0", default-features = false, features = ["server", "transport-io"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
+toml_edit = "=0.25.17"
 sha2 = "0.10"
 tokio = { version = "1.48", features = ["macros", "rt-multi-thread", "io-util", "io-std", "time", "process", "sync"] }
 zip = { version = "=9.0.5", default-features = false, features = ["deflate-flate2-zlib-rs"] }

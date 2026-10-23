@@ -12,14 +12,29 @@
 ## 처음 연결하기
 
 ```powershell
-.\bin\switchbite.exe setup --client claude
-.\bin\switchbite.exe setup --client codex
+switchbite codex
+# 또는: switchbite claude / cursor / grok / antigravity / opencode
 ```
 
-`setup`은 설정 조각과 다음 단계를 출력합니다. 기존 설정 파일을 수정하지 않습니다.
-설정을 병합해 새 세션을 시작하면 서버가 coordinator용 사용 지침도 제공합니다.
-별도의 안내 도구를 매 작업마다 호출하거나, digest를 직접 계산할 필요가 없습니다.
-호스트별 설정 구조·승인은 해당 클라이언트가 관리합니다.
+압축을 푼 실행 파일이 PATH에 없다면 `.\bin\switchbite.exe codex`로 실행합니다.
+선택한 CLI의 사용자 설정에 자동 등록합니다. 새 CLI 세션을 열고, 클라이언트가
+요청하면 최초 한 번 서버 사용을 승인합니다. 이후 coordinator용 지침이 자동으로
+전달되므로 설정 조각을 복사하거나 프로젝트 지침을 편집할 필요가 없습니다.
+
+실행 파일은 `%LOCALAPPDATA%\Switchbite\bin` 아래에 별도 보관하므로 압축을 푼
+폴더를 이동해도 연결을 유지합니다. 기존 설정과 주석을 보존하고 원본을 인접한
+`.switchbite-*.bak` 파일로 백업합니다. 같은 명령을 반복해도 중복 등록하지 않습니다.
+`--dry-run`은 쓰기 없이 연결 대상을 확인하고, `--json`은 짧은 결과를 반환합니다.
+이름이 같은 다른 서버나 잘못된 설정은 덮어쓰지 않고 중단합니다.
+
+Jev·Laya 등의 판단 모델 선택과 API 키 설정은 연결과 별도입니다. 연결 명령은
+모델이나 키 값을 바꾸지 않습니다. 현재 배포판의 온라인 판단 구현은 Jev 1.14이며,
+다른 판단 백엔드를 연결하는 기능이 추가된 것은 아닙니다. 클라이언트 정책과
+프로젝트별 설정이 우선할 수 있습니다. OpenCode의 inline 환경변수 설정은 원본
+설정에서 병합해야 하며, 파일은 `--config-file FILE`로 직접 지정할 수 있습니다.
+세부 동작은 [연결 문서](connection.md)를 참고하세요.
+
+기존 `setup --client NAME`과 `config --client NAME`은 계속 설정을 출력하기만 합니다.
 
 ## 한 번 호출하기
 

@@ -125,6 +125,88 @@ fn doctor(client: &str) -> Result<serde_json::Value, switchbite::connection::Con
     Ok(result)
 }
 fn cli(args: &[String]) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    if args
+        .first()
+        .is_some_and(|s| switchbite::connect::CLIENTS.contains(&s.as_str()))
+    {
+        if args.len() == 2 && matches!(args[1].as_str(), "--help" | "-h") {
+            println!(
+                "Usage: switchbite {} [--dry-run] [--json] [--offline] [--config-file FILE]\nConnects this user once. Start a new client session afterward; judge settings stay separate.",
+                args[0]
+            );
+            return Ok(());
+        }
+        let client = &args[0];
+        let mut dry_run = false;
+        let mut json = false;
+        let mut offline = false;
+        let mut file = None;
+        let mut seen = std::collections::BTreeSet::new();
+        let mut index = 1;
+        while index < args.len() {
+            let flag = args[index].as_str();
+            if !seen.insert(flag) {
+                return Err("Repeated connection option.".into());
+            }
+            match flag {
+                "--dry-run" => dry_run = true,
+                "--json" => json = true,
+                "--offline" => offline = true,
+                "--config-file" => {
+                    index += 1;
+                    file = Some(std::path::PathBuf::from(
+                        args.get(index).ok_or("Missing config path.")?,
+                    ));
+                }
+                _ => return Err("Unknown connection option.".into()),
+            }
+            index += 1;
+        }
+        let home = std::env::var_os(if cfg!(windows) { "USERPROFILE" } else { "HOME" })
+            .map(std::path::PathBuf::from)
+            .ok_or(switchbite::connect::ConnectError::Environment)?;
+        let configuration = match file {
+            Some(path) if path.is_absolute() => path,
+            Some(path) => std::env::current_dir()?.join(path),
+            None => switchbite::connect::config_path(client, &home)?,
+        };
+        let data = std::env::var_os(if cfg!(windows) {
+            "LOCALAPPDATA"
+        } else {
+            "XDG_DATA_HOME"
+        })
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| home.join(".local/share"));
+        if !data.is_absolute() {
+            return Err(switchbite::connect::ConnectError::Environment.into());
+        }
+        let source = std::env::current_exe()?;
+        let executable = switchbite::connect::managed_executable(&source, &data, true)?;
+        // Validate the effective configuration before making even a binary copy.
+        switchbite::connect::connect_to(client, &configuration, &executable, offline, true)?;
+        if !dry_run {
+            switchbite::connect::managed_executable(&source, &data, false)?;
+        }
+        let report =
+            switchbite::connect::connect_to(client, &configuration, &executable, offline, dry_run)?;
+        if json {
+            println!("{}", serde_json::to_string(&report)?);
+        } else {
+            println!(
+                "Switchbite → {client}: {}.\nConfiguration: {}",
+                report.status,
+                report.configuration.display()
+            );
+            if dry_run {
+                println!("Preview only. Run without --dry-run to connect.");
+            } else {
+                println!(
+                    "Open a new {client} session. Approve Switchbite once if the client asks.\nRouting instructions load automatically; judge selection and credentials are unchanged."
+                );
+            }
+        }
+        return Ok(());
+    }
     if args.first().is_some_and(|s| s == "config") {
         print!("{}", config(args)?);
         return Ok(());
@@ -186,7 +268,7 @@ fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     if args == ["--help"] || args == ["-h"] {
         println!(
-            "Switchbite — the decision layer for your agents\nStart: setup --client NAME [--offline]\nRecommended MCP: serve --profile agent [--offline]\nAdvanced server options: --max-concurrent N --max-queued N --queue-timeout-ms N --decision-timeout-ms N\nroute | snapshot | evaluate --request-file FILE\nguide | doctor | config --client NAME [--executable ABS] [--offline]\nCompatibility: no args = docking API1; serve --profile cli = original typed tools; invoke OP --request-file FILE"
+            "Switchbite — the decision layer for your agents\nConnect once: switchbite codex | claude | cursor | grok | antigravity | opencode\nConnection options: --dry-run --json --offline --config-file FILE\nCopies a stable executable and merges user-level MCP settings; judge choice stays separate.\nPrint-only setup: setup --client NAME [--offline]\nRecommended MCP: serve --profile agent [--offline]\nAdvanced server options: --max-concurrent N --max-queued N --queue-timeout-ms N --decision-timeout-ms N\nroute | snapshot | evaluate --request-file FILE\nguide | doctor | config --client NAME [--executable ABS] [--offline]\nCompatibility: no args = docking API1; serve --profile cli = original typed tools; invoke OP --request-file FILE"
         );
         return;
     }
@@ -256,6 +338,8 @@ fn main() {
             eprintln!("{domain}");
         } else if let Some(config) = error.downcast_ref::<switchbite::connection::ConfigError>() {
             eprintln!("{config}");
+        } else if let Some(connect) = error.downcast_ref::<switchbite::connect::ConnectError>() {
+            eprintln!("{connect}");
         } else if args
             .first()
             .is_some_and(|a| a != "invoke" && a != "describe")

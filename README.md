@@ -6,7 +6,7 @@ A Rust library and native MCP server that recommends a target from your worker/m
 pool. Give it a task and factual pool; get a clear next action, recommendation or
 hold. Your host owns authorization, reservations, execution and receipts.
 
-**v0.4.0 public preview · Windows x64 · MIT · No Python runtime.**
+**v0.5.0 public preview · Windows x64 · MIT · No Python runtime.**
 
 [한국어 사용 안내](https://github.com/BiteFoundry/switchbite/blob/main/docs/agent-experience.ko.md)
 · [Coordinator guide](https://github.com/BiteFoundry/switchbite/blob/main/docs/coordinator.md)
@@ -17,14 +17,33 @@ hold. Your host owns authorization, reservations, execution and receipts.
 
 Download the ZIP and SHA256SUMS from [Releases](https://github.com/BiteFoundry/switchbite/releases), verify and extract.
 
-    .\bin\switchbite.exe setup --client claude
-    .\bin\switchbite.exe setup --client codex
+    .\bin\switchbite.exe codex
 
-Merge the printed MCP configuration into your client's effective settings, then
-restart and approve the server if prompted. Setup prints configuration and next
-steps; it does not modify settings. The config command prints only the snippet.
-Renderers support Claude Code, Codex, Cursor, Grok, Antigravity, OpenCode 2 and a
-generic MCP client. Use --executable ABSOLUTE_PATH for another install location.
+Or use `switchbite claude`, `switchbite cursor`, `switchbite grok`,
+`switchbite antigravity` or `switchbite opencode` when the binary is on PATH.
+Each command connects that client for the current user. Open a new client session
+and approve Switchbite once if the client asks. Routing instructions then load
+automatically. You do not need to edit project instruction files.
+
+The command keeps a content-addressed executable under
+`%LOCALAPPDATA%\Switchbite\bin`, so moving the extracted ZIP does not break MCP.
+It merges only Switchbite's server settings, preserves other servers/settings and
+comments, and saves an exact adjacent `.switchbite-*.bak` before an update.
+Repeat the command safely to reconnect or upgrade. Existing managed entries keep
+custom fields and explicit credentials; a different server using the same name
+is a conflict rather than an overwrite. No PATH or shell-profile changes occur.
+
+`--dry-run` previews the destination without writes; `--json` returns a short
+machine-readable result. `--config-file FILE` selects an effective settings file
+explicitly. Client policies and project overrides still apply. OpenCode 2 inline
+configuration/directory overrides need explicit source selection, so setup refuses
+to claim a connection by writing a shadowed global file.
+
+Judge selection and credentials are separate: connection does not select or
+change a judge, save key values, discover accounts or expand the worker pool.
+See [connection behavior and config locations](docs/connection.md).
+For a generic host or manual integration, `setup --client NAME` remains print-only;
+`config --client NAME [--executable ABSOLUTE_PATH]` prints only the MCP snippet.
 
 The recommended agent profile supplies coordinator instructions automatically and
 exposes only four tools:
@@ -116,7 +135,7 @@ release builds use 1.99.1 and CI checks the minimum compiler separately.
     cargo test --locked
     cargo clippy --all-targets --locked -- -D warnings
     cargo build --release --locked
-    cargo run --release --locked --bin package-plugin -- --binary target/release/switchbite.exe --output dist/switchbite-0.4.0-windows-x64.zip
+    cargo run --release --locked --bin package-plugin -- --binary target/release/switchbite.exe --output dist/switchbite-0.5.0-windows-x64.zip
 
 The deterministic schema-2 ZIP verifies its executable and includes schemas,
 guides, examples, MIT license and dependency/Rust library notices. It is MCP

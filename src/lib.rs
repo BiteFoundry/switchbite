@@ -1,5 +1,6 @@
 //! Portable docking API 1. Results are data proposals; hosts own execution.
 pub mod cli_tools;
+pub mod connect;
 pub mod connection;
 pub mod contracts;
 pub mod core;
