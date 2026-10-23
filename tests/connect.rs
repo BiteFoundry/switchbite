@@ -140,6 +140,12 @@ fn immutable_managed_copy_survives_source_removal_and_verifies_existing_bytes() 
     assert!(!data.exists());
     let installed = connect::managed_executable(&source, &data, false).unwrap();
     assert_eq!(installed, preview);
+    fs::write(&source, b"updated binary").unwrap();
+    let replacement = connect::managed_executable(&source, &data, false).unwrap();
+    assert_ne!(replacement, preview);
+    assert_eq!(fs::read(&replacement).unwrap(), b"updated binary");
+    assert_eq!(fs::read(&installed).unwrap(), b"synthetic binary");
+    fs::write(&source, b"synthetic binary").unwrap();
     assert_eq!(
         connect::managed_executable(&source, &data, false).unwrap(),
         installed
@@ -152,6 +158,29 @@ fn immutable_managed_copy_survives_source_removal_and_verifies_existing_bytes() 
     fs::write(&installed, b"synthetic binary").unwrap();
     fs::remove_file(source).unwrap();
     assert_eq!(fs::read(installed).unwrap(), b"synthetic binary");
+}
+
+#[test]
+#[cfg(windows)]
+fn replacement_failure_keeps_original_and_cleans_stage_and_lock() {
+    let dir = tempdir().unwrap();
+    let config = dir.path().join("config.json");
+    let original = b"{\"other\":true}";
+    fs::write(&config, original).unwrap();
+    let original_permissions = fs::metadata(&config).unwrap().permissions();
+    let mut readonly = original_permissions.clone();
+    readonly.set_readonly(true);
+    fs::set_permissions(&config, readonly).unwrap();
+    let result = connect::connect_to("cursor", &config, &executable(), false, false);
+    // Restore the attribute so tempfile can remove its own fixture.
+    fs::set_permissions(&config, original_permissions).unwrap();
+    assert!(result.is_err());
+    assert_eq!(fs::read(config).unwrap(), original);
+    for entry in fs::read_dir(dir.path()).unwrap() {
+        let name = entry.unwrap().file_name().to_string_lossy().into_owned();
+        assert!(!name.ends_with(".tmp"));
+        assert!(!name.ends_with(".switchbite-lock"));
+    }
 }
 
 #[test]

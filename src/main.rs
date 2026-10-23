@@ -181,11 +181,13 @@ fn cli(args: &[String]) -> Result<(), Box<dyn std::error::Error + Send + Sync>> 
             return Err(switchbite::connect::ConnectError::Environment.into());
         }
         let source = std::env::current_exe()?;
-        let executable = switchbite::connect::managed_executable(&source, &data, true)?;
+        let mut executable = switchbite::connect::managed_executable(&source, &data, true)?;
         // Validate the effective configuration before making even a binary copy.
         switchbite::connect::connect_to(client, &configuration, &executable, offline, true)?;
         if !dry_run {
-            switchbite::connect::managed_executable(&source, &data, false)?;
+            // An updater may have replaced the source since the preview read.
+            // Register the copy actually installed, rather than the preview hash.
+            executable = switchbite::connect::managed_executable(&source, &data, false)?;
         }
         let report =
             switchbite::connect::connect_to(client, &configuration, &executable, offline, dry_run)?;
