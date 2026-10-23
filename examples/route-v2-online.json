@@ -1,0 +1,14 @@
+{
+  "task": {
+    "id": "fix:42",
+    "objective": "Fix the parser bug and run its focused Rust tests."
+  },
+  "pool": [
+    {
+      "id": "rust-worker",
+      "description": "Implements Rust changes and runs local Rust tests.",
+      "capabilities": ["rust", "test"],
+      "available": true
+    }
+  ]
+}
