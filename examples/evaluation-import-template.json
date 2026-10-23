@@ -1,0 +1,8 @@
+{
+  "kind": "synthetic",
+  "cases": [
+    {"id":"local:replace-with-task-id", "task_type":"quick", "sample":"local", "acceptable_candidate_ids":["replace-with-candidate-id"], "expected_hold":false, "baseline_candidates":{}}
+  ],
+  "decisions": [],
+  "observations": []
+}

@@ -1,0 +1,28 @@
+{
+  "kind": "synthetic",
+  "cases": [
+    {"id":"bootstrap:implementation", "task_type":"implementation", "sample":"bootstrap", "acceptable_candidate_ids":["rust-worker"], "expected_hold":false, "baseline_candidates":{"manual":"generalist", "strongest":"premium"}},
+    {"id":"bootstrap:review", "task_type":"review", "sample":"bootstrap", "acceptable_candidate_ids":["reviewer","premium"], "expected_hold":false, "baseline_candidates":{"manual":"reviewer", "strongest":"premium"}},
+    {"id":"local:mockup", "task_type":"mockup", "sample":"local", "acceptable_candidate_ids":["designer"], "expected_hold":false, "baseline_candidates":{"manual":"generalist", "strongest":"premium"}},
+    {"id":"local:quick", "task_type":"quick", "sample":"local", "acceptable_candidate_ids":["small-worker"], "expected_hold":false, "baseline_candidates":{"manual":"generalist", "strongest":"premium"}},
+    {"id":"bootstrap:hold", "task_type":"implementation", "sample":"bootstrap", "acceptable_candidate_ids":[], "expected_hold":true, "baseline_candidates":{}}
+  ],
+  "decisions": [
+    {"case_id":"bootstrap:implementation", "status":"ready", "candidate_id":"rust-worker", "duration_ms":1200, "quota_units":3, "rework_count":0, "policy_id":"fixture-policy-v1", "reason":"Synthetic recorded implementation route"},
+    {"case_id":"bootstrap:review", "status":"ready", "candidate_id":"reviewer", "policy_id":"fixture-policy-v1"},
+    {"case_id":"local:mockup", "status":"ready", "candidate_id":"designer", "policy_id":"fixture-policy-v1"},
+    {"case_id":"local:quick", "status":"ready", "candidate_id":"small-worker", "duration_ms":100, "quota_units":0, "policy_id":"fixture-policy-v1"},
+    {"case_id":"bootstrap:hold", "status":"hold", "policy_id":"fixture-policy-v1", "reason":"Synthetic missing-capability hold"}
+  ],
+  "observations": [
+    {"case_id":"bootstrap:implementation", "candidate_id":"rust-worker", "outcome":"passed", "duration_ms":1200, "quota_units":3, "rework_count":0},
+    {"case_id":"bootstrap:implementation", "candidate_id":"generalist", "outcome":"failed", "duration_ms":1800, "quota_units":2, "rework_count":1},
+    {"case_id":"bootstrap:implementation", "candidate_id":"premium", "outcome":"passed", "duration_ms":1400, "quota_units":8, "rework_count":0},
+    {"case_id":"bootstrap:review", "candidate_id":"reviewer", "outcome":"passed", "duration_ms":800, "quota_units":2, "rework_count":0},
+    {"case_id":"bootstrap:review", "candidate_id":"premium", "outcome":"passed", "duration_ms":900, "quota_units":7, "rework_count":0},
+    {"case_id":"local:mockup", "candidate_id":"designer", "outcome":"failed", "duration_ms":2000, "quota_units":4, "rework_count":2},
+    {"case_id":"local:mockup", "candidate_id":"generalist", "outcome":"passed", "duration_ms":1500, "quota_units":3, "rework_count":0},
+    {"case_id":"local:mockup", "candidate_id":"premium", "outcome":"passed", "duration_ms":1700, "quota_units":9, "rework_count":0},
+    {"case_id":"local:quick", "candidate_id":"premium", "outcome":"passed", "duration_ms":600, "quota_units":5}
+  ]
+}
