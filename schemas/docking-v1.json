@@ -1,0 +1,1560 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:switchbite:docking-v1",
+  "title": "Switchbite docking v1",
+  "description": "All results are proposals. Host owns submit/observe receipts. JSON is additionally bounded to 65536 UTF-8 bytes, depth 12, 8192 values, finite numbers, signed 64-bit integers. Task requirements match candidate capability strings exactly. model.judge is optional: injected judge or precomputed judgment; no judgment yields a refusal. No native execution capability.",
+  "$defs": {
+    "describe": {
+      "type": "object",
+      "properties": {
+        "version": {
+          "type": "integer",
+          "const": 1
+        },
+        "plugin_id": {
+          "type": "string",
+          "const": "switchbite"
+        },
+        "operations": {
+          "type": "object"
+        }
+      },
+      "required": [
+        "version",
+        "plugin_id",
+        "operations"
+      ],
+      "additionalProperties": false
+    },
+    "decide_input": {
+      "type": "object",
+      "properties": {
+        "version": {
+          "type": "integer",
+          "const": 1
+        },
+        "task": {
+          "type": "object",
+          "properties": {
+            "id": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128
+            },
+            "objective": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 24000
+            },
+            "requirements": {
+              "type": "array",
+              "items": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 128
+              },
+              "minItems": 0,
+              "maxItems": 64,
+              "uniqueItems": true
+            },
+            "context_refs": {
+              "type": "array",
+              "items": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 1000
+              },
+              "minItems": 0,
+              "maxItems": 64,
+              "uniqueItems": true
+            },
+            "extensions": {
+              "type": "object",
+              "maxProperties": 128
+            }
+          },
+          "required": [
+            "id",
+            "objective",
+            "requirements",
+            "context_refs",
+            "extensions"
+          ],
+          "additionalProperties": false
+        },
+        "candidates": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "id": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 128
+              },
+              "description": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 2000
+              },
+              "capabilities": {
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 128
+                },
+                "minItems": 0,
+                "maxItems": 64,
+                "uniqueItems": true
+              },
+              "available": {
+                "type": "boolean"
+              },
+              "extensions": {
+                "type": "object",
+                "maxProperties": 128
+              }
+            },
+            "required": [
+              "id",
+              "description",
+              "capabilities",
+              "available",
+              "extensions"
+            ],
+            "additionalProperties": false
+          },
+          "minItems": 0,
+          "maxItems": 16
+        },
+        "preferences": {
+          "type": "string",
+          "minLength": 0,
+          "maxLength": 8000
+        },
+        "judgment": {
+          "type": "object",
+          "properties": {
+            "model": {
+              "type": "string",
+              "const": "jev-1.14.0"
+            },
+            "answers": {
+              "type": "object",
+              "properties": {
+                "context_sufficient": {
+                  "type": "object",
+                  "properties": {
+                    "type": {
+                      "type": "string",
+                      "const": "noul"
+                    },
+                    "noul": {
+                      "type": "number",
+                      "minimum": 0,
+                      "maximum": 1
+                    }
+                  },
+                  "required": [
+                    "type",
+                    "noul"
+                  ],
+                  "additionalProperties": false
+                }
+              },
+              "required": [
+                "context_sufficient"
+              ],
+              "additionalProperties": false,
+              "patternProperties": {
+                "^fit_c[0-9a-f]{64}$": {
+                  "type": "object",
+                  "properties": {
+                    "type": {
+                      "type": "string",
+                      "const": "score"
+                    },
+                    "score": {
+                      "type": "number",
+                      "minimum": 0,
+                      "maximum": 3
+                    },
+                    "confidence": {
+                      "type": "number",
+                      "minimum": 0,
+                      "maximum": 1
+                    },
+                    "probabilities": {
+                      "type": "object",
+                      "properties": {
+                        "0": {
+                          "type": "number",
+                          "minimum": 0,
+                          "maximum": 1
+                        },
+                        "1": {
+                          "type": "number",
+                          "minimum": 0,
+                          "maximum": 1
+                        },
+                        "2": {
+                          "type": "number",
+                          "minimum": 0,
+                          "maximum": 1
+                        },
+                        "3": {
+                          "type": "number",
+                          "minimum": 0,
+                          "maximum": 1
+                        }
+                      },
+                      "required": [
+                        "0",
+                        "1",
+                        "2",
+                        "3"
+                      ],
+                      "additionalProperties": false
+                    },
+                    "legend": {
+                      "type": "object",
+                      "properties": {
+                        "0": {
+                          "type": "string",
+                          "minLength": 1,
+                          "maxLength": 1000
+                        },
+                        "1": {
+                          "type": "string",
+                          "minLength": 1,
+                          "maxLength": 1000
+                        },
+                        "2": {
+                          "type": "string",
+                          "minLength": 1,
+                          "maxLength": 1000
+                        },
+                        "3": {
+                          "type": "string",
+                          "minLength": 1,
+                          "maxLength": 1000
+                        }
+                      },
+                      "required": [
+                        "0",
+                        "1",
+                        "2",
+                        "3"
+                      ],
+                      "additionalProperties": false
+                    }
+                  },
+                  "required": [
+                    "type",
+                    "score",
+                    "confidence",
+                    "probabilities"
+                  ],
+                  "additionalProperties": false
+                },
+                "^preference_c[0-9a-f]{64}$": {
+                  "type": "object",
+                  "properties": {
+                    "type": {
+                      "type": "string",
+                      "const": "score"
+                    },
+                    "score": {
+                      "type": "number",
+                      "minimum": 0,
+                      "maximum": 2
+                    },
+                    "confidence": {
+                      "type": "number",
+                      "minimum": 0,
+                      "maximum": 1
+                    },
+                    "probabilities": {
+                      "type": "object",
+                      "properties": {
+                        "0": {
+                          "type": "number",
+                          "minimum": 0,
+                          "maximum": 1
+                        },
+                        "1": {
+                          "type": "number",
+                          "minimum": 0,
+                          "maximum": 1
+                        },
+                        "2": {
+                          "type": "number",
+                          "minimum": 0,
+                          "maximum": 1
+                        }
+                      },
+                      "required": [
+                        "0",
+                        "1",
+                        "2"
+                      ],
+                      "additionalProperties": false
+                    },
+                    "legend": {
+                      "type": "object",
+                      "properties": {
+                        "0": {
+                          "type": "string",
+                          "minLength": 1,
+                          "maxLength": 1000
+                        },
+                        "1": {
+                          "type": "string",
+                          "minLength": 1,
+                          "maxLength": 1000
+                        },
+                        "2": {
+                          "type": "string",
+                          "minLength": 1,
+                          "maxLength": 1000
+                        }
+                      },
+                      "required": [
+                        "0",
+                        "1",
+                        "2"
+                      ],
+                      "additionalProperties": false
+                    }
+                  },
+                  "required": [
+                    "type",
+                    "score",
+                    "confidence",
+                    "probabilities"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            },
+            "usage": {
+              "type": "object",
+              "properties": {
+                "input_tokens": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "output_tokens": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "total_tokens": {
+                  "type": "integer",
+                  "minimum": 0
+                }
+              },
+              "required": [],
+              "additionalProperties": false
+            }
+          },
+          "required": [
+            "model",
+            "answers"
+          ],
+          "additionalProperties": false
+        },
+        "extensions": {
+          "type": "object",
+          "maxProperties": 128
+        }
+      },
+      "required": [
+        "version",
+        "task",
+        "candidates",
+        "preferences"
+      ],
+      "additionalProperties": false
+    },
+    "decide_output": {
+      "type": "object",
+      "properties": {
+        "version": {
+          "type": "integer",
+          "const": 1
+        },
+        "kind": {
+          "type": "string",
+          "const": "proposal"
+        },
+        "operation": {
+          "type": "string",
+          "const": "decide"
+        },
+        "ready": {
+          "type": "boolean"
+        },
+        "candidate_id": {
+          "anyOf": [
+            {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "proposals": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "type": {
+                "const": "assign",
+                "type": "string"
+              },
+              "task_id": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 128
+              },
+              "candidate_id": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 128
+              }
+            },
+            "required": [
+              "type",
+              "task_id",
+              "candidate_id"
+            ],
+            "additionalProperties": false
+          },
+          "minItems": 0,
+          "maxItems": 1
+        },
+        "hold_reasons": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 64
+          },
+          "minItems": 0,
+          "maxItems": 64
+        },
+        "next_actions": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 256
+          },
+          "minItems": 0,
+          "maxItems": 64
+        },
+        "confidence": {
+          "anyOf": [
+            {
+              "type": "number",
+              "minimum": 0,
+              "maximum": 1
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "calibrated_correctness": {
+          "type": "null"
+        },
+        "scores": {
+          "type": "object",
+          "properties": {
+            "context_sufficient": {
+              "anyOf": [
+                {
+                  "type": "number",
+                  "minimum": 0,
+                  "maximum": 1
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "candidates": {
+              "type": "object",
+              "additionalProperties": {
+                "type": "object",
+                "properties": {
+                  "fit": {
+                    "type": "number",
+                    "minimum": 0,
+                    "maximum": 1
+                  },
+                  "fit_confidence": {
+                    "type": "number",
+                    "minimum": 0,
+                    "maximum": 1
+                  },
+                  "preference": {
+                    "type": "number",
+                    "minimum": 0,
+                    "maximum": 1
+                  },
+                  "preference_confidence": {
+                    "type": "number",
+                    "minimum": 0,
+                    "maximum": 1
+                  },
+                  "composite": {
+                    "type": "number",
+                    "minimum": 0,
+                    "maximum": 1
+                  }
+                },
+                "required": [
+                  "fit",
+                  "fit_confidence",
+                  "preference",
+                  "preference_confidence",
+                  "composite"
+                ],
+                "additionalProperties": false
+              },
+              "maxProperties": 16
+            },
+            "order": {
+              "type": "array",
+              "items": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 128
+              },
+              "minItems": 0,
+              "maxItems": 16
+            },
+            "eligible": {
+              "type": "array",
+              "items": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 128
+              },
+              "minItems": 0,
+              "maxItems": 16
+            },
+            "tied": {
+              "type": "array",
+              "items": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 128
+              },
+              "minItems": 0,
+              "maxItems": 16
+            },
+            "recommended": {
+              "anyOf": [
+                {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 128
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "confidence_kind": {
+              "const": "typesafe_score_concentration",
+              "type": "string"
+            },
+            "model": {
+              "const": "jev-1.14.0",
+              "type": "string"
+            },
+            "request_sha256": {
+              "anyOf": [
+                {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 64
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          },
+          "required": [
+            "context_sufficient",
+            "candidates",
+            "order",
+            "eligible",
+            "tied",
+            "recommended",
+            "confidence_kind",
+            "model",
+            "request_sha256"
+          ],
+          "additionalProperties": false
+        },
+        "excluded": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "candidate_id": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 128
+              },
+              "reasons": {
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 64
+                },
+                "minItems": 0,
+                "maxItems": 64
+              }
+            },
+            "required": [
+              "candidate_id",
+              "reasons"
+            ],
+            "additionalProperties": false
+          },
+          "minItems": 0,
+          "maxItems": 16
+        }
+      },
+      "required": [
+        "version",
+        "kind",
+        "operation",
+        "ready",
+        "candidate_id",
+        "proposals",
+        "hold_reasons",
+        "next_actions",
+        "confidence",
+        "calibrated_correctness",
+        "scores",
+        "excluded"
+      ],
+      "additionalProperties": false
+    },
+    "validate_plan_input": {
+      "type": "object",
+      "properties": {
+        "version": {
+          "type": "integer",
+          "const": 1
+        },
+        "nodes": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "id": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 128
+              },
+              "objective": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 24000
+              },
+              "depends_on": {
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 128
+                },
+                "minItems": 0,
+                "maxItems": 64,
+                "uniqueItems": true
+              },
+              "requirements": {
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 128
+                },
+                "minItems": 0,
+                "maxItems": 64,
+                "uniqueItems": true
+              },
+              "acceptance": {
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 1000
+                },
+                "minItems": 1,
+                "maxItems": 64
+              },
+              "outputs": {
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 1000
+                },
+                "minItems": 0,
+                "maxItems": 64,
+                "uniqueItems": true
+              }
+            },
+            "required": [
+              "id",
+              "objective",
+              "depends_on",
+              "requirements",
+              "acceptance",
+              "outputs"
+            ],
+            "additionalProperties": false
+          },
+          "minItems": 1,
+          "maxItems": 64
+        },
+        "extensions": {
+          "type": "object",
+          "maxProperties": 128
+        }
+      },
+      "required": [
+        "version",
+        "nodes"
+      ],
+      "additionalProperties": false
+    },
+    "validate_plan_output": {
+      "type": "object",
+      "properties": {
+        "version": {
+          "type": "integer",
+          "const": 1
+        },
+        "kind": {
+          "type": "string",
+          "const": "proposal"
+        },
+        "operation": {
+          "type": "string",
+          "const": "validate_plan"
+        },
+        "valid": {
+          "type": "boolean"
+        },
+        "issues": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 64
+          },
+          "minItems": 0,
+          "maxItems": 64,
+          "uniqueItems": true
+        },
+        "topological_order": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128
+          },
+          "minItems": 0,
+          "maxItems": 64
+        },
+        "proposals": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "type": {
+                "type": "string",
+                "const": "plan"
+              },
+              "nodes": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "id": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 128
+                    },
+                    "objective": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 24000
+                    },
+                    "depends_on": {
+                      "type": "array",
+                      "items": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 128
+                      },
+                      "minItems": 0,
+                      "maxItems": 64,
+                      "uniqueItems": true
+                    },
+                    "requirements": {
+                      "type": "array",
+                      "items": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 128
+                      },
+                      "minItems": 0,
+                      "maxItems": 64,
+                      "uniqueItems": true
+                    },
+                    "acceptance": {
+                      "type": "array",
+                      "items": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 1000
+                      },
+                      "minItems": 1,
+                      "maxItems": 64
+                    },
+                    "outputs": {
+                      "type": "array",
+                      "items": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 1000
+                      },
+                      "minItems": 0,
+                      "maxItems": 64,
+                      "uniqueItems": true
+                    }
+                  },
+                  "required": [
+                    "id",
+                    "objective",
+                    "depends_on",
+                    "requirements",
+                    "acceptance",
+                    "outputs"
+                  ],
+                  "additionalProperties": false
+                },
+                "minItems": 1,
+                "maxItems": 64
+              }
+            },
+            "required": [
+              "type",
+              "nodes"
+            ],
+            "additionalProperties": false
+          },
+          "minItems": 0,
+          "maxItems": 1
+        }
+      },
+      "required": [
+        "version",
+        "kind",
+        "operation",
+        "valid",
+        "issues",
+        "topological_order",
+        "proposals"
+      ],
+      "additionalProperties": false
+    },
+    "feedback_input": {
+      "type": "object",
+      "properties": {
+        "version": {
+          "type": "integer",
+          "const": 1
+        },
+        "task_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "candidate_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "outcome": {
+          "type": "string",
+          "enum": [
+            "succeeded",
+            "failed",
+            "cancelled"
+          ]
+        },
+        "evidence": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 1000
+          },
+          "minItems": 1,
+          "maxItems": 64,
+          "uniqueItems": true
+        },
+        "extensions": {
+          "type": "object",
+          "maxProperties": 128
+        }
+      },
+      "required": [
+        "version",
+        "task_id",
+        "candidate_id",
+        "outcome",
+        "evidence"
+      ],
+      "additionalProperties": false
+    },
+    "feedback_output": {
+      "type": "object",
+      "properties": {
+        "version": {
+          "type": "integer",
+          "const": 1
+        },
+        "kind": {
+          "type": "string",
+          "const": "proposal"
+        },
+        "operation": {
+          "type": "string",
+          "const": "feedback"
+        },
+        "event": {
+          "type": "object",
+          "properties": {
+            "version": {
+              "type": "integer",
+              "const": 1
+            },
+            "type": {
+              "type": "string",
+              "const": "feedback"
+            },
+            "task_id": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128
+            },
+            "candidate_id": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128
+            },
+            "outcome": {
+              "type": "string",
+              "enum": [
+                "succeeded",
+                "failed",
+                "cancelled"
+              ]
+            },
+            "evidence": {
+              "type": "array",
+              "items": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 1000
+              },
+              "minItems": 1,
+              "maxItems": 64,
+              "uniqueItems": true
+            },
+            "extensions": {
+              "type": "object",
+              "maxProperties": 128
+            }
+          },
+          "required": [
+            "version",
+            "type",
+            "task_id",
+            "candidate_id",
+            "outcome",
+            "evidence",
+            "extensions"
+          ],
+          "additionalProperties": false
+        },
+        "proposals": {
+          "type": "array",
+          "items": {},
+          "minItems": 0,
+          "maxItems": 0
+        }
+      },
+      "required": [
+        "version",
+        "kind",
+        "operation",
+        "event",
+        "proposals"
+      ],
+      "additionalProperties": false
+    }
+  },
+  "oneOf": [
+    {
+      "type": "object",
+      "properties": {
+        "operation": {
+          "type": "string",
+          "const": "decide"
+        },
+        "request": {
+          "type": "object",
+          "properties": {
+            "version": {
+              "type": "integer",
+              "const": 1
+            },
+            "task": {
+              "type": "object",
+              "properties": {
+                "id": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 128
+                },
+                "objective": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 24000
+                },
+                "requirements": {
+                  "type": "array",
+                  "items": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 128
+                  },
+                  "minItems": 0,
+                  "maxItems": 64,
+                  "uniqueItems": true
+                },
+                "context_refs": {
+                  "type": "array",
+                  "items": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 1000
+                  },
+                  "minItems": 0,
+                  "maxItems": 64,
+                  "uniqueItems": true
+                },
+                "extensions": {
+                  "type": "object",
+                  "maxProperties": 128
+                }
+              },
+              "required": [
+                "id",
+                "objective",
+                "requirements",
+                "context_refs",
+                "extensions"
+              ],
+              "additionalProperties": false
+            },
+            "candidates": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "id": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 128
+                  },
+                  "description": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 2000
+                  },
+                  "capabilities": {
+                    "type": "array",
+                    "items": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 128
+                    },
+                    "minItems": 0,
+                    "maxItems": 64,
+                    "uniqueItems": true
+                  },
+                  "available": {
+                    "type": "boolean"
+                  },
+                  "extensions": {
+                    "type": "object",
+                    "maxProperties": 128
+                  }
+                },
+                "required": [
+                  "id",
+                  "description",
+                  "capabilities",
+                  "available",
+                  "extensions"
+                ],
+                "additionalProperties": false
+              },
+              "minItems": 0,
+              "maxItems": 16
+            },
+            "preferences": {
+              "type": "string",
+              "minLength": 0,
+              "maxLength": 8000
+            },
+            "judgment": {
+              "type": "object",
+              "properties": {
+                "model": {
+                  "type": "string",
+                  "const": "jev-1.14.0"
+                },
+                "answers": {
+                  "type": "object",
+                  "properties": {
+                    "context_sufficient": {
+                      "type": "object",
+                      "properties": {
+                        "type": {
+                          "type": "string",
+                          "const": "noul"
+                        },
+                        "noul": {
+                          "type": "number",
+                          "minimum": 0,
+                          "maximum": 1
+                        }
+                      },
+                      "required": [
+                        "type",
+                        "noul"
+                      ],
+                      "additionalProperties": false
+                    }
+                  },
+                  "required": [
+                    "context_sufficient"
+                  ],
+                  "additionalProperties": false,
+                  "patternProperties": {
+                    "^fit_c[0-9a-f]{64}$": {
+                      "type": "object",
+                      "properties": {
+                        "type": {
+                          "type": "string",
+                          "const": "score"
+                        },
+                        "score": {
+                          "type": "number",
+                          "minimum": 0,
+                          "maximum": 3
+                        },
+                        "confidence": {
+                          "type": "number",
+                          "minimum": 0,
+                          "maximum": 1
+                        },
+                        "probabilities": {
+                          "type": "object",
+                          "properties": {
+                            "0": {
+                              "type": "number",
+                              "minimum": 0,
+                              "maximum": 1
+                            },
+                            "1": {
+                              "type": "number",
+                              "minimum": 0,
+                              "maximum": 1
+                            },
+                            "2": {
+                              "type": "number",
+                              "minimum": 0,
+                              "maximum": 1
+                            },
+                            "3": {
+                              "type": "number",
+                              "minimum": 0,
+                              "maximum": 1
+                            }
+                          },
+                          "required": [
+                            "0",
+                            "1",
+                            "2",
+                            "3"
+                          ],
+                          "additionalProperties": false
+                        },
+                        "legend": {
+                          "type": "object",
+                          "properties": {
+                            "0": {
+                              "type": "string",
+                              "minLength": 1,
+                              "maxLength": 1000
+                            },
+                            "1": {
+                              "type": "string",
+                              "minLength": 1,
+                              "maxLength": 1000
+                            },
+                            "2": {
+                              "type": "string",
+                              "minLength": 1,
+                              "maxLength": 1000
+                            },
+                            "3": {
+                              "type": "string",
+                              "minLength": 1,
+                              "maxLength": 1000
+                            }
+                          },
+                          "required": [
+                            "0",
+                            "1",
+                            "2",
+                            "3"
+                          ],
+                          "additionalProperties": false
+                        }
+                      },
+                      "required": [
+                        "type",
+                        "score",
+                        "confidence",
+                        "probabilities"
+                      ],
+                      "additionalProperties": false
+                    },
+                    "^preference_c[0-9a-f]{64}$": {
+                      "type": "object",
+                      "properties": {
+                        "type": {
+                          "type": "string",
+                          "const": "score"
+                        },
+                        "score": {
+                          "type": "number",
+                          "minimum": 0,
+                          "maximum": 2
+                        },
+                        "confidence": {
+                          "type": "number",
+                          "minimum": 0,
+                          "maximum": 1
+                        },
+                        "probabilities": {
+                          "type": "object",
+                          "properties": {
+                            "0": {
+                              "type": "number",
+                              "minimum": 0,
+                              "maximum": 1
+                            },
+                            "1": {
+                              "type": "number",
+                              "minimum": 0,
+                              "maximum": 1
+                            },
+                            "2": {
+                              "type": "number",
+                              "minimum": 0,
+                              "maximum": 1
+                            }
+                          },
+                          "required": [
+                            "0",
+                            "1",
+                            "2"
+                          ],
+                          "additionalProperties": false
+                        },
+                        "legend": {
+                          "type": "object",
+                          "properties": {
+                            "0": {
+                              "type": "string",
+                              "minLength": 1,
+                              "maxLength": 1000
+                            },
+                            "1": {
+                              "type": "string",
+                              "minLength": 1,
+                              "maxLength": 1000
+                            },
+                            "2": {
+                              "type": "string",
+                              "minLength": 1,
+                              "maxLength": 1000
+                            }
+                          },
+                          "required": [
+                            "0",
+                            "1",
+                            "2"
+                          ],
+                          "additionalProperties": false
+                        }
+                      },
+                      "required": [
+                        "type",
+                        "score",
+                        "confidence",
+                        "probabilities"
+                      ],
+                      "additionalProperties": false
+                    }
+                  }
+                },
+                "usage": {
+                  "type": "object",
+                  "properties": {
+                    "input_tokens": {
+                      "type": "integer",
+                      "minimum": 0
+                    },
+                    "output_tokens": {
+                      "type": "integer",
+                      "minimum": 0
+                    },
+                    "total_tokens": {
+                      "type": "integer",
+                      "minimum": 0
+                    }
+                  },
+                  "required": [],
+                  "additionalProperties": false
+                }
+              },
+              "required": [
+                "model",
+                "answers"
+              ],
+              "additionalProperties": false
+            },
+            "extensions": {
+              "type": "object",
+              "maxProperties": 128
+            }
+          },
+          "required": [
+            "version",
+            "task",
+            "candidates",
+            "preferences"
+          ],
+          "additionalProperties": false
+        }
+      },
+      "required": [
+        "operation",
+        "request"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "operation": {
+          "type": "string",
+          "const": "validate_plan"
+        },
+        "request": {
+          "type": "object",
+          "properties": {
+            "version": {
+              "type": "integer",
+              "const": 1
+            },
+            "nodes": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "id": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 128
+                  },
+                  "objective": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 24000
+                  },
+                  "depends_on": {
+                    "type": "array",
+                    "items": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 128
+                    },
+                    "minItems": 0,
+                    "maxItems": 64,
+                    "uniqueItems": true
+                  },
+                  "requirements": {
+                    "type": "array",
+                    "items": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 128
+                    },
+                    "minItems": 0,
+                    "maxItems": 64,
+                    "uniqueItems": true
+                  },
+                  "acceptance": {
+                    "type": "array",
+                    "items": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 1000
+                    },
+                    "minItems": 1,
+                    "maxItems": 64
+                  },
+                  "outputs": {
+                    "type": "array",
+                    "items": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 1000
+                    },
+                    "minItems": 0,
+                    "maxItems": 64,
+                    "uniqueItems": true
+                  }
+                },
+                "required": [
+                  "id",
+                  "objective",
+                  "depends_on",
+                  "requirements",
+                  "acceptance",
+                  "outputs"
+                ],
+                "additionalProperties": false
+              },
+              "minItems": 1,
+              "maxItems": 64
+            },
+            "extensions": {
+              "type": "object",
+              "maxProperties": 128
+            }
+          },
+          "required": [
+            "version",
+            "nodes"
+          ],
+          "additionalProperties": false
+        }
+      },
+      "required": [
+        "operation",
+        "request"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "operation": {
+          "type": "string",
+          "const": "feedback"
+        },
+        "request": {
+          "type": "object",
+          "properties": {
+            "version": {
+              "type": "integer",
+              "const": 1
+            },
+            "task_id": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128
+            },
+            "candidate_id": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128
+            },
+            "outcome": {
+              "type": "string",
+              "enum": [
+                "succeeded",
+                "failed",
+                "cancelled"
+              ]
+            },
+            "evidence": {
+              "type": "array",
+              "items": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 1000
+              },
+              "minItems": 1,
+              "maxItems": 64,
+              "uniqueItems": true
+            },
+            "extensions": {
+              "type": "object",
+              "maxProperties": 128
+            }
+          },
+          "required": [
+            "version",
+            "task_id",
+            "candidate_id",
+            "outcome",
+            "evidence"
+          ],
+          "additionalProperties": false
+        }
+      },
+      "required": [
+        "operation",
+        "request"
+      ],
+      "additionalProperties": false
+    }
+  ]
+}

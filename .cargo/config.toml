@@ -1,0 +1,3 @@
+# Make the Windows ZIP independent of a separately installed Visual C++ CRT.
+[target.x86_64-pc-windows-msvc]
+rustflags = ["-C", "target-feature=+crt-static"]

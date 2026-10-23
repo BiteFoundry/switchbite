@@ -1,0 +1,35 @@
+{
+  "version": 1,
+  "nodes": [
+    {
+      "requirements": [
+        "translate"
+      ],
+      "id": "translate",
+      "outputs": [
+        "artifact:translation"
+      ],
+      "acceptance": [
+        "Meaning and tone preserved"
+      ],
+      "objective": "Translate the customer reply.",
+      "depends_on": []
+    },
+    {
+      "requirements": [
+        "review"
+      ],
+      "id": "review",
+      "outputs": [
+        "receipt:review"
+      ],
+      "acceptance": [
+        "Translation approved"
+      ],
+      "objective": "Review the translation.",
+      "depends_on": [
+        "translate"
+      ]
+    }
+  ]
+}

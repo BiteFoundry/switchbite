@@ -1,0 +1,58 @@
+{
+  "version": 1,
+  "task": {
+    "id": "ticket-42",
+    "requirements": [
+      "spanish",
+      "billing"
+    ],
+    "context_refs": [
+      "ticket:42"
+    ],
+    "objective": "Resolve a Spanish-language billing question.",
+    "extensions": {}
+  },
+  "candidates": [
+    {
+      "id": "billing-es",
+      "available": true,
+      "description": "Billing support team fluent in Spanish.",
+      "capabilities": [
+        "spanish",
+        "billing"
+      ],
+      "extensions": {}
+    }
+  ],
+  "preferences": "Assign tickets to a team with the requested language and billing expertise.",
+  "judgment": {
+    "model": "jev-1.14.0",
+    "answers": {
+      "fit_cee72c6500e1f0ee8abb87bc745894d41b291e41cb515131f6ce42aa23ab44654": {
+        "type": "score",
+        "confidence": 1,
+        "score": 3,
+        "probabilities": {
+          "2": 0,
+          "1": 0,
+          "0": 0,
+          "3": 1
+        }
+      },
+      "context_sufficient": {
+        "noul": 0.95,
+        "type": "noul"
+      },
+      "preference_cee72c6500e1f0ee8abb87bc745894d41b291e41cb515131f6ce42aa23ab44654": {
+        "type": "score",
+        "confidence": 1,
+        "score": 2,
+        "probabilities": {
+          "2": 1,
+          "1": 0,
+          "0": 0
+        }
+      }
+    }
+  }
+}

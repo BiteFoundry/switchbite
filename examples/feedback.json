@@ -1,0 +1,9 @@
+{
+  "version": 1,
+  "candidate_id": "billing-es",
+  "evidence": [
+    "receipt:host/42"
+  ],
+  "task_id": "ticket-42",
+  "outcome": "succeeded"
+}

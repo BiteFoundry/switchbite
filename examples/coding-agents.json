@@ -1,0 +1,71 @@
+{
+  "preferences": "User preference: Codex for orchestration and review; Claude for implementation; Antigravity for rapid mockups and writing; Cursor and Grok for balanced general work. OpenCode when explicitly requested for a specific model or custom agent.",
+  "task": {
+    "id": "example:refresh-token",
+    "context_refs": [
+      "example:login-api-spec"
+    ],
+    "requirements": [
+      "code.change"
+    ],
+    "extensions": {},
+    "objective": "Implement refresh token rotation for an existing login API, and add regression coverage for reuse of a revoked token."
+  },
+  "version": 1,
+  "candidates": [
+    {
+      "description": "Best used for orchestration, task decomposition and coordination, planning, and independent review.",
+      "id": "codex",
+      "available": true,
+      "capabilities": [
+        "code.change"
+      ],
+      "extensions": {}
+    },
+    {
+      "description": "Preferred implementation worker for concrete feature implementation, refactoring, and bug fixes.",
+      "id": "claude",
+      "available": true,
+      "capabilities": [
+        "code.change"
+      ],
+      "extensions": {}
+    },
+    {
+      "description": "Preferred for rapid UI mockups and writing.",
+      "id": "antigravity",
+      "available": true,
+      "capabilities": [
+        "code.change"
+      ],
+      "extensions": {}
+    },
+    {
+      "description": "Balanced general-purpose coding, exploration, and debugging.",
+      "id": "cursor",
+      "available": true,
+      "capabilities": [
+        "code.change"
+      ],
+      "extensions": {}
+    },
+    {
+      "description": "Balanced general-purpose investigation, analysis, and coding.",
+      "id": "grok",
+      "available": true,
+      "capabilities": [
+        "code.change"
+      ],
+      "extensions": {}
+    },
+    {
+      "description": "Use when an explicitly selected OpenCode model, local model, or custom agent is required.",
+      "id": "opencode",
+      "available": true,
+      "capabilities": [
+        "code.change"
+      ],
+      "extensions": {}
+    }
+  ]
+}

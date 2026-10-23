@@ -1,0 +1,168 @@
+{
+  "version": 1,
+  "task": {
+    "id": "demo:rust-feature",
+    "extensions": {
+      "pool_snapshot": "demo-snapshot-1"
+    },
+    "context_refs": [
+      "demo:specification"
+    ],
+    "objective": "Implement a small Rust parsing fix and regression tests from the supplied specification.",
+    "requirements": [
+      "code.change"
+    ]
+  },
+  "candidates": [
+    {
+      "id": "pool:codex:review",
+      "extensions": {
+        "target": {
+          "harness": "codex",
+          "model": "host-configured",
+          "profile": "review"
+        }
+      },
+      "description": "Host-configured Codex review profile. Strong in orchestration and independent review; can implement Rust.",
+      "available": true,
+      "capabilities": [
+        "code.change",
+        "code.review"
+      ]
+    },
+    {
+      "id": "pool:codex:general",
+      "extensions": {
+        "target": {
+          "harness": "codex",
+          "model": "host-configured",
+          "profile": "general"
+        }
+      },
+      "description": "A distinct host-configured Codex general profile for routine coding and analysis.",
+      "available": true,
+      "capabilities": [
+        "code.change",
+        "code.review"
+      ]
+    },
+    {
+      "id": "pool:claude:implementation",
+      "extensions": {
+        "target": {
+          "harness": "claude-code",
+          "model": "host-configured",
+          "profile": "implementation"
+        }
+      },
+      "description": "Host-configured Claude implementation profile for Rust feature work and regression fixes.",
+      "available": true,
+      "capabilities": [
+        "code.change"
+      ]
+    },
+    {
+      "id": "pool:claude:busy",
+      "extensions": {
+        "target": {
+          "harness": "claude-code",
+          "model": "host-configured",
+          "profile": "busy-instance"
+        }
+      },
+      "description": "Another implementation worker; the host reports it is occupied.",
+      "available": false,
+      "capabilities": [
+        "code.change"
+      ]
+    },
+    {
+      "id": "pool:antigravity:writing",
+      "extensions": {
+        "target": {
+          "harness": "antigravity",
+          "model": "host-configured",
+          "profile": "writing"
+        }
+      },
+      "description": "Host-configured rapid mockup and writing profile; no code-write authority in this pool.",
+      "available": true,
+      "capabilities": [
+        "text.write"
+      ]
+    }
+  ],
+  "preferences": "Example host policy: prefer Claude for implementation, Codex for orchestration/review, and Antigravity for rapid mockups and writing.",
+  "judgment": {
+    "model": "jev-1.14.0",
+    "answers": {
+      "context_sufficient": {
+        "noul": 1.0,
+        "type": "noul"
+      },
+      "fit_c09f4c2e4bae2851e0cca4f1d0aa09aba9b1cf3eea1c83347d804cffc2835c217": {
+        "type": "score",
+        "probabilities": {
+          "0": 0,
+          "1": 0,
+          "2": 1,
+          "3": 0
+        },
+        "score": 2,
+        "confidence": 1.0
+      },
+      "preference_c09f4c2e4bae2851e0cca4f1d0aa09aba9b1cf3eea1c83347d804cffc2835c217": {
+        "type": "score",
+        "probabilities": {
+          "0": 0,
+          "1": 1,
+          "2": 0
+        },
+        "score": 1,
+        "confidence": 1.0
+      },
+      "fit_cad6af8501f46dbe96bf2178483461607511dc1c795dbaf5a8cfcb55768b840fd": {
+        "type": "score",
+        "probabilities": {
+          "0": 0,
+          "1": 0,
+          "2": 1,
+          "3": 0
+        },
+        "score": 2,
+        "confidence": 1.0
+      },
+      "preference_cad6af8501f46dbe96bf2178483461607511dc1c795dbaf5a8cfcb55768b840fd": {
+        "type": "score",
+        "probabilities": {
+          "0": 0,
+          "1": 1,
+          "2": 0
+        },
+        "score": 1,
+        "confidence": 1.0
+      },
+      "fit_ce16509cf748bc06fc57ca1a563f1655a1a54be0925ff5034d44901684b13aa27": {
+        "type": "score",
+        "probabilities": {
+          "0": 0,
+          "1": 0,
+          "2": 0,
+          "3": 1
+        },
+        "score": 3,
+        "confidence": 1.0
+      },
+      "preference_ce16509cf748bc06fc57ca1a563f1655a1a54be0925ff5034d44901684b13aa27": {
+        "type": "score",
+        "probabilities": {
+          "0": 0,
+          "1": 0,
+          "2": 1
+        },
+        "score": 2,
+        "confidence": 1.0
+      }
+    }
+  }
+}

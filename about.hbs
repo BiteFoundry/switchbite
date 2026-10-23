@@ -1,0 +1,11 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><title>Switchbite dependency notices</title>
+<style>body{max-width:70em;margin:2em auto;font:16px system-ui;padding:0 1em}pre{white-space:pre-wrap}section{border-top:1px solid #aaa;margin-top:2em}</style></head>
+<body><h1>Switchbite dependency notices</h1>
+<p>Generated with cargo-about 0.9.2 from Cargo.lock for x86_64-pc-windows-msvc.
+Runtime and build dependencies are included; development-only dependencies are excluded.
+The Switchbite MIT license is distributed separately. Dependency licenses apply to their respective components.</p>
+{{#each licenses}}<section><h2>{{name}}</h2><ul>
+{{#each used_by}}<li>{{crate.name}} {{crate.version}}{{#if crate.repository}} — <a href="{{crate.repository}}">source</a>{{/if}}</li>{{/each}}
+</ul><pre>{{text}}</pre></section>{{/each}}
+</body></html>
