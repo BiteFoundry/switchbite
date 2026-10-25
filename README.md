@@ -6,22 +6,26 @@ A Rust library and native MCP server that recommends a target from your worker/m
 pool. Give it a task and factual pool; get a clear next action, recommendation or
 hold. Your host owns authorization, reservations, execution and receipts.
 
-**v0.6.0-laya.1 branch preview · Windows x64 · MIT · No Python runtime.**
+**v0.6.0-stackbite.1 branch preview · Windows x64 · MIT · No Python runtime.**
 
-This branch adds local Laya for Stackbite coordinators. Start a local Laya
-server, then install the project-scoped MCP connection:
+This branch connects Stackbite coordinators to Jev 1.14 (default) or an explicitly
+selected local Laya judge. Install the project-scoped MCP connection:
 
 ```powershell
-.\bin\switchbite.exe stackbite --workspace C:\path\to\project --client both --endpoint http://127.0.0.1:11435 --model laya:multilingual
+.\bin\switchbite.exe stackbite --judge jev --workspace C:\path\to\project --client both
 ```
 
 Start a new coordinator CLI in that workspace and approve its project MCP
-configuration when prompted. The host calls `switchbite_route` before dispatch;
-Laya returns a recommendation or hold. Stackbite still owns worker execution.
+configuration when prompted. The coordinator decomposes the project, validates
+its DAG and calls `switchbite_route` for each newly ready task. Jev evaluates the
+task and factual model pool, returning a recommendation or hold. Stackbite still
+owns worker execution. Jev requires `TYPESAFE_API_KEY` in the coordinator environment;
+installation forwards only the variable name/reference, never its value.
 Original Stackbite sources/runtime and global client settings are not modified.
-There is no Jev fallback when local Laya is selected. Read the
-[local Laya installation guide](docs/stackbite-laya.ko.md) for provisioning,
-scope, configuration precedence and verification limits.
+The project server is `switchbite-stackbite`, separate from generic user settings.
+Read the [Stackbite setup and workflow guide](docs/stackbite.ko.md).
+For local Laya use `--judge laya --endpoint http://127.0.0.1:11435 --model laya:multilingual`;
+there is no cloud fallback. See [local provisioning](docs/stackbite-laya.ko.md).
 
 [한국어 사용 안내](https://github.com/BiteFoundry/switchbite/blob/main/docs/agent-experience.ko.md)
 · [Coordinator guide](https://github.com/BiteFoundry/switchbite/blob/main/docs/coordinator.md)

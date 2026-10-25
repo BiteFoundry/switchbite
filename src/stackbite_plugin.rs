@@ -2,7 +2,7 @@
 //!
 //! Stackbite has no native plugin registry. This installs the coordinator CLI's
 //! project MCP settings without modifying Stackbite, global settings or prompts.
-use crate::{connect, local_laya::LayaConfig};
+use crate::{agent, connect, contracts, local_laya::LayaConfig};
 use serde::Serialize;
 use serde_json::{Value, json};
 use std::{
@@ -10,15 +10,53 @@ use std::{
     path::{Path, PathBuf},
 };
 
-const NEXT_ACTION: &str = "Start a new coordinator CLI session in this workspace, approve project trust/MCP when prompted, and verify switchbite tools. Installation alone does not enable automatic planning or worker execution.";
+const NEXT_ACTION: &str = "Start a new coordinator CLI session in this workspace, approve project trust/MCP when prompted, and check switchbite-stackbite's switchbite_status. The coordinator decomposes work, validates dependencies, routes each newly ready task, then dispatches through its authorized host tools. Jev needs TYPESAFE_API_KEY in the coordinator environment; Laya needs its configured local server.";
 const PLUGIN_KIND: &str = "switchbite.stackbite-coordinator-mcp";
+pub const SERVER_NAME: &str = "switchbite-stackbite";
+
+#[derive(Debug, Clone)]
+pub enum JudgeConfig {
+    Jev,
+    Laya { endpoint: String, model: String },
+}
+
+impl JudgeConfig {
+    fn launch(&self) -> Result<(Vec<String>, Value), InstallError> {
+        match self {
+            Self::Jev => Ok((
+                ["serve", "--profile", "agent", "--judge", "jev"]
+                    .map(String::from)
+                    .to_vec(),
+                json!({"kind":"jev", "model":contracts::MODEL, "required_env":["TYPESAFE_API_KEY"], "fallback":"hold"}),
+            )),
+            Self::Laya { endpoint, model } => {
+                LayaConfig::new(endpoint, model).map_err(|_| failure("Invalid local Laya endpoint or model; use an explicit loopback HTTP endpoint and model."))?;
+                Ok((
+                    [
+                        "serve",
+                        "--profile",
+                        "agent",
+                        "--judge",
+                        "laya",
+                        "--endpoint",
+                        endpoint,
+                        "--model",
+                        model,
+                    ]
+                    .map(String::from)
+                    .to_vec(),
+                    json!({"kind":"laya", "endpoint":endpoint, "model":model, "fallback":"hold"}),
+                ))
+            }
+        }
+    }
+}
 
 #[derive(Debug, Clone)]
 pub struct InstallOptions {
     pub workspace: PathBuf,
     pub client: String,
-    pub endpoint: String,
-    pub model: String,
+    pub judge: JudgeConfig,
     pub dry_run: bool,
 }
 
@@ -28,6 +66,8 @@ pub struct InstallReport {
     pub workspace: PathBuf,
     pub integration: &'static str,
     pub executable: PathBuf,
+    pub server: &'static str,
+    pub judge: Value,
     pub clients: Vec<connect::Report>,
     pub descriptor: PathBuf,
     pub descriptor_backup: Option<PathBuf>,
@@ -116,10 +156,9 @@ pub fn install(
     source_executable: &Path,
     managed_root: &Path,
 ) -> Result<InstallReport, InstallError> {
-    // Validate here as well as at the CLI boundary: library callers must not be
-    // able to turn this local integration into a remote credential recipient.
-    LayaConfig::new(&options.endpoint, &options.model)
-        .map_err(|_| failure("Invalid local Laya endpoint or model; use an explicit loopback HTTP endpoint and model."))?;
+    // Validate before touching files, including for direct library callers.
+    let (launch_args, judge) = options.judge.launch()?;
+    let forward_typesafe = matches!(options.judge, JudgeConfig::Jev);
     if !options.workspace.is_absolute()
         || !source_executable.is_absolute()
         || !managed_root.is_absolute()
@@ -150,17 +189,7 @@ pub fn install(
     };
     let executable = connect::managed_executable(source_executable, managed_root, true)
         .map_err(|error| failure(error.to_string()))?;
-    let args = [
-        "serve",
-        "--profile",
-        "agent",
-        "--judge",
-        "laya",
-        "--endpoint",
-        &options.endpoint,
-        "--model",
-        &options.model,
-    ];
+    let args: Vec<&str> = launch_args.iter().map(String::as_str).collect();
     let mut plans = Vec::new();
     for client in clients {
         let path = workspace.join(if *client == "codex" {
@@ -169,8 +198,16 @@ pub fn install(
             ".mcp.json"
         });
         confined(&workspace, &path)?;
-        connect::connect_launch_to(client, &path, &executable, &args, true)
-            .map_err(|error| failure(format!("{client} preflight: {error}")))?;
+        connect::connect_named_launch_to(
+            client,
+            &path,
+            &executable,
+            &args,
+            SERVER_NAME,
+            forward_typesafe,
+            true,
+        )
+        .map_err(|error| failure(format!("{client} preflight: {error}")))?;
         plans.push((*client, path));
     }
     let descriptor = workspace.join(".switchbite/stackbite-plugin.json");
@@ -180,11 +217,11 @@ pub fn install(
         "kind": PLUGIN_KIND,
         "integration": "project_scoped_coordinator_mcp",
         "clients": clients,
-        "server": "switchbite",
+        "server": SERVER_NAME,
         "executable": executable,
         "args": args,
-        "judge": {"kind": "laya", "endpoint": options.endpoint, "model": options.model, "fallback": "hold"},
-        "coordinator_guidance": "Before delegating, present task constraints and the registered worker/model inventory to switchbite_route; use the recommendation only with available worker IDs. A hold requires clarification or inventory/endpoint repair, never a silent Jev fallback. The host remains responsible for worker execution, completion evidence and final user-facing aggregation.",
+        "judge": judge,
+        "coordinator_guidance": agent::INSTRUCTIONS,
         "next_action": NEXT_ACTION
     });
     let text = format!(
@@ -206,7 +243,15 @@ pub fn install(
     }
     let mut configured = Vec::new();
     for (client, path) in plans {
-        match connect::connect_launch_to(client, &path, &executable, &args, options.dry_run) {
+        match connect::connect_named_launch_to(
+            client,
+            &path,
+            &executable,
+            &args,
+            SERVER_NAME,
+            forward_typesafe,
+            options.dry_run,
+        ) {
             Ok(report) => configured.push(report),
             Err(error) => {
                 return Err(InstallError {
@@ -246,6 +291,8 @@ pub fn install(
         workspace,
         integration: "project_scoped_coordinator_mcp",
         executable,
+        server: SERVER_NAME,
+        judge,
         clients: configured,
         descriptor,
         descriptor_backup: saved.backup,

@@ -7,15 +7,16 @@ Switchbite MCP를 등록합니다. Stackbite 자체의 플러그인 레지스트
 
 ## 설치
 
-이 브랜치 버전은 `0.6.0-laya.1`입니다. 원본 main의 Studio 작업과 독립된
-`feature/laya-stackbite-plugin` 작업 트리에서 개발합니다.
+현재 브랜치 버전은 `0.6.0-stackbite.1`입니다. `feature/stackbite-jev-routing`은
+기존 Laya 브랜치를 확장하며 원본 main의 Studio 작업과 독립적입니다. 기본 판단기는
+Jev이므로 로컬 설치 시 `--judge laya`를 명시합니다. 공통 안내는 `stackbite.ko.md`를 보세요.
 
 로컬 Laya 서버를 준비하고 다음을 실행합니다. `--workspace`에는 coordinator를 시작할
 프로젝트의 절대 경로를 지정합니다.
 
 ```powershell
-switchbite stackbite --workspace C:\path\to\project --client both --endpoint http://127.0.0.1:11435 --model laya:multilingual --dry-run --json
-switchbite stackbite --workspace C:\path\to\project --client both --endpoint http://127.0.0.1:11435 --model laya:multilingual --json
+switchbite stackbite --judge laya --workspace C:\path\to\project --client both --endpoint http://127.0.0.1:11435 --model laya:multilingual --dry-run --json
+switchbite stackbite --judge laya --workspace C:\path\to\project --client both --endpoint http://127.0.0.1:11435 --model laya:multilingual --json
 ```
 
 `--client codex`, `--client claude`, `--client both`를 지원합니다. 설치 대상은 다음과 같습니다.
@@ -24,7 +25,7 @@ switchbite stackbite --workspace C:\path\to\project --client both --endpoint htt
 - Claude Code: 프로젝트의 `.mcp.json`
 - 연결 설명과 coordinator 지침: `.switchbite/stackbite-plugin.json`
 
-서버 이름은 `switchbite`이며, 실행 인자는
+서버 이름은 `switchbite-stackbite`이며, 실행 인자는
 `serve --profile agent --judge laya --endpoint ... --model ...`입니다.
 실행 파일은 Switchbite의 콘텐츠 해시 기반 관리 디렉터리에 복사되므로 다운로드 ZIP이나
 원래 실행 파일을 옮겨도 연결이 유지됩니다. PATH와 셸 프로필은 변경하지 않습니다.
@@ -35,11 +36,10 @@ switchbite stackbite --workspace C:\path\to\project --client both --endpoint htt
 환경 전달 항목을 제거합니다. 환경 변수의 실제 값을 읽어 설치 설정에 넣지 않습니다.
 프로세스 환경 상속 자체는 coordinator CLI의 동작을 따릅니다.
 
-설치 성공은 파일 등록을 뜻합니다. 기존 Claude 사용자 범위의 동명 `switchbite`
-서버가 있으면 실제 적용 여부를 별도로 확인해야 합니다. 이번 로컬 검사에서도
-Codex는 프로젝트 Laya 설정을 선택했지만, Claude의 `mcp get switchbite`는 기존
-사용자 설정의 Jev 실행 인자를 보고했습니다. 기존 전역 설정을 자동 변경하지 않습니다.
-새 세션의 MCP 승인·실효 설정을 확인하거나, 해당 세션에 명시적으로
+설치 성공은 파일 등록을 뜻합니다. 초기 `0.6.0-laya.1` 검사에서는 사용자 범위의
+동명 `switchbite` 서버가 선택되는 문제가 있었습니다. 현재는 별도 이름을 사용해
+이 충돌을 피합니다. 기존 전역 설정을 자동 변경하지 않습니다. 새 세션의 MCP
+승인·실효 설정을 확인하거나, 해당 세션에 명시적으로
 `claude --strict-mcp-config --mcp-config C:\path\to\project\.mcp.json`을 지정하세요.
 이 옵션은 해당 세션에서 다른 MCP 설정을 제외하므로 필요한 서버는 같은 파일에 명시합니다.
 

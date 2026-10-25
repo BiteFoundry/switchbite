@@ -348,15 +348,23 @@ fn cli(
     Ok(())
 }
 fn install_stackbite(args: &[String]) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    use switchbite::stackbite_plugin::{self, InstallOptions};
+    use switchbite::stackbite_plugin::{self, InstallOptions, JudgeConfig};
+    if args.len() == 2 && matches!(args[1].as_str(), "--help" | "-h") {
+        println!(
+            "Usage: switchbite stackbite [--workspace ABS] [--client codex|claude|both] [--judge jev|laya] [--endpoint URL --model NAME] [--dry-run] [--json]\nDefault judge: Jev 1.14 (TYPESAFE_API_KEY in the coordinator environment). Endpoint/model options require --judge laya. Installs only project MCP settings as switchbite-stackbite; start a new trusted coordinator session afterward."
+        );
+        return Ok(());
+    }
     let mut options = InstallOptions {
         workspace: std::env::current_dir()?,
         client: "both".into(),
-        endpoint: DEFAULT_ENDPOINT.into(),
-        model: DEFAULT_MODEL.into(),
+        judge: JudgeConfig::Jev,
         dry_run: false,
     };
     let mut json_output = false;
+    let mut selected_judge = "jev";
+    let mut endpoint = None;
+    let mut model = None;
     let mut seen = std::collections::BTreeSet::new();
     let mut i = 1;
     while i < args.len() {
@@ -371,10 +379,10 @@ fn install_stackbite(args: &[String]) -> Result<(), Box<dyn std::error::Error + 
                 match name {
                     "--workspace" => options.workspace = value.into(),
                     "--client" => options.client = value.clone(),
-                    "--endpoint" => options.endpoint = value.clone(),
-                    "--model" => options.model = value.clone(),
-                    "--judge" if value == "laya" => {}
-                    _ => return Err("Stackbite plugin supports explicit local Laya only.".into()),
+                    "--endpoint" => endpoint = Some(value.clone()),
+                    "--model" => model = Some(value.clone()),
+                    "--judge" if matches!(value.as_str(), "jev" | "laya") => selected_judge = value,
+                    _ => return Err("Stackbite judge must be jev or laya.".into()),
                 };
                 i += 1;
             }
@@ -382,6 +390,17 @@ fn install_stackbite(args: &[String]) -> Result<(), Box<dyn std::error::Error + 
         }
         i += 1;
     }
+    options.judge = match selected_judge {
+        "laya" => JudgeConfig::Laya {
+            endpoint: endpoint.unwrap_or_else(|| DEFAULT_ENDPOINT.into()),
+            model: model.unwrap_or_else(|| DEFAULT_MODEL.into()),
+        },
+        _ if endpoint.is_none() && model.is_none() => JudgeConfig::Jev,
+        _ => return Err(
+            "--endpoint and --model require --judge laya; Jev uses its fixed service and model."
+                .into(),
+        ),
+    };
     let home = std::env::var_os(if cfg!(windows) { "USERPROFILE" } else { "HOME" })
         .map(std::path::PathBuf::from)
         .ok_or("Missing user directory.")?;
@@ -398,9 +417,11 @@ fn install_stackbite(args: &[String]) -> Result<(), Box<dyn std::error::Error + 
                 println!("{}", serde_json::to_string(&report)?);
             } else {
                 println!(
-                    "Switchbite Laya → Stackbite coordinator: {}\nWorkspace: {}\n{}",
+                    "Switchbite ({}) → Stackbite coordinator: {}\nWorkspace: {}\nServer: {}\n{}",
+                    report.judge["kind"].as_str().unwrap_or("unknown"),
                     report.status,
                     report.workspace.display(),
+                    report.server,
                     report.next_action
                 );
             }
@@ -445,7 +466,7 @@ fn main() {
     }
     if args == ["--help"] || args == ["-h"] {
         println!(
-            "Switchbite — the decision layer for your agents\nConnect once: switchbite codex | claude | cursor | grok | antigravity | opencode\nConnection options: --dry-run --json --offline --config-file FILE\nCopies a stable executable and merges user-level MCP settings; judge choice stays separate.\nPrint-only setup: setup --client NAME [--offline]\nRecommended MCP: serve --profile agent [--offline]\nLocal Laya: --judge laya [--endpoint http://127.0.0.1:11435] [--model laya:multilingual]\nStackbite plugin: stackbite [--workspace ABS] [--client codex|claude|both] [--endpoint URL] [--model NAME] [--dry-run] [--json]\nLocal synthetic check: probe --judge laya [--endpoint URL] [--model NAME]\nAdvanced server options: --max-concurrent N --max-queued N --queue-timeout-ms N --decision-timeout-ms N\nroute | snapshot | evaluate --request-file FILE\nguide | doctor | config --client NAME [--executable ABS] [--offline]\nCompatibility: no args = docking API1; serve --profile cli = original typed tools; invoke OP --request-file FILE"
+            "Switchbite — the decision layer for your agents\nConnect once: switchbite codex | claude | cursor | grok | antigravity | opencode\nConnection options: --dry-run --json --offline --config-file FILE\nCopies a stable executable and merges user-level MCP settings; judge choice stays separate.\nPrint-only setup: setup --client NAME [--offline]\nRecommended MCP: serve --profile agent [--offline]\nLocal Laya: --judge laya [--endpoint http://127.0.0.1:11435] [--model laya:multilingual]\nStackbite plugin: stackbite [--workspace ABS] [--client codex|claude|both] [--judge jev|laya] [--endpoint URL] [--model NAME] [--dry-run] [--json] (default Jev; project server switchbite-stackbite)\nLocal synthetic check: probe --judge laya [--endpoint URL] [--model NAME]\nAdvanced server options: --max-concurrent N --max-queued N --queue-timeout-ms N --decision-timeout-ms N\nroute | snapshot | evaluate --request-file FILE\nguide | doctor | config --client NAME [--executable ABS] [--offline]\nCompatibility: no args = docking API1; serve --profile cli = original typed tools; invoke OP --request-file FILE"
         );
         return;
     }

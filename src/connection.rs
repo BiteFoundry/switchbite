@@ -49,6 +49,26 @@ pub fn render_launch(
     args: &[&str],
     forward_typesafe: bool,
 ) -> Result<String, ConfigError> {
+    render_named_launch(client, executable, args, forward_typesafe, "switchbite")
+}
+
+/// A separate server name keeps project docking independent of user-level servers.
+/// Only portable MCP names are accepted; no credential value is ever read.
+pub fn render_named_launch(
+    client: &str,
+    executable: &Path,
+    args: &[&str],
+    forward_typesafe: bool,
+    server_name: &str,
+) -> Result<String, ConfigError> {
+    if server_name.is_empty()
+        || server_name.len() > 64
+        || !server_name
+            .bytes()
+            .all(|c| c.is_ascii_alphanumeric() || c == b'-' || c == b'_')
+    {
+        return Err(ConfigError::Encoding);
+    }
     let executable_text = executable.to_str().ok_or(ConfigError::InvalidExecutable)?;
     if !executable.is_absolute()
         || executable_text.chars().any(char::is_control)
@@ -65,7 +85,7 @@ pub fn render_launch(
                 serde_json::to_string(executable_text).map_err(|_| ConfigError::Encoding)?;
             let arguments = serde_json::to_string(&args).map_err(|_| ConfigError::Encoding)?;
             let mut snippet =
-                format!("[mcp_servers.switchbite]\ncommand = {command}\nargs = {arguments}\n");
+                format!("[mcp_servers.{server_name}]\ncommand = {command}\nargs = {arguments}\n");
             if client == "codex" {
                 if forward_typesafe {
                     snippet.push_str("env_vars = [\"TYPESAFE_API_KEY\"]\n");
@@ -80,7 +100,7 @@ pub fn render_launch(
         "opencode" => {
             let mut command = vec![executable_text];
             command.extend(args.iter().copied());
-            pretty(json!({"mcp": {"servers": {"switchbite": {
+            pretty(json!({"mcp": {"servers": {(server_name): {
                 "type": "local", "command": command
             }}}}))
         }
@@ -93,7 +113,7 @@ pub fn render_launch(
                 // Cursor's documented variable syntax differs from Claude's.
                 server["env"] = json!({"TYPESAFE_API_KEY": "${env:TYPESAFE_API_KEY}"});
             }
-            pretty(json!({"mcpServers": {"switchbite": server}}))
+            pretty(json!({"mcpServers": {(server_name): server}}))
         }
         _ => Err(ConfigError::UnsupportedClient),
     }

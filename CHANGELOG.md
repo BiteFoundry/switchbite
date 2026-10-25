@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.6.0-stackbite.1 — 2026-10-25 (branch preview)
+
+- Stackbite coordinator project installation defaults to Jev 1.14, with explicit
+  local Laya selection and credential-name forwarding without storing key values.
+- Separate `switchbite-stackbite` MCP server avoids generic user-server name
+  collisions; preserves existing connections and supports judge switching.
+- Coordinator initialization covers decomposition, DAG validation, ready-task
+  routing, host reservations, parallel output ownership, verified receipts and replanning.
+- Packaged Korean setup guide and contract-checked synthetic model-pool workflow.
+- Opt-in installed-MCP Jev qualification; no native host changes or worker execution
+  claims. Existing standalone Studio remains separate.
+
 ## 0.6.0-laya.1 — 2026-10-25 (branch preview)
 
 - Project-scoped Stackbite coordinator MCP installation for Codex and Claude,

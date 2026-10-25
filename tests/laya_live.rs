@@ -15,7 +15,9 @@ async fn installed_orchestrator_plugin_discovers_and_routes_with_real_local_laya
     );
     let config: Value =
         serde_json::from_slice(&std::fs::read(workspace.join(".mcp.json")).unwrap()).unwrap();
-    let server = &config["mcpServers"]["switchbite"];
+    let server = config["mcpServers"]
+        .get(switchbite::stackbite_plugin::SERVER_NAME)
+        .unwrap_or(&config["mcpServers"]["switchbite"]);
     let command = server["command"].as_str().unwrap();
     let args = server["args"]
         .as_array()

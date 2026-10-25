@@ -1,0 +1,63 @@
+{
+  "date": "2026-10-25T13:58:47.0646340Z",
+  "version": "0.6.0-stackbite.1",
+  "branch": "feature/stackbite-jev-routing",
+  "base_commit": "2d675a5309149f7652483a158b83e552e32ca2b4",
+  "integration": "project-scoped coordinator MCP; no original Stackbite runtime/source changes",
+  "server": "switchbite-stackbite",
+  "judge": "jev-1.14.0",
+  "tests": {
+    "passed": 116,
+    "failed": 0,
+    "default_ignored": 2,
+    "explicit_installed_jev_live_passed": 1,
+    "clippy": "all targets, locked, warnings denied: passed",
+    "release_build": "passed"
+  },
+  "discovery": {
+    "codex": "enabled project stdio server; release executable; explicit Jev arguments",
+    "claude": "project server found with release executable and explicit Jev arguments; Pending approval",
+    "global_settings_modified": false
+  },
+  "live": {
+    "synthetic_only": true,
+    "worker_execution": false,
+    "plan_valid": true,
+    "tools_discovered": 4,
+    "routes": [
+      {
+        "task": "parser",
+        "status": "ready",
+        "next_action": "recheck_and_dispatch",
+        "candidate_id": "claude:implementation"
+      },
+      {
+        "task": "mockup",
+        "status": "ready",
+        "next_action": "recheck_and_dispatch",
+        "candidate_id": "antigravity:mockup"
+      },
+      {
+        "task": "review",
+        "status": "hold",
+        "next_action": "clarify_task",
+        "candidate_id": null
+      }
+    ]
+  },
+  "package": {
+    "file": "switchbite-0.6.0-stackbite.1-windows-x64.zip",
+    "sha256": "4cdca2e1622f484afad62d5535f7409cd740474a02b72d513470ea46630e49b3",
+    "binary_sha256": "fa39710c34d7919a69ef79f2883ed5dc5684d3cd26986b5127f4d29bf2785a8c",
+    "target": "x86_64-pc-windows-msvc",
+    "payload_files": 17
+  },
+  "limits": [
+    "Coordinator instructions describe decomposition, dependency checks and dispatch; this package is not a standalone scheduler or native Stackbite registry.",
+    "Model inventory, host permissions, worker reservations, execution and completion evidence remain coordinator/host responsibilities.",
+    "No mixed-CLI worker execution, native interactive send/wait qualification, automatic restart recovery or optimality benchmark performed.",
+    "Review routing probe held for clarification; no dependency completion was fabricated.",
+    "Source main Studio work and the previous Laya branch were preserved.",
+    "No WorkBite Task binding was verified; existing build paths were reused without storage auto-enrollment."
+  ]
+}

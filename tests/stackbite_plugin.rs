@@ -1,7 +1,7 @@
 use std::{fs, path::PathBuf};
 use switchbite::{
     connect,
-    stackbite_plugin::{self, InstallOptions},
+    stackbite_plugin::{self, InstallOptions, JudgeConfig, SERVER_NAME},
 };
 use tempfile::tempdir;
 
@@ -9,8 +9,10 @@ fn options(workspace: PathBuf, dry_run: bool) -> InstallOptions {
     InstallOptions {
         workspace,
         client: "both".into(),
-        endpoint: "http://127.0.0.1:11435".into(),
-        model: "laya:multilingual".into(),
+        judge: JudgeConfig::Laya {
+            endpoint: "http://127.0.0.1:11435".into(),
+            model: "laya:multilingual".into(),
+        },
         dry_run,
     }
 }
@@ -38,7 +40,7 @@ fn foreign_second_client_preflight_preserves_first_and_creates_no_copy() {
     fs::create_dir_all(workspace.join(".codex")).unwrap();
     let codex = workspace.join(".codex/config.toml");
     fs::write(&codex, "# keep\nmodel='existing'\n").unwrap();
-    let foreign = r#"{"mcpServers":{"switchbite":{"command":"foreign-server"}}}"#;
+    let foreign = r#"{"mcpServers":{"switchbite-stackbite":{"command":"foreign-server"}}}"#;
     fs::write(workspace.join(".mcp.json"), foreign).unwrap();
     let source = dir.path().join("source.exe");
     fs::write(&source, b"synthetic binary").unwrap();
@@ -139,10 +141,13 @@ fn invalid_local_endpoint_or_foreign_descriptor_stops_before_registration() {
     fs::write(&source, b"synthetic binary").unwrap();
     let data = dir.path().join("data");
     let mut settings = options(workspace.clone(), false);
-    settings.endpoint = "https://remote.example.test".into();
+    settings.judge = JudgeConfig::Laya {
+        endpoint: "https://remote.example.test".into(),
+        model: "laya:multilingual".into(),
+    };
     assert!(stackbite_plugin::install(&settings, &source, &data).is_err());
     assert_eq!(fs::read_dir(&workspace).unwrap().count(), 0);
-    settings.endpoint = "http://127.0.0.1:11435".into();
+    settings.judge = JudgeConfig::Jev;
     fs::create_dir(workspace.join(".switchbite")).unwrap();
     fs::write(
         workspace.join(".switchbite/stackbite-plugin.json"),
@@ -182,4 +187,128 @@ fn later_write_error_reports_completed_client_without_claiming_full_installation
             .to_string()
             .contains("Completed client configurations")
     );
+}
+
+#[test]
+fn jev_project_docking_preserves_generic_server_and_only_stores_key_references() {
+    let dir = tempdir().unwrap();
+    let workspace = dir.path().join("project");
+    fs::create_dir_all(workspace.join(".codex")).unwrap();
+    let generic_toml = "# user's independent server\n[mcp_servers.switchbite]\ncommand='other-generic-server'\nargs=['untouched']\n";
+    fs::write(workspace.join(".codex/config.toml"), generic_toml).unwrap();
+    fs::write(
+        workspace.join(".mcp.json"),
+        r#"{"mcpServers":{"switchbite":{"command":"other-generic-server","args":["untouched"]}}}"#,
+    )
+    .unwrap();
+    let source = dir.path().join("source.exe");
+    fs::write(&source, b"synthetic binary").unwrap();
+    let data = dir.path().join("data");
+    let mut settings = options(workspace.clone(), false);
+    settings.judge = JudgeConfig::Jev;
+    let report = stackbite_plugin::install(&settings, &source, &data).unwrap();
+    assert_eq!(report.server, SERVER_NAME);
+    assert_eq!(report.judge["model"], "jev-1.14.0");
+    assert_eq!(
+        report.judge["required_env"],
+        serde_json::json!(["TYPESAFE_API_KEY"])
+    );
+    let codex: toml_edit::DocumentMut = fs::read_to_string(workspace.join(".codex/config.toml"))
+        .unwrap()
+        .parse()
+        .unwrap();
+    assert_eq!(
+        codex["mcp_servers"]["switchbite"]["command"].as_str(),
+        Some("other-generic-server")
+    );
+    assert_eq!(
+        codex["mcp_servers"][SERVER_NAME]["env_vars"][0].as_str(),
+        Some("TYPESAFE_API_KEY")
+    );
+    let claude: serde_json::Value =
+        serde_json::from_slice(&fs::read(workspace.join(".mcp.json")).unwrap()).unwrap();
+    assert_eq!(
+        claude["mcpServers"]["switchbite"]["command"],
+        "other-generic-server"
+    );
+    assert_eq!(
+        claude["mcpServers"][SERVER_NAME]["args"],
+        serde_json::json!(["serve", "--profile", "agent", "--judge", "jev"])
+    );
+    assert_eq!(
+        claude["mcpServers"][SERVER_NAME]["env"]["TYPESAFE_API_KEY"],
+        "${TYPESAFE_API_KEY:-}"
+    );
+    assert!(
+        report
+            .clients
+            .iter()
+            .all(|r| r.judge_configuration == "jev")
+    );
+    let again = stackbite_plugin::install(&settings, &source, &data).unwrap();
+    assert!(
+        again
+            .clients
+            .iter()
+            .all(|r| r.status == "already_configured")
+    );
+    assert!(again.descriptor_backup.is_none());
+    settings.judge = JudgeConfig::Laya {
+        endpoint: "http://127.0.0.1:11435".into(),
+        model: "laya:multilingual".into(),
+    };
+    stackbite_plugin::install(&settings, &source, &data).unwrap();
+    for config in [".codex/config.toml", ".mcp.json"] {
+        assert!(
+            !fs::read_to_string(workspace.join(config))
+                .unwrap()
+                .contains("TYPESAFE_API_KEY")
+        );
+    }
+    settings.judge = JudgeConfig::Jev;
+    stackbite_plugin::install(&settings, &source, &data).unwrap();
+    assert!(
+        fs::read_to_string(workspace.join(".mcp.json"))
+            .unwrap()
+            .contains("${TYPESAFE_API_KEY:-}")
+    );
+}
+
+#[test]
+fn stackbite_cli_defaults_to_jev_and_rejects_local_options_without_explicit_laya() {
+    use std::process::Command;
+    let dir = tempdir().unwrap();
+    let run = |args: &[&str]| {
+        Command::new(env!("CARGO_BIN_EXE_switchbite"))
+            .env_clear()
+            .env("USERPROFILE", dir.path())
+            .env("HOME", dir.path())
+            .env("LOCALAPPDATA", dir.path().join("data"))
+            .current_dir(dir.path())
+            .args(args)
+            .output()
+            .unwrap()
+    };
+    let out = run(&["stackbite", "--dry-run", "--json"]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let report: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(report["judge"]["kind"], "jev");
+    assert_eq!(report["server"], SERVER_NAME);
+    assert_eq!(fs::read_dir(dir.path()).unwrap().count(), 0);
+    let out = run(&[
+        "stackbite",
+        "--dry-run",
+        "--endpoint",
+        "http://127.0.0.1:11435",
+    ]);
+    assert!(!out.status.success());
+    assert!(String::from_utf8_lossy(&out.stderr).contains("require --judge laya"));
+    assert_eq!(fs::read_dir(dir.path()).unwrap().count(), 0);
+    let out = run(&["stackbite", "--help"]);
+    assert!(out.status.success());
+    assert!(String::from_utf8_lossy(&out.stdout).contains("Default judge: Jev"));
 }

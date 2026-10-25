@@ -1408,7 +1408,7 @@ checksum = "13c2bddecc57b384dee18652358fb23172facb8a2c51ccc10d74c157bdea3292"
 
 [[package]]
 name = "switchbite"
-version = "0.6.0-laya.1"
+version = "0.6.0-stackbite.1"
 dependencies = [
  "jsonc-parser",
  "regex",

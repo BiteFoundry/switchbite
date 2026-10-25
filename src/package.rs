@@ -105,6 +105,14 @@ pub fn build(binary: &Path, output: &Path) -> Result<Value, Error> {
             include_bytes!("../docs/connection.md").to_vec(),
         ),
         (
+            "docs/stackbite.ko.md".to_owned(),
+            include_bytes!("../docs/stackbite.ko.md").to_vec(),
+        ),
+        (
+            "examples/stackbite-workflow.json".to_owned(),
+            include_bytes!("../examples/stackbite-workflow.json").to_vec(),
+        ),
+        (
             "docs/stackbite-laya.ko.md".to_owned(),
             include_bytes!("../docs/stackbite-laya.ko.md").to_vec(),
         ),

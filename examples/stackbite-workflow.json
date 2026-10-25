@@ -1,0 +1,22 @@
+{
+  "notice": "Synthetic coordinator handoff example. Replace profiles with verified host-authorized worker/model/settings instances. This file is documentation, not an executable scheduler plan.",
+  "preferences": "Prefer Claude for implementation, Codex for independent review and orchestration, Antigravity for fast mockups and writing; Cursor is a balanced alternative. Treat these as preferences, never capabilities or availability evidence.",
+  "pool": [
+    {"id":"claude:implementation", "description":"Example Claude Code implementation profile, with its host-selected model and reasoning setting. Strong at bounded implementation and regression tests.", "capabilities":["code.change","code.review","html.write"], "available":true},
+    {"id":"codex:review", "description":"Example Codex independent reviewer profile, with its host-selected model and reasoning setting. Strong at review, orchestration and checking implementation contracts.", "capabilities":["code.change","code.review","html.write"], "available":true},
+    {"id":"antigravity:mockup", "description":"Example Antigravity profile, with its host-selected model. Strong at quick HTML/CSS mockups and writing.", "capabilities":["html.write"], "available":true},
+    {"id":"cursor:general", "description":"Example Cursor agent profile, with its host-selected model. Balanced code implementation, review and HTML work.", "capabilities":["code.change","code.review","html.write"], "available":true}
+  ],
+  "plan": {
+    "nodes": [
+      {"id":"parser", "objective":"Implement a small Rust parse_port function that accepts decimal ports 1 through 65535 and rejects empty, signed, out-of-range and non-numeric input. Add regression tests. Full behavior is specified here; no external research is needed.", "requirements":["code.change"], "depends_on":[], "acceptance":["Valid ports accepted; invalid inputs rejected; regression tests pass"], "outputs":["artifact:parser.rs"]},
+      {"id":"mockup", "objective":"Create a self-contained responsive HTML mockup for a port validator, with inline CSS, one labeled input, a validate button and clear success/error states. Use no dependencies or network resources. Only create mockup.html; do not touch parser.rs.", "requirements":["html.write"], "depends_on":[], "acceptance":["Single accessible responsive HTML file; no external assets"], "outputs":["artifact:mockup.html"]},
+      {"id":"review", "objective":"Independently review parser.rs after its implementation completes. Check port boundaries and malformed input against the exact implementation contract and regression tests. Write a review report; do not change implementation files.", "requirements":["code.review"], "depends_on":["parser"], "acceptance":["Review cites actual source and test evidence; unrun checks labeled"], "outputs":["artifact:review.md"]}
+    ]
+  },
+  "route_examples": [
+    {"task":{"id":"parser","objective":"Implement Rust parse_port: decimal 1..65535 only, reject empty/signed/non-numeric/out-of-range inputs, add regression tests. Only own parser.rs; fully specified, no research needed.","requirements":["code.change"],"context_refs":["Coordinator supplies the exact workspace and function contract; acceptance is valid boundaries and regression tests."]},"policy":{"profile":"implementation"}},
+    {"task":{"id":"mockup","objective":"Create only mockup.html: accessible responsive port validator mockup, inline HTML/CSS, labeled input, button, success/error states, zero external dependencies.","requirements":["html.write"],"context_refs":["Independent task; output ownership is separate from parser.rs. Routing probe performs no file edits."]},"policy":{"profile":"mockup"}},
+    {"task":{"id":"review","objective":"Review completed parser.rs against decimal port 1..65535 acceptance and regression tests. Write only review.md, cite evidence, label unrun checks; no implementation edits.","requirements":["code.review"],"context_refs":["Example only: the coordinator must attach actual successful parser completion and source/test references before dispatching this dependent task."]},"policy":{"profile":"review","producer_candidate_id":"claude:implementation"}}
+  ]
+}

@@ -1,5 +1,5 @@
 //! Explicit, native CLI configuration writes. Never called by MCP tools.
-//! Judge selection and credentials are deliberately outside this module.
+//! Explicit launches select a judge; credential values are never read here.
 use crate::connection;
 use jsonc_parser::cst::{CstInputValue, CstNode, CstObject, CstRootNode};
 use serde::Serialize;
@@ -40,7 +40,7 @@ impl fmt::Display for ConnectError {
         f.write_str(match self {
             Self::UnsupportedClient => "Unsupported client; use codex, claude, cursor, grok, antigravity or opencode.",
             Self::InvalidConfig => "Configuration is invalid, ambiguous, too large or has an incompatible structure. No settings changed.",
-            Self::Conflict => "The switchbite name belongs to a different server or transport. No settings changed; use config --client for manual setup.",
+            Self::Conflict => "The selected Switchbite server name belongs to a different server or transport. No settings changed; use config --client for manual setup.",
             Self::Io => "Unable to read or save connection files. Check file permissions; the original configuration is preserved on write failure.",
             Self::Busy => "Another connection update is active. Retry after it finishes; if interrupted, check the adjacent .switchbite-lock file.",
             Self::Changed => "Configuration changed during setup. No settings replaced; retry the command.",
@@ -194,7 +194,7 @@ pub fn merge(
     offline: bool,
 ) -> Result<String, ConnectError> {
     let snippet = connection::render(client, executable, offline).map_err(config_error)?;
-    merge_snippet(client, existing, &snippet, false)
+    merge_snippet(client, existing, &snippet, false, "switchbite")
 }
 
 fn config_error(error: connection::ConfigError) -> ConnectError {
@@ -218,9 +218,22 @@ pub fn merge_launch(
     executable: &Path,
     args: &[&str],
 ) -> Result<String, ConnectError> {
+    merge_named_launch(client, existing, executable, args, "switchbite", false)
+}
+
+/// Merge one named project server. Local launches remove only that server's cloud grants.
+pub fn merge_named_launch(
+    client: &str,
+    existing: &str,
+    executable: &Path,
+    args: &[&str],
+    server_name: &str,
+    forward_typesafe: bool,
+) -> Result<String, ConnectError> {
     let snippet =
-        connection::render_launch(client, executable, args, false).map_err(config_error)?;
-    merge_snippet(client, existing, &snippet, true)
+        connection::render_named_launch(client, executable, args, forward_typesafe, server_name)
+            .map_err(config_error)?;
+    merge_snippet(client, existing, &snippet, !forward_typesafe, server_name)
 }
 
 fn merge_snippet(
@@ -228,6 +241,7 @@ fn merge_snippet(
     existing: &str,
     snippet: &str,
     local_judge: bool,
+    server_name: &str,
 ) -> Result<String, ConnectError> {
     if existing.len() as u64 > MAX_CONFIG {
         return Err(ConnectError::InvalidConfig);
@@ -245,7 +259,7 @@ fn merge_snippet(
         let servers = document["mcp_servers"]
             .as_table_like_mut()
             .ok_or(ConnectError::InvalidConfig)?;
-        if let Some(old) = servers.get("switchbite") {
+        if let Some(old) = servers.get(server_name) {
             let table = old.as_table_like().ok_or(ConnectError::InvalidConfig)?;
             if !table
                 .get("command")
@@ -256,13 +270,10 @@ fn merge_snippet(
                 return Err(ConnectError::Conflict);
             }
         } else {
-            servers.insert(
-                "switchbite",
-                toml_edit::Item::Table(toml_edit::Table::new()),
-            );
+            servers.insert(server_name, toml_edit::Item::Table(toml_edit::Table::new()));
         }
         let table = servers
-            .get_mut("switchbite")
+            .get_mut(server_name)
             .and_then(toml_edit::Item::as_table_like_mut)
             .ok_or(ConnectError::InvalidConfig)?;
         if local_judge {
@@ -289,7 +300,7 @@ fn merge_snippet(
                 }
             }
         }
-        for (key, value) in desired["mcp_servers"]["switchbite"]
+        for (key, value) in desired["mcp_servers"][server_name]
             .as_table()
             .ok_or(ConnectError::InvalidConfig)?
             .iter()
@@ -361,7 +372,7 @@ fn merge_snippet(
         }
         server_value = &server_value[key];
     }
-    if let Some(old) = object.get("switchbite")
+    if let Some(old) = object.get(server_name)
         && !old
             .value()
             .and_then(|v| v.to_serde_value())
@@ -370,7 +381,7 @@ fn merge_snippet(
         return Err(ConnectError::Conflict);
     }
     let server = object
-        .object_value_or_create("switchbite")
+        .object_value_or_create(server_name)
         .ok_or(ConnectError::InvalidConfig)?;
     if local_judge && let Some(property) = server.get("env") {
         let env = property
@@ -386,7 +397,7 @@ fn merge_snippet(
             }
         }
     }
-    for (key, value) in server_value["switchbite"]
+    for (key, value) in server_value[server_name]
         .as_object()
         .ok_or(ConnectError::InvalidConfig)?
     {
@@ -482,6 +493,34 @@ pub fn connect_launch_to(
         merge_launch(client, text, executable, args)
     })?;
     report.judge_configuration = "local_laya";
+    Ok(report)
+}
+
+/// Register a judge-specific project server without changing a user's generic connection.
+pub fn connect_named_launch_to(
+    client: &str,
+    path: &Path,
+    executable: &Path,
+    args: &[&str],
+    server_name: &str,
+    forward_typesafe: bool,
+    dry_run: bool,
+) -> Result<Report, ConnectError> {
+    let mut report = connect_to_inner(client, path, executable, dry_run, |text| {
+        merge_named_launch(
+            client,
+            text,
+            executable,
+            args,
+            server_name,
+            forward_typesafe,
+        )
+    })?;
+    report.judge_configuration = if forward_typesafe {
+        "jev"
+    } else {
+        "local_laya"
+    };
     Ok(report)
 }
 
