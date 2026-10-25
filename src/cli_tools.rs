@@ -1,7 +1,7 @@
 //! Agent-facing schemas: the domain stays API 1; no host execution authority.
 use crate::{
     Plugin,
-    contracts::{self, ContractError, MAX_JSON_BYTES, MODEL},
+    contracts::{self, ContractError, MAX_JSON_BYTES},
 };
 use rmcp::model::{Tool, ToolAnnotations};
 use serde_json::{Value, json};
@@ -77,7 +77,7 @@ pub fn normalize(operation: &str, arguments: &Value) -> Result<Value, ContractEr
 }
 pub fn status(plugin: &Plugin) -> Value {
     json!({"plugin_id":"switchbite", "plugin_version":env!("CARGO_PKG_VERSION"), "docking_api":1,
-        "model":MODEL, "judge_configured":plugin.judge_configured(), "proposal_only":true,
+        "model":plugin.model(), "judge_configured":plugin.judge_configured(), "proposal_only":true,
         "notice":"Configuration presence is not authentication, quota or task-success proof."})
 }
 pub fn status_schema() -> Value {

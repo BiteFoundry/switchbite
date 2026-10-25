@@ -35,6 +35,30 @@ pub struct RuntimeError {
 impl RuntimeError {
     pub fn from_code(code: &str) -> Self {
         let (code, message, retryable, retry_after_ms) = match code {
+            "local_judge_config" => (
+                "local_judge_config",
+                "Choose a pinned Laya model and a literal loopback HTTP endpoint; no cloud endpoint or key is used.",
+                false,
+                None,
+            ),
+            "local_judge_unavailable" => (
+                "local_judge_unavailable",
+                "Start the local Laya server, then retry this judgment. There is no cloud fallback.",
+                true,
+                Some(1000),
+            ),
+            "local_model_unavailable" => (
+                "local_model_unavailable",
+                "The local Laya model or endpoint is unavailable. Provision the selected model and check the local server.",
+                false,
+                None,
+            ),
+            "judge_context_too_long" => (
+                "judge_context_too_long",
+                "The local model cannot read all decision evidence. Shorten the task and candidate descriptions; no truncated judgment was accepted.",
+                false,
+                None,
+            ),
             "invalid_request" => (
                 "invalid_request",
                 "Supply task id/objective and a pool with factual id, description, capabilities and availability. Check the tool schema for optional policy fields.",
@@ -138,6 +162,10 @@ impl RuntimeError {
         // Re-canonicalize public fields so callers cannot accidentally echo upstream text.
         let safe = Self::from_code(self.code);
         let next_action = match safe.code {
+            "local_judge_config" => "correct_configuration",
+            "local_judge_unavailable" => "start_local_laya",
+            "local_model_unavailable" => "provision_local_model",
+            "judge_context_too_long" => "shorten_decision_context",
             "invalid_runtime_config" => "correct_configuration",
             "invalid_request" => "correct_input",
             "invalid_judgment" | "provider_invalid_response" => "refresh_judgment",

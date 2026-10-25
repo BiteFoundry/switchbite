@@ -136,6 +136,42 @@ pub fn snapshot(request: &Value, now_ms: u64) -> Result<Value, ContractError> {
     binding(&normalize(request)?, now_ms)
 }
 
+/// Bind a nonlegacy replay to its configured model as well as the input.
+pub fn snapshot_for_model(
+    request: &Value,
+    now_ms: u64,
+    model: &str,
+) -> Result<Value, ContractError> {
+    model_binding(&normalize(request)?, now_ms, model)
+}
+
+fn model_binding(normalized: &Value, now_ms: u64, model: &str) -> Result<Value, ContractError> {
+    contracts::validate_model(model)?;
+    let mut result = binding(normalized, now_ms)?;
+    // Keep the existing Jev replay bytes and hashes compatible.
+    if model != contracts::MODEL {
+        result["judge_model"] = json!(model);
+        result["input_sha256"] = json!(core::sha256(
+            &serde_json::to_vec(&json!({"input":normalized,"judge_model":model}))
+                .map_err(|_| ContractError::InvalidRequest)?
+        ));
+    }
+    Ok(result)
+}
+
+struct StoredJudgment {
+    model: String,
+    response: Value,
+}
+impl Judge for StoredJudgment {
+    fn model(&self) -> &str {
+        &self.model
+    }
+    fn judge(&self, _: &Value) -> Result<Value, ContractError> {
+        Ok(self.response.clone())
+    }
+}
+
 fn held(snapshot: &Value, excluded: &[Value], reason: &str, action: &str, summary: &str) -> Value {
     json!({"version":2,"status":"hold","candidate_id":null,"next_action":action,"summary":summary,
         "reason_codes":[reason],"selected":null,"alternatives":[],"excluded":excluded,"snapshot":snapshot})
@@ -251,7 +287,8 @@ pub fn route(
     now_ms: u64,
 ) -> Result<Value, ContractError> {
     let normalized = normalize(request)?;
-    let mut snapshot = binding(&normalized, now_ms)?;
+    let model = judge.map_or(contracts::MODEL, Judge::model);
+    let mut snapshot = model_binding(&normalized, now_ms, model)?;
     let (candidates, mut excluded) = eligible(&normalized);
     if let Some(replay) = request.get("replay") {
         let digest = replay["input_sha256"].as_str().unwrap();
@@ -259,7 +296,10 @@ pub fn route(
             && digest
                 .bytes()
                 .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b));
-        let reason = if !valid_digest || replay["input_sha256"] != snapshot["input_sha256"] {
+        let reason = if !valid_digest
+            || replay["input_sha256"] != snapshot["input_sha256"]
+            || replay.get("judge_model") != snapshot.get("judge_model")
+        {
             Some("replay_mismatch")
         } else if replay["expires_at_ms"].as_u64().unwrap() <= now_ms {
             Some("replay_expired")
@@ -315,15 +355,19 @@ pub fn route(
     } else {
         judge
             .unwrap()
-            .judge(&core::judgment_body(&legacy)?)
+            .judge(&core::judgment_body_for_model(&legacy, model)?)
             .map_err(|_| ContractError::JudgeFailed)?
     };
-    // Plugin performs typed Jev validation. API1's fixed HOLD thresholds are
-    // intentionally ignored; complete validated scores feed API2 policy.
+    // Plugin performs strict typed validation for the configured model.
+    // API1's fixed HOLD thresholds are intentionally ignored; complete
+    // validated scores feed API2 policy.
     // Keep request and response bounds independent and classify provider data
     // through the typed-judgment validator, not caller-input validation.
-    let validated =
-        Plugin::with_judge(move |_: &Value| Ok(judgment.clone())).invoke("decide", &legacy)?;
+    let validated = Plugin::with_judge(StoredJudgment {
+        model: model.into(),
+        response: judgment,
+    })
+    .invoke("decide", &legacy)?;
     let context = n(&validated["scores"], "context_sufficient");
     let policy = &normalized["policy"];
     if context < n(policy, "min_context") {

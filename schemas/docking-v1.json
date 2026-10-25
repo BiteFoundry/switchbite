@@ -138,7 +138,8 @@
           "properties": {
             "model": {
               "type": "string",
-              "const": "jev-1.14.0"
+              "minLength": 1,
+              "maxLength": 128
             },
             "answers": {
               "type": "object",
@@ -576,7 +577,8 @@
               "type": "string"
             },
             "model": {
-              "const": "jev-1.14.0",
+              "minLength": 1,
+              "maxLength": 128,
               "type": "string"
             },
             "request_sha256": {
@@ -1142,7 +1144,8 @@
               "properties": {
                 "model": {
                   "type": "string",
-                  "const": "jev-1.14.0"
+                  "minLength": 1,
+                  "maxLength": 128
                 },
                 "answers": {
                   "type": "object",

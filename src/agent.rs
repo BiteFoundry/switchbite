@@ -6,6 +6,31 @@ use std::sync::{Arc, Mutex};
 
 pub type AgentJudge = dyn Fn(&Value) -> Result<Value, crate::runtime::RuntimeError> + Send + Sync;
 
+/// Explicit provider identity alongside the legacy diagnostic-aware callback.
+pub struct ConfiguredJudge {
+    model: String,
+    judge: Arc<AgentJudge>,
+}
+impl ConfiguredJudge {
+    pub fn new(
+        model: impl Into<String>,
+        judge: Arc<AgentJudge>,
+    ) -> Result<Self, contracts::ContractError> {
+        let model = model.into();
+        contracts::validate_model(&model)?;
+        Ok(Self { model, judge })
+    }
+    pub fn legacy(judge: Arc<AgentJudge>) -> Self {
+        Self {
+            model: contracts::MODEL.into(),
+            judge,
+        }
+    }
+    pub fn model(&self) -> &str {
+        &self.model
+    }
+}
+
 pub const INSTRUCTIONS: &str = "Before assigning a newly ready task, call switchbite_route with the task and the host's factual worker/model pool. Each harness/model/settings combination needs its own ID. Default policy is sufficient to start; specify a profile or continuity only when relevant. Read status, next_action and summary first. Only recheck_and_dispatch permits the host to recheck authorization/capacity and reserve a target; it is still a proposal. Honor every hold. Never resubmit or migrate running work. Do not invent availability, capabilities, costs or completion receipts. Use switchbite_validate_plan for an existing DAG and switchbite_feedback for observed outcomes. Switchbite does not execute workers.";
 
 pub const GUIDE: &str = include_str!("../docs/coordinator.md");
@@ -43,6 +68,14 @@ pub fn status(judge_configured: bool) -> Value {
         "configure_judge"
     });
     status
+}
+
+pub fn configured_status(judge: Option<&ConfiguredJudge>) -> Value {
+    let mut result = status(judge.is_some());
+    if let Some(judge) = judge {
+        result["model"] = json!(judge.model());
+    }
+    result
 }
 
 pub fn status_schema() -> Value {
@@ -91,19 +124,44 @@ pub fn route(
     judge: Option<Arc<AgentJudge>>,
     now: u64,
 ) -> Result<Value, crate::runtime::RuntimeError> {
-    let failure = Arc::new(Mutex::new(None));
-    let diagnostic = failure.clone();
-    let configured = judge.is_some();
-    let adapter = move |body: &Value| {
-        let Some(judge) = &judge else {
-            return Err(contracts::ContractError::JudgeFailed);
-        };
-        judge(body).map_err(|error| {
-            *diagnostic.lock().expect("request diagnostic") = Some(error);
+    route_with_judge(
+        request,
+        judge.map(|j| Arc::new(ConfiguredJudge::legacy(j))),
+        now,
+    )
+}
+
+struct DiagnosticJudge {
+    configured: Arc<ConfiguredJudge>,
+    failure: Arc<Mutex<Option<crate::runtime::RuntimeError>>>,
+}
+impl crate::Judge for DiagnosticJudge {
+    fn model(&self) -> &str {
+        self.configured.model()
+    }
+    fn judge(&self, body: &Value) -> Result<Value, contracts::ContractError> {
+        (self.configured.judge)(body).map_err(|error| {
+            *self.failure.lock().expect("request diagnostic") = Some(error);
             contracts::ContractError::JudgeFailed
         })
-    };
-    let result = routing::route(request, if configured { Some(&adapter) } else { None }, now);
+    }
+}
+
+pub fn route_with_judge(
+    request: &Value,
+    judge: Option<Arc<ConfiguredJudge>>,
+    now: u64,
+) -> Result<Value, crate::runtime::RuntimeError> {
+    let failure = Arc::new(Mutex::new(None));
+    let adapter = judge.map(|configured| DiagnosticJudge {
+        configured,
+        failure: failure.clone(),
+    });
+    let result = routing::route(
+        request,
+        adapter.as_ref().map(|j| j as &dyn crate::Judge),
+        now,
+    );
     if let Some(error) = failure.lock().expect("request diagnostic").take() {
         return Err(error);
     }

@@ -4,6 +4,19 @@ use serde_json::{Map, Number, Value, json};
 use std::{fmt, sync::LazyLock};
 
 pub const MODEL: &str = "jev-1.14.0";
+/// Public model identity only; never an endpoint or credential-bearing value.
+pub fn validate_model(model: &str) -> Result<(), ContractError> {
+    if model.is_empty()
+        || model.len() > 128
+        || model.contains("://")
+        || !model
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b"-_.:/".contains(&b))
+    {
+        return Err(ContractError::InvalidJudgment);
+    }
+    Ok(())
+}
 pub const MAX_JSON_BYTES: usize = 65_536;
 pub const MAX_JUDGE_BYTES: usize = 131_072;
 pub const SCHEMA_JSON: &str = include_str!("../schemas/docking-v1.json");

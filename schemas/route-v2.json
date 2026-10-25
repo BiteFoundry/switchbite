@@ -240,6 +240,11 @@
               "maxLength": 64,
               "pattern": "^[0-9a-f]{64}$"
             },
+            "judge_model": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128
+            },
             "expires_at_ms": {
               "type": "integer",
               "minimum": 0,
@@ -250,7 +255,8 @@
               "properties": {
                 "model": {
                   "type": "string",
-                  "const": "jev-1.14.0"
+                  "minLength": 1,
+                  "maxLength": 128
                 },
                 "answers": {
                   "type": "object",
@@ -822,6 +828,11 @@
               "minLength": 64,
               "maxLength": 64,
               "pattern": "^[0-9a-f]{64}$"
+            },
+            "judge_model": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128
             },
             "expires_at_ms": {
               "type": "integer",

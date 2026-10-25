@@ -1,0 +1,56 @@
+{
+  "date": "2026-10-25T07:26:10.7200196Z",
+  "branch": "feature/laya-stackbite-plugin",
+  "version": "0.6.0-laya.1",
+  "base_commit": "4db2db779bd723bc4a816c745e5f5902b30dd765",
+  "status": "local-laya-coordinator-plugin-mvp-qualified",
+  "integration": "project-scoped Codex/Claude MCP configuration; no Stackbite runtime changes",
+  "runtime": {
+    "version": "0.17.0",
+    "name": "Ollaya",
+    "model": "laya:multilingual",
+    "python_runtime": false,
+    "model_digest": "2840506e1f978aeb696a6f84af43ecc7fca95754cb63a67bafe6132532d384eb",
+    "device": "cpu"
+  },
+  "tests": {
+    "format": "passed",
+    "default_suite_ignored": 1,
+    "independent_reviews": "no blockers reported",
+    "default_suite_passed": 113,
+    "clippy_all_targets_warnings_denied": "passed",
+    "explicit_installed_mcp_live_passed": 1
+  },
+  "live": {
+    "codex_project_config_selected": true,
+    "next_action": "recheck_and_dispatch",
+    "worker_execution": false,
+    "installed_mcp_tools_discovered": 4,
+    "status_model": "laya:multilingual",
+    "cloud_model_call": false,
+    "synthetic_input_only": true,
+    "claude_project_config_written": true,
+    "route_status": "ready",
+    "claude_current_effective_config": "existing user-level Jev server; local Laya session activation not claimed"
+  },
+  "limits": [
+    "The local model/server must be provisioned separately; the plugin does not start or download it automatically.",
+    "No fine-tuning, calibrated correctness, CUDA latency, closed-network deployment or full DAG execution qualification.",
+    "Default Jev callers remain supported; explicit local Laya has no Jev fallback.",
+    "Absent preferences are deterministic neutral policy; explicit preferences still use inference.",
+    "Storage paths were preserved without auto-enrollment because no WorkBite Task binding was verified."
+  ],
+  "references": [
+    "https://github.com/ollaya-dev/ollaya/releases/tag/v0.17.0",
+    "https://github.com/ollaya-dev/ollaya/blob/main/docs/api.md",
+    "https://huggingface.co/convaiinnovations/laya"
+  ],
+  "package": {
+    "file": "switchbite-0.6.0-laya.1-windows-x64.zip",
+    "sha256": "bb9cf2f708760d1d1d3bd0d7203ed83ead35aab328c28d8465213d60b1f543e7",
+    "binary_sha256": "52230049db86c4a46087734f93f1680a405ded1f37eca6db124e4e5a0051be4c",
+    "target": "x86_64-pc-windows-msvc",
+    "profile": "release",
+    "runtime_and_weights_included": false
+  }
+}

@@ -45,12 +45,16 @@ one offline for host tooling. Binding hashes canonical normalized task, full poo
 preferences, effective policy and continuity. Order and explicit defaults normalize
 consistently. The default validity is 60 seconds.
 
-Advanced replay contains `input_sha256`, `expires_at_ms`, and the legacy typed Jev
+Advanced replay contains `input_sha256`, `expires_at_ms`, and a typed
 `judgment`. It must match current normalized inputs, remain unexpired and not
 extend beyond the current policy validity horizon. Mismatched, expired or excessive
 future validity holds with `refresh_judgment` before any provider call. Replaying
 preserves the original expiry. A hash is not authentication: trusted host tooling
 must bind the original judgment and provenance, and recheck facts before execution.
+
+An explicitly configured non-Jev judge adds `judge_model` to its snapshot and
+includes that identity in the input hash. Its judgment must name the same model;
+cross-model replay is refused. Legacy Jev snapshots and hashes remain unchanged.
 
 ## Response and agent behavior
 

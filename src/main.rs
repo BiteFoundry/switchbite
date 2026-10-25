@@ -3,6 +3,7 @@ use switchbite::{
     Plugin, agent,
     contracts::{self, MAX_JSON_BYTES},
     http::HttpJudge,
+    local_laya::{DEFAULT_ENDPOINT, DEFAULT_MODEL, LayaConfig, LocalLayaJudge},
     mcp_server,
     runtime::{DecisionRuntime, RuntimeConfig},
 };
@@ -35,10 +36,60 @@ fn config(args: &[String]) -> Result<String, Box<dyn std::error::Error + Send + 
     )?)
 }
 
-fn plugin() -> Plugin {
-    HttpJudge::from_env()
-        .map(Plugin::with_judge)
-        .unwrap_or_default()
+#[derive(Default)]
+enum JudgeSelection {
+    #[default]
+    Jev,
+    Laya(LayaConfig),
+}
+
+fn judge_selection(
+    args: &mut Vec<String>,
+) -> Result<JudgeSelection, switchbite::runtime::RuntimeError> {
+    let mut judge = None;
+    let mut endpoint = None;
+    let mut model = None;
+    let mut kept = Vec::new();
+    let mut i = 0;
+    while i < args.len() {
+        let slot = match args[i].as_str() {
+            "--judge" => Some(&mut judge),
+            "--endpoint" => Some(&mut endpoint),
+            "--model" => Some(&mut model),
+            _ => None,
+        };
+        if let Some(slot) = slot {
+            if slot.is_some() || i + 1 >= args.len() {
+                return Err(switchbite::runtime::RuntimeError::from_code(
+                    "local_judge_config",
+                ));
+            }
+            *slot = Some(args[i + 1].clone());
+            i += 2;
+        } else {
+            kept.push(args[i].clone());
+            i += 1;
+        }
+    }
+    *args = kept;
+    match judge.as_deref() {
+        Some("laya") => Ok(JudgeSelection::Laya(LayaConfig::new(
+            endpoint.as_deref().unwrap_or(DEFAULT_ENDPOINT),
+            model.as_deref().unwrap_or(DEFAULT_MODEL),
+        )?)),
+        Some("jev") | None if endpoint.is_none() && model.is_none() => Ok(JudgeSelection::Jev),
+        _ => Err(switchbite::runtime::RuntimeError::from_code(
+            "local_judge_config",
+        )),
+    }
+}
+fn plugin(selection: &JudgeSelection) -> Plugin {
+    match selection {
+        JudgeSelection::Jev => HttpJudge::from_env()
+            .map(Plugin::with_judge)
+            .unwrap_or_default(),
+        JudgeSelection::Laya(config) => Plugin::with_judge(LocalLayaJudge::new(config.clone())),
+    }
 }
 fn request_file(path: &str) -> Result<serde_json::Value, Box<dyn std::error::Error + Send + Sync>> {
     let mut bytes = Vec::new();
@@ -47,14 +98,28 @@ fn request_file(path: &str) -> Result<serde_json::Value, Box<dyn std::error::Err
         .read_to_end(&mut bytes)?;
     Ok(contracts::parse_request(&bytes)?)
 }
-fn agent_judge(offline: bool) -> Option<Arc<agent::AgentJudge>> {
+fn agent_judge(selection: &JudgeSelection, offline: bool) -> Option<Arc<agent::ConfiguredJudge>> {
     if offline {
         return None;
     }
-    HttpJudge::from_env().map(|judge| {
-        Arc::new(move |body: &serde_json::Value| judge.judge_detailed(body))
-            as Arc<agent::AgentJudge>
-    })
+    match selection {
+        JudgeSelection::Jev => HttpJudge::from_env().map(|judge| {
+            Arc::new(agent::ConfiguredJudge::legacy(Arc::new(move |body| {
+                judge.judge_detailed(body)
+            })))
+        }),
+        JudgeSelection::Laya(config) => {
+            let model = config.model().to_owned();
+            let judge = LocalLayaJudge::new(config.clone());
+            Some(Arc::new(
+                agent::ConfiguredJudge::new(
+                    model,
+                    Arc::new(move |body| judge.judge_detailed(body)),
+                )
+                .expect("validated Laya identity"),
+            ))
+        }
+    }
 }
 fn agent_config(
     args: &[String],
@@ -87,7 +152,10 @@ fn agent_config(
     let _ = DecisionRuntime::new(config)?;
     Ok((offline, config))
 }
-fn doctor(client: &str) -> Result<serde_json::Value, switchbite::connection::ConfigError> {
+fn doctor(
+    client: &str,
+    selection: &JudgeSelection,
+) -> Result<serde_json::Value, switchbite::connection::ConfigError> {
     if ![
         "codex",
         "claude",
@@ -116,7 +184,8 @@ fn doctor(client: &str) -> Result<serde_json::Value, switchbite::connection::Con
         .copied()
         .filter(|name| std::env::var_os(name).is_some())
         .collect();
-    let mut result = agent::status(plugin().judge_configured());
+    let configured = agent_judge(selection, false);
+    let mut result = agent::configured_status(configured.as_deref());
     result["client"] = serde_json::json!(client);
     result["configuration_overrides_present"] = serde_json::json!(present);
     result["configuration_notice"] = serde_json::json!(
@@ -124,7 +193,10 @@ fn doctor(client: &str) -> Result<serde_json::Value, switchbite::connection::Con
     );
     Ok(result)
 }
-fn cli(args: &[String]) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+fn cli(
+    args: &[String],
+    selection: &JudgeSelection,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     if args
         .first()
         .is_some_and(|s| switchbite::connect::CLIENTS.contains(&s.as_str()))
@@ -239,25 +311,34 @@ fn cli(args: &[String]) -> Result<(), Box<dyn std::error::Error + Send + Sync>> 
         }
         [command, flag, path] if command == "route" && flag == "--request-file" => {
             let request = request_file(path)?;
-            let judge = agent_judge(false);
+            let judge = agent_judge(selection, false);
             let runtime = tokio::runtime::Builder::new_multi_thread()
                 .enable_all()
                 .build()?;
             let decisions = DecisionRuntime::new(RuntimeConfig::default())?;
             runtime.block_on(
-                decisions.execute(move || agent::route(&request, judge, agent::now_ms())),
+                decisions
+                    .execute(move || agent::route_with_judge(&request, judge, agent::now_ms())),
             )?
         }
         [command] if command == "describe" => contracts::describe(),
-        [command] if command == "doctor" => agent::status(plugin().judge_configured()),
-        [command, flag, client] if command == "doctor" && flag == "--client" => doctor(client)?,
+        [command] if command == "doctor" => {
+            agent::configured_status(agent_judge(selection, false).as_deref())
+        }
+        [command, flag, client] if command == "doctor" && flag == "--client" => {
+            doctor(client, selection)?
+        }
+        [command] if command == "probe" => match selection {
+            JudgeSelection::Laya(config) => LocalLayaJudge::new(config.clone()).probe()?,
+            JudgeSelection::Jev => return Err("probe requires explicit --judge laya".into()),
+        },
         [command, operation, flag, path] if command == "invoke" && flag == "--request-file" => {
             let mut bytes = Vec::new();
             File::open(path)?
                 .take(MAX_JSON_BYTES as u64 + 1)
                 .read_to_end(&mut bytes)?;
             let request = contracts::parse_request(&bytes)?;
-            plugin().invoke(operation, &request)?
+            plugin(selection).invoke(operation, &request)?
         }
         _ => {
             return Err("Usage: switchbite [describe | invoke OP --request-file FILE]".into());
@@ -266,11 +347,105 @@ fn cli(args: &[String]) -> Result<(), Box<dyn std::error::Error + Send + Sync>> 
     println!("{}", serde_json::to_string(&result)?);
     Ok(())
 }
+fn install_stackbite(args: &[String]) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    use switchbite::stackbite_plugin::{self, InstallOptions};
+    let mut options = InstallOptions {
+        workspace: std::env::current_dir()?,
+        client: "both".into(),
+        endpoint: DEFAULT_ENDPOINT.into(),
+        model: DEFAULT_MODEL.into(),
+        dry_run: false,
+    };
+    let mut json_output = false;
+    let mut seen = std::collections::BTreeSet::new();
+    let mut i = 1;
+    while i < args.len() {
+        if !seen.insert(args[i].clone()) {
+            return Err("Repeated install option.".into());
+        }
+        match args[i].as_str() {
+            "--dry-run" => options.dry_run = true,
+            "--json" => json_output = true,
+            name @ ("--workspace" | "--client" | "--endpoint" | "--model" | "--judge") => {
+                let value = args.get(i + 1).ok_or("Missing install option value.")?;
+                match name {
+                    "--workspace" => options.workspace = value.into(),
+                    "--client" => options.client = value.clone(),
+                    "--endpoint" => options.endpoint = value.clone(),
+                    "--model" => options.model = value.clone(),
+                    "--judge" if value == "laya" => {}
+                    _ => return Err("Stackbite plugin supports explicit local Laya only.".into()),
+                };
+                i += 1;
+            }
+            _ => return Err("Unknown install option.".into()),
+        }
+        i += 1;
+    }
+    let home = std::env::var_os(if cfg!(windows) { "USERPROFILE" } else { "HOME" })
+        .map(std::path::PathBuf::from)
+        .ok_or("Missing user directory.")?;
+    let data = std::env::var_os(if cfg!(windows) {
+        "LOCALAPPDATA"
+    } else {
+        "XDG_DATA_HOME"
+    })
+    .map(std::path::PathBuf::from)
+    .unwrap_or_else(|| home.join(".local/share"));
+    match stackbite_plugin::install(&options, &std::env::current_exe()?, &data) {
+        Ok(report) => {
+            if json_output {
+                println!("{}", serde_json::to_string(&report)?);
+            } else {
+                println!(
+                    "Switchbite Laya → Stackbite coordinator: {}\nWorkspace: {}\n{}",
+                    report.status,
+                    report.workspace.display(),
+                    report.next_action
+                );
+            }
+        }
+        Err(error) => {
+            if json_output {
+                println!("{}", serde_json::to_string(&error)?);
+            } else {
+                eprintln!("{error}");
+            }
+            std::process::exit(1);
+        }
+    }
+    Ok(())
+}
 fn main() {
-    let args: Vec<String> = std::env::args().skip(1).collect();
+    let mut args: Vec<String> = std::env::args().skip(1).collect();
+    if args.first().is_some_and(|s| s == "stackbite") {
+        if let Err(error) = install_stackbite(&args) {
+            eprintln!("{error}");
+            std::process::exit(1);
+        }
+        return;
+    }
+    let selection = match judge_selection(&mut args) {
+        Ok(selection) => selection,
+        Err(error) => {
+            println!("{}", error.to_value());
+            std::process::exit(1);
+        }
+    };
+    if matches!(selection, JudgeSelection::Laya(_))
+        && !matches!(
+            args.first().map(String::as_str),
+            Some("serve" | "route" | "invoke" | "doctor" | "probe" | "--help" | "-h" | "--version")
+        )
+    {
+        eprintln!(
+            "Use switchbite stackbite to install local Laya, or select it on serve, route, invoke, doctor or probe."
+        );
+        std::process::exit(1);
+    }
     if args == ["--help"] || args == ["-h"] {
         println!(
-            "Switchbite — the decision layer for your agents\nConnect once: switchbite codex | claude | cursor | grok | antigravity | opencode\nConnection options: --dry-run --json --offline --config-file FILE\nCopies a stable executable and merges user-level MCP settings; judge choice stays separate.\nPrint-only setup: setup --client NAME [--offline]\nRecommended MCP: serve --profile agent [--offline]\nAdvanced server options: --max-concurrent N --max-queued N --queue-timeout-ms N --decision-timeout-ms N\nroute | snapshot | evaluate --request-file FILE\nguide | doctor | config --client NAME [--executable ABS] [--offline]\nCompatibility: no args = docking API1; serve --profile cli = original typed tools; invoke OP --request-file FILE"
+            "Switchbite — the decision layer for your agents\nConnect once: switchbite codex | claude | cursor | grok | antigravity | opencode\nConnection options: --dry-run --json --offline --config-file FILE\nCopies a stable executable and merges user-level MCP settings; judge choice stays separate.\nPrint-only setup: setup --client NAME [--offline]\nRecommended MCP: serve --profile agent [--offline]\nLocal Laya: --judge laya [--endpoint http://127.0.0.1:11435] [--model laya:multilingual]\nStackbite plugin: stackbite [--workspace ABS] [--client codex|claude|both] [--endpoint URL] [--model NAME] [--dry-run] [--json]\nLocal synthetic check: probe --judge laya [--endpoint URL] [--model NAME]\nAdvanced server options: --max-concurrent N --max-queued N --queue-timeout-ms N --decision-timeout-ms N\nroute | snapshot | evaluate --request-file FILE\nguide | doctor | config --client NAME [--executable ABS] [--offline]\nCompatibility: no args = docking API1; serve --profile cli = original typed tools; invoke OP --request-file FILE"
         );
         return;
     }
@@ -280,11 +455,11 @@ fn main() {
     {
         let result = (|| -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
             let (offline, config) = agent_config(&args)?;
-            let judge = agent_judge(offline);
+            let judge = agent_judge(&selection, offline);
             let runtime = tokio::runtime::Builder::new_multi_thread()
                 .enable_all()
                 .build()?;
-            runtime.block_on(mcp_server::serve_agent(
+            runtime.block_on(mcp_server::serve_agent_with_judge(
                 judge,
                 config,
                 tokio::io::stdin(),
@@ -322,14 +497,18 @@ fn main() {
             .map_err(|_| "Runtime unavailable.".into())
             .and_then(|runtime| {
                 runtime.block_on(mcp_server::serve_with_profile(
-                    if offline { Plugin::default() } else { plugin() },
+                    if offline {
+                        Plugin::default()
+                    } else {
+                        plugin(&selection)
+                    },
                     tokio::io::stdin(),
                     tokio::io::stdout(),
                     profile,
                 ))
             })
     } else {
-        cli(&args)
+        cli(&args, &selection)
     };
     if let Err(error) = result {
         // Never echo paths, request bytes, credentials, network errors or provider text.

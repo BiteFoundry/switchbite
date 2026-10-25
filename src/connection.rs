@@ -34,13 +34,27 @@ impl Error for ConfigError {}
 /// Codex/Grok use TOML; Claude/Cursor/Antigravity/generic use `mcpServers` JSON;
 /// OpenCode uses the version 2 `mcp.servers` JSON structure.
 pub fn render(client: &str, executable: &Path, offline: bool) -> Result<String, ConfigError> {
-    let executable_text = executable.to_str().ok_or(ConfigError::InvalidExecutable)?;
-    if !executable.is_absolute() || executable_text.chars().any(char::is_control) {
-        return Err(ConfigError::InvalidExecutable);
-    }
     let mut args = vec!["serve", "--profile", "agent"];
     if offline {
         args.push("--offline");
+    }
+    render_launch(client, executable, &args, !offline)
+}
+
+/// Render an explicit launch contract. Local judges pass `forward_typesafe = false`.
+/// This function never reads environment values.
+pub fn render_launch(
+    client: &str,
+    executable: &Path,
+    args: &[&str],
+    forward_typesafe: bool,
+) -> Result<String, ConfigError> {
+    let executable_text = executable.to_str().ok_or(ConfigError::InvalidExecutable)?;
+    if !executable.is_absolute()
+        || executable_text.chars().any(char::is_control)
+        || args.iter().any(|arg| arg.chars().any(char::is_control))
+    {
+        return Err(ConfigError::InvalidExecutable);
     }
 
     match client {
@@ -53,7 +67,7 @@ pub fn render(client: &str, executable: &Path, offline: bool) -> Result<String, 
             let mut snippet =
                 format!("[mcp_servers.switchbite]\ncommand = {command}\nargs = {arguments}\n");
             if client == "codex" {
-                if !offline {
+                if forward_typesafe {
                     snippet.push_str("env_vars = [\"TYPESAFE_API_KEY\"]\n");
                 }
                 snippet.push_str("startup_timeout_sec = 15\ntool_timeout_sec = 45\n");
@@ -65,17 +79,17 @@ pub fn render(client: &str, executable: &Path, offline: bool) -> Result<String, 
         }
         "opencode" => {
             let mut command = vec![executable_text];
-            command.extend(args);
+            command.extend(args.iter().copied());
             pretty(json!({"mcp": {"servers": {"switchbite": {
                 "type": "local", "command": command
             }}}}))
         }
         "claude" | "cursor" | "antigravity" | "generic" => {
             let mut server = json!({"type": "stdio", "command": executable_text, "args": args});
-            if client == "claude" && !offline {
+            if client == "claude" && forward_typesafe {
                 // Claude expands this reference when it loads the configuration.
                 server["env"] = json!({"TYPESAFE_API_KEY": "${TYPESAFE_API_KEY:-}"});
-            } else if client == "cursor" && !offline {
+            } else if client == "cursor" && forward_typesafe {
                 // Cursor's documented variable syntax differs from Claude's.
                 server["env"] = json!({"TYPESAFE_API_KEY": "${env:TYPESAFE_API_KEY}"});
             }

@@ -25,7 +25,7 @@ pub struct McpServer {
     decisions: Arc<tokio::sync::Semaphore>,
     profile: Profile,
     runtime: Arc<crate::runtime::DecisionRuntime>,
-    agent_judge: Option<Arc<crate::agent::AgentJudge>>,
+    agent_judge: Option<Arc<crate::agent::ConfiguredJudge>>,
 }
 impl McpServer {
     pub fn new(plugin: Plugin) -> Self {
@@ -52,6 +52,15 @@ impl McpServer {
         judge: Option<Arc<crate::agent::AgentJudge>>,
         config: crate::runtime::RuntimeConfig,
     ) -> Result<Self, crate::runtime::RuntimeError> {
+        Self::agent_with_judge(
+            judge.map(|j| Arc::new(crate::agent::ConfiguredJudge::legacy(j))),
+            config,
+        )
+    }
+    pub fn agent_with_judge(
+        judge: Option<Arc<crate::agent::ConfiguredJudge>>,
+        config: crate::runtime::RuntimeConfig,
+    ) -> Result<Self, crate::runtime::RuntimeError> {
         let mut server = Self::with_profile(Plugin::default(), Profile::Agent);
         server.runtime = Arc::new(crate::runtime::DecisionRuntime::new(config)?);
         server.agent_judge = judge;
@@ -67,7 +76,7 @@ impl McpServer {
         let judge = self.agent_judge.clone();
         match self
             .runtime
-            .execute(move || crate::agent::route(&args, judge, crate::agent::now_ms()))
+            .execute(move || crate::agent::route_with_judge(&args, judge, crate::agent::now_ms()))
             .await
         {
             Ok(value) => {
@@ -169,8 +178,10 @@ impl ServerHandler for McpServer {
                     result = self.route(args) => result,
                 },
                 "switchbite_status" if args.as_object().unwrap().is_empty() => {
-                    CallToolResult::structured(crate::agent::status(self.agent_judge.is_some()))
-                        .into()
+                    CallToolResult::structured(crate::agent::configured_status(
+                        self.agent_judge.as_deref(),
+                    ))
+                    .into()
                 }
                 "switchbite_validate_plan" | "switchbite_feedback" => {
                     let operation = if call.name == "switchbite_feedback" {
@@ -294,6 +305,19 @@ where
     W: AsyncWrite + Send + Unpin + 'static,
 {
     serve_server(McpServer::agent(judge, config)?, reader, writer).await
+}
+
+pub async fn serve_agent_with_judge<R, W>(
+    judge: Option<Arc<crate::agent::ConfiguredJudge>>,
+    config: crate::runtime::RuntimeConfig,
+    reader: R,
+    writer: W,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>>
+where
+    R: AsyncRead + Send + Unpin + 'static,
+    W: AsyncWrite + Send + Unpin + 'static,
+{
+    serve_server(McpServer::agent_with_judge(judge, config)?, reader, writer).await
 }
 
 async fn serve_server<R, W>(

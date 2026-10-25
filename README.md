@@ -6,7 +6,22 @@ A Rust library and native MCP server that recommends a target from your worker/m
 pool. Give it a task and factual pool; get a clear next action, recommendation or
 hold. Your host owns authorization, reservations, execution and receipts.
 
-**v0.5.0 public preview · Windows x64 · MIT · No Python runtime.**
+**v0.6.0-laya.1 branch preview · Windows x64 · MIT · No Python runtime.**
+
+This branch adds local Laya for Stackbite coordinators. Start a local Laya
+server, then install the project-scoped MCP connection:
+
+```powershell
+.\bin\switchbite.exe stackbite --workspace C:\path\to\project --client both --endpoint http://127.0.0.1:11435 --model laya:multilingual
+```
+
+Start a new coordinator CLI in that workspace and approve its project MCP
+configuration when prompted. The host calls `switchbite_route` before dispatch;
+Laya returns a recommendation or hold. Stackbite still owns worker execution.
+Original Stackbite sources/runtime and global client settings are not modified.
+There is no Jev fallback when local Laya is selected. Read the
+[local Laya installation guide](docs/stackbite-laya.ko.md) for provisioning,
+scope, configuration precedence and verification limits.
 
 [한국어 사용 안내](https://github.com/BiteFoundry/switchbite/blob/main/docs/agent-experience.ko.md)
 · [Coordinator guide](https://github.com/BiteFoundry/switchbite/blob/main/docs/coordinator.md)
@@ -55,7 +70,14 @@ exposes only four tools:
 | switchbite_feedback | Normalize an observed outcome and evidence. |
 | switchbite_status | Check version and judge configuration presence. |
 
-The online judge is **Jev 1.14** (jev-1.14.0). Forward TYPESAFE_API_KEY only through
+The default online judge remains **Jev 1.14** (jev-1.14.0). Local Laya is selected
+explicitly with `--judge laya --endpoint http://127.0.0.1:11435 --model laya:multilingual`
+on `serve --profile agent`, `route`, `invoke`, `doctor`, or `probe`. No TypeSafe key
+is read by that transport. `probe --judge laya` checks a synthetic local decision
+without executing workers. `--offline` still means no judge inference, including
+local inference; select Laya explicitly for local-only operation.
+
+For Jev, forward TYPESAFE_API_KEY only through
 host-authorized environment controls. API access/usage are separate from the MIT
 software license. --offline in setup/config prevents online judging even if the
 parent has a key. Status does not prove authentication or quota.

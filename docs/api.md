@@ -23,7 +23,11 @@ Validated scores are ranked by `0.7 * fit + 0.3 * preference`, then fit and lexi
 ID. Fit must reach 0.5, context sufficiency 0.5 and selected fit confidence 0.3.
 Ties within 0.02 are reported. Probability sums, expected scores, concentration
 and optional legends are checked. Confidence is not calibrated correctness.
-The only accepted judge response model is `jev-1.14.0`.
+The default judge response model is `jev-1.14.0`. A host may explicitly configure
+another judge identity; the request, response and reported model must match that
+identity exactly. Local Laya is opt-in and never impersonates Jev. The local
+adapter derives canonical concentration from its probability distribution;
+this is not empirical correctness calibration.
 
 Only `ready=true` produces an assignment and non-null top-level `candidate_id`.
 Held results include reasons and next actions; `scores.recommended` may still

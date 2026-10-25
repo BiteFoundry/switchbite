@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.6.0-laya.1 — 2026-10-25 (branch preview)
+
+- Project-scoped Stackbite coordinator MCP installation for Codex and Claude,
+  preserving existing configurations and reporting partial writes accurately.
+- Explicit local-only Laya transport, with no proxy, redirects, cloud keys or
+  Jev fallback; exact model validation and model-bound replay snapshots.
+- Canonical score concentration from validated probabilities; absent user
+  preferences are deterministic neutral policy, not extra model questions.
+- Local probe, installation guide, real installed-MCP qualification and packaged
+  Windows preview. Domain learning, CUDA tuning and worker execution are separate.
+
 ## 0.4.0 — 2026-10-23
 
 - Recommended four-tool agent profile, coordinator instructions and read-only setup handoff.

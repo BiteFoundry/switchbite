@@ -28,7 +28,7 @@ same harness, with distinct IDs for each actual executable target.
 
 The algorithm recommends the highest-ranked eligible candidate under supplied
 facts and policy. No measured optimality across real tasks/models is claimed.
-The decision **judge** (currently Jev 1.14) is separate from the candidate models
+The decision **judge** (Jev 1.14 by default; explicit local Laya on this branch) is separate from the candidate models
 that would perform the task (for example, a Codex or Claude worker).
 
 ## Minimal host integration

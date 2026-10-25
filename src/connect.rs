@@ -193,13 +193,45 @@ pub fn merge(
     executable: &Path,
     offline: bool,
 ) -> Result<String, ConnectError> {
+    let snippet = connection::render(client, executable, offline).map_err(config_error)?;
+    merge_snippet(client, existing, &snippet, false)
+}
+
+fn config_error(error: connection::ConfigError) -> ConnectError {
+    match error {
+        connection::ConfigError::UnsupportedClient => ConnectError::UnsupportedClient,
+        _ => ConnectError::InvalidConfig,
+    }
+}
+
+fn typesafe_key(name: &str) -> bool {
+    // Windows environment names are case-insensitive. Remove equivalent grants
+    // on every platform so a portable config cannot reintroduce the cloud key.
+    name.eq_ignore_ascii_case("TYPESAFE_API_KEY")
+}
+
+/// Use the same ownership and format-preserving merge for an explicit local launch.
+/// Remove the cloud judge's explicit credential grants when changing to a local judge.
+pub fn merge_launch(
+    client: &str,
+    existing: &str,
+    executable: &Path,
+    args: &[&str],
+) -> Result<String, ConnectError> {
+    let snippet =
+        connection::render_launch(client, executable, args, false).map_err(config_error)?;
+    merge_snippet(client, existing, &snippet, true)
+}
+
+fn merge_snippet(
+    client: &str,
+    existing: &str,
+    snippet: &str,
+    local_judge: bool,
+) -> Result<String, ConnectError> {
     if existing.len() as u64 > MAX_CONFIG {
         return Err(ConnectError::InvalidConfig);
     }
-    let snippet = connection::render(client, executable, offline).map_err(|e| match e {
-        connection::ConfigError::UnsupportedClient => ConnectError::UnsupportedClient,
-        _ => ConnectError::InvalidConfig,
-    })?;
     if matches!(client, "codex" | "grok") {
         let mut document = existing
             .parse::<toml_edit::DocumentMut>()
@@ -233,6 +265,30 @@ pub fn merge(
             .get_mut("switchbite")
             .and_then(toml_edit::Item::as_table_like_mut)
             .ok_or(ConnectError::InvalidConfig)?;
+        if local_judge {
+            if let Some(grants) = table.get_mut("env_vars") {
+                let grants = grants.as_array_mut().ok_or(ConnectError::InvalidConfig)?;
+                grants.retain(|value| {
+                    !value.as_str().is_some_and(typesafe_key)
+                        && !value
+                            .as_inline_table()
+                            .and_then(|entry| entry.get("name"))
+                            .and_then(toml_edit::Value::as_str)
+                            .is_some_and(typesafe_key)
+                });
+            }
+            if let Some(env) = table.get_mut("env") {
+                let env = env.as_table_like_mut().ok_or(ConnectError::InvalidConfig)?;
+                let keys: Vec<_> = env
+                    .iter()
+                    .filter(|(key, _)| typesafe_key(key))
+                    .map(|(key, _)| key.to_owned())
+                    .collect();
+                for key in keys {
+                    env.remove(&key);
+                }
+            }
+        }
         for (key, value) in desired["mcp_servers"]["switchbite"]
             .as_table()
             .ok_or(ConnectError::InvalidConfig)?
@@ -284,7 +340,7 @@ pub fn merge(
     let mut object = root
         .object_value_or_create()
         .ok_or(ConnectError::InvalidConfig)?;
-    let desired: Value = serde_json::from_str(&snippet).map_err(|_| ConnectError::InvalidConfig)?;
+    let desired: Value = serde_json::from_str(snippet).map_err(|_| ConnectError::InvalidConfig)?;
     let keys: &[&str] = if client == "opencode" {
         &["mcp", "servers"]
     } else {
@@ -316,6 +372,20 @@ pub fn merge(
     let server = object
         .object_value_or_create("switchbite")
         .ok_or(ConnectError::InvalidConfig)?;
+    if local_judge && let Some(property) = server.get("env") {
+        let env = property
+            .value()
+            .and_then(|node| node.as_object())
+            .ok_or(ConnectError::InvalidConfig)?;
+        for property in env.properties() {
+            if property
+                .decoded_name()
+                .is_some_and(|key| typesafe_key(&key))
+            {
+                property.remove();
+            }
+        }
+    }
     for (key, value) in server_value["switchbite"]
         .as_object()
         .ok_or(ConnectError::InvalidConfig)?
@@ -395,6 +465,47 @@ pub fn connect_to(
     offline: bool,
     dry_run: bool,
 ) -> Result<Report, ConnectError> {
+    connect_to_inner(client, path, executable, dry_run, |text| {
+        merge(client, text, executable, offline)
+    })
+}
+
+/// Register an explicit local launch using the same lock, backup and atomic rename.
+pub fn connect_launch_to(
+    client: &str,
+    path: &Path,
+    executable: &Path,
+    args: &[&str],
+    dry_run: bool,
+) -> Result<Report, ConnectError> {
+    let mut report = connect_to_inner(client, path, executable, dry_run, |text| {
+        merge_launch(client, text, executable, args)
+    })?;
+    report.judge_configuration = "local_laya";
+    Ok(report)
+}
+
+/// Save an owned plugin descriptor through the connection transaction engine.
+pub(crate) fn save_descriptor(
+    path: &Path,
+    executable: &Path,
+    text: &str,
+    dry_run: bool,
+    validate: impl FnOnce(&str) -> Result<(), ConnectError>,
+) -> Result<Report, ConnectError> {
+    connect_to_inner("claude", path, executable, dry_run, |existing| {
+        validate(existing)?;
+        Ok(text.to_owned())
+    })
+}
+
+fn connect_to_inner(
+    client: &str,
+    path: &Path,
+    executable: &Path,
+    dry_run: bool,
+    merge: impl FnOnce(&str) -> Result<String, ConnectError>,
+) -> Result<Report, ConnectError> {
     if !CLIENTS.contains(&client) {
         return Err(ConnectError::UnsupportedClient);
     }
@@ -425,7 +536,7 @@ pub fn connect_to(
     let original = read(path)?;
     let text = std::str::from_utf8(original.as_deref().unwrap_or_default())
         .map_err(|_| ConnectError::InvalidConfig)?;
-    let updated = merge(client, text, executable, offline)?;
+    let updated = merge(text)?;
     let changed = original.as_deref() != Some(updated.as_bytes());
     let mut report = Report {
         client: client.to_owned(),
