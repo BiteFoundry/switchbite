@@ -62,8 +62,9 @@ fn observation(dir: &Path, kind: &str, action_value: &Value) -> Result<Value, Va
     if bytes.len() as u64 > MAX_ARTIFACT {
         return Err(error("coordinator_artifact_invalid"));
     }
+    let json_bytes = bytes.strip_prefix(b"\xef\xbb\xbf").unwrap_or(&bytes);
     let mut result: Value =
-        serde_json::from_slice(&bytes).map_err(|_| error("coordinator_artifact_invalid"))?;
+        serde_json::from_slice(json_bytes).map_err(|_| error("coordinator_artifact_invalid"))?;
     if kind == "review_route" {
         let candidate_id = result["candidate_id"]
             .as_str()
@@ -200,6 +201,30 @@ pub fn cancel(root: &Path, run: &str, action_value: &Value) -> Result<(), Value>
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn accepts_utf8_bom_for_plan_repair_and_route_review() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("switchbite-observation.json");
+        let action = json!({"payload":{"candidate_snapshot":[{"id":"valid","available":true}]}});
+        for (kind, value) in [
+            ("plan", json!({"plan":{"nodes":[{"id":"build","objective":"Build"}]}})),
+            ("repair", json!({"task":{"id":"build","objective":"Fix"}})),
+            ("review_route", json!({"status":"ready","candidate_id":"valid","reason_codes":["coordinator_review"],"summary":"Eligible"})),
+        ] {
+            let plain = serde_json::to_vec(&value).unwrap();
+            fs::write(&path, &plain).unwrap();
+            let expected = observation(dir.path(), kind, &action).unwrap();
+            let mut bom = b"\xef\xbb\xbf".to_vec();
+            bom.extend_from_slice(&plain);
+            fs::write(&path, bom).unwrap();
+            assert_eq!(observation(dir.path(), kind, &action).unwrap(), expected);
+        }
+        for bytes in [b"\xef\xbb\xbf{".as_slice(), b"\xef\xbb\xbf\xef\xbb\xbf{}".as_slice(), b"\xff\xfe{\0}\0".as_slice(), b"\xef\xbb\xbf{}".as_slice()] {
+            fs::write(&path, bytes).unwrap();
+            assert_eq!(observation(dir.path(), "plan", &action).unwrap_err()["code"], "coordinator_artifact_invalid");
+        }
+    }
 
     #[test]
     fn route_review_rejects_invented_or_unavailable_candidate() {
