@@ -12,6 +12,57 @@ use std::{
 };
 
 const MAX_OUTPUT: u64 = 1024 * 1024;
+// Codex discovers PowerShell from its child PATH. Store aliases cannot be
+// started by the restricted Windows token; prefer a real executable instead.
+#[cfg(windows)]
+fn codex_shell_path(path: &std::ffi::OsStr) -> Option<std::ffi::OsString> {
+    fn packaged(path: &Path) -> bool {
+        let blocked = |p: &Path| {
+            p.components().any(|part| {
+                part.as_os_str()
+                    .to_string_lossy()
+                    .eq_ignore_ascii_case("WindowsApps")
+            })
+        };
+        blocked(path) || fs::canonicalize(path).ok().is_some_and(|p| blocked(&p))
+    }
+    let dirs: Vec<PathBuf> = std::env::split_paths(path).collect();
+    let find = |name: &str| {
+        dirs.iter()
+            .find(|dir| {
+                let exe = dir.join(name);
+                dir.is_absolute() && exe.is_file() && !packaged(&exe)
+            })
+            .cloned()
+    };
+    let preferred = find("pwsh.exe");
+    let selected = preferred
+        .clone()
+        .or_else(|| find("powershell.exe"))
+        .or_else(|| {
+            let dir = PathBuf::from(std::env::var_os("SystemRoot")?)
+                .join("System32")
+                .join("WindowsPowerShell")
+                .join("v1.0");
+            let exe = dir.join("powershell.exe");
+            (exe.is_file() && !packaged(&exe)).then_some(dir)
+        })?;
+    let mut adjusted = vec![selected];
+    adjusted.extend(dirs.into_iter().filter(|dir| {
+        // With only Windows PowerShell available, remove inaccessible pwsh
+        // aliases so Codex can fall back instead of rediscovering the alias.
+        preferred.is_some() || !(packaged(&dir.join("pwsh.exe")) && dir.join("pwsh.exe").exists())
+    }));
+    std::env::join_paths(adjusted).ok()
+}
+#[cfg(windows)]
+fn configure_codex_shell(cmd: &mut Command) {
+    if let Some(path) = std::env::var_os("PATH").and_then(|p| codex_shell_path(&p)) {
+        cmd.env("PATH", path);
+    }
+}
+#[cfg(not(windows))]
+fn configure_codex_shell(_: &mut Command) {}
 
 #[derive(Debug)]
 pub struct HostError(&'static str);
@@ -688,6 +739,7 @@ impl LocalHost {
         let message_path = messages.join(format!("{}.txt", hash(id)));
         match provider {
             "codex" => {
+                configure_codex_shell(&mut cmd);
                 cmd.args([
                     "exec",
                     "--json",
@@ -1157,5 +1209,32 @@ mod tests {
         let stream=b"{\"type\":\"thread.started\",\"thread_id\":\"t\"}\n{\"type\":\"turn.started\"}\n{\"type\":\"item.completed\",\"item\":{\"type\":\"command_execution\",\"status\":\"failed\",\"exit_code\":1}}\n{\"type\":\"item.completed\",\"item\":{\"type\":\"agent_message\",\"text\":\"Created the required artifact with another tool\"}}\n{\"type\":\"turn.completed\"}\n";
         assert!(verified_receipt("codex", stream, "unused").0);
         assert!(!verified_receipt("codex",b"{\"type\":\"thread.started\",\"thread_id\":\"t\"}\n{\"type\":\"turn.started\"}\n{\"type\":\"turn.failed\"}\n","unused").0);
+    }
+}
+
+#[cfg(all(test, windows))]
+mod codex_shell_tests {
+    use super::*;
+    #[test]
+    fn prefers_portable_pwsh_and_falls_back_without_store_aliases() {
+        let temp = tempfile::tempdir().unwrap();
+        let alias = temp.path().join("WindowsApps");
+        let portable = temp.path().join("portable");
+        let legacy = temp.path().join("legacy");
+        for dir in [&alias, &portable, &legacy] {
+            fs::create_dir_all(dir).unwrap();
+        }
+        fs::write(alias.join("pwsh.exe"), b"alias").unwrap();
+        fs::write(portable.join("pwsh.exe"), b"portable").unwrap();
+        fs::write(legacy.join("powershell.exe"), b"legacy").unwrap();
+        let path = std::env::join_paths([&alias, &legacy, &portable]).unwrap();
+        let adjusted = codex_shell_path(&path).unwrap();
+        let dirs: Vec<_> = std::env::split_paths(&adjusted).collect();
+        assert_eq!(dirs[0], portable);
+        fs::remove_file(portable.join("pwsh.exe")).unwrap();
+        let adjusted = codex_shell_path(&path).unwrap();
+        let dirs: Vec<_> = std::env::split_paths(&adjusted).collect();
+        assert_eq!(dirs[0], legacy);
+        assert!(!dirs.contains(&alias));
     }
 }
