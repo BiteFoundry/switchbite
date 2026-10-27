@@ -1202,7 +1202,12 @@ fn reconcile_candidates(s: &mut State) -> bool {
         if invalid.contains(&task.node["id"]) {
             task.candidate = None;
             task.prepared = None;
-            task.state = "needs_pool".into();
+            task.state = if task.node.get("routing").is_none() {
+                "pending"
+            } else {
+                "needs_pool"
+            }
+            .into();
         }
     }
     true

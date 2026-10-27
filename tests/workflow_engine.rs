@@ -868,9 +868,12 @@ fn parallelism_changes_preserve_claims_and_resume_queued_work() {
 fn quota_quarantine_invalidates_unclaimed_launch_but_keeps_claimed_launch() {
     let dir = tempfile::tempdir().unwrap();
     let w = Workflow::new(dir.path().to_path_buf());
-    let mut s = w.start(&parallel_request(Some(3))).unwrap();
+    let mut req = parallel_request(Some(4));
+    req["max_parallel"] = json!(4);
+    req["plan"]["nodes"].as_array_mut().unwrap().push(json!({"id":"four","objective":"four","outputs":["src/four"],"routing":{"candidate_id":"a"}}));
+    let mut s = w.start(&req).unwrap();
     let run = s["run_id"].as_str().unwrap().to_owned();
-    for id in ["one", "two", "three"] {
+    for id in ["one", "two", "three", "four"] {
         s = send(
             &w,
             &run,
@@ -878,7 +881,7 @@ fn quota_quarantine_invalidates_unclaimed_launch_but_keeps_claimed_launch() {
             json!({"status":"ready","candidate_id":"a"}),
         );
     }
-    for id in ["one", "two", "three"] {
+    for id in ["one", "two", "three", "four"] {
         s = send(&w, &run, action(&s, "prepare", id), prepared());
     }
     let unclaimed = action(&s, "launch", "two")["id"]
@@ -897,7 +900,25 @@ fn quota_quarantine_invalidates_unclaimed_launch_but_keeps_claimed_launch() {
         json!({"status":"failed","error":{"code":"rate_limited"}}),
     );
     assert!(!w.claim(&run, &unclaimed).unwrap());
-    assert_eq!(action(&s, "refresh_pool", "two")["kind"], "refresh_pool");
+    assert_eq!(action(&s, "refresh_pool", "four")["kind"], "refresh_pool");
+    let route = action(&s, "route", "two");
+    assert!(
+        route["payload"]["candidate_snapshot"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|c| c["id"] == "a" && c["available"] == false)
+    );
+    s = send(
+        &w,
+        &run,
+        route,
+        json!({"status":"ready","candidate_id":"b"}),
+    );
+    assert_eq!(
+        action(&s, "prepare", "two")["payload"]["candidate"]["id"],
+        "b"
+    );
     assert_eq!(action(&s, "launch", "three")["id"], claimed);
     s = send(
         &w,
