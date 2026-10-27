@@ -522,7 +522,13 @@ impl Workflow {
                         s.tasks[i].state = "verifying".into();
                     }
                     Some("failed") => {
-                        s.tasks[i].state = "failed".into();
+                        s.tasks[i].state =
+                            if s.status == "cancelled" && result["cancelled"] == true {
+                                "cancelled"
+                            } else {
+                                "failed"
+                            }
+                            .into();
                     }
                     Some("cancelled") if s.status == "cancelled" => {
                         s.tasks[i].state = "cancelled".into();
@@ -589,9 +595,28 @@ impl Workflow {
                 payload[k] = v.clone();
             }
         }
-        s.actions.push(json!({"id":format!("action-{}",s.sequence),"kind":kind,"run_id":s.run_id,"task_id":tid,"payload":payload}));
+        s.actions.push(json!({"id":format!("{}-action-{}",s.run_id,s.sequence),"kind":kind,"run_id":s.run_id,"task_id":tid,"payload":payload}));
     }
     fn schedule(&self, s: &mut State) {
+        if s.status == "cancelled" {
+            for i in 0..s.tasks.len() {
+                if ["running", "unknown"].contains(&s.tasks[i].state.as_str())
+                    && !s
+                        .actions
+                        .iter()
+                        .any(|a| a["task_id"] == s.tasks[i].node["id"])
+                {
+                    let execution_id = s.tasks[i].execution_id.clone();
+                    self.action(
+                        s,
+                        "inspect",
+                        Some(i),
+                        json!({"operation":"cancel", "execution_id":execution_id}),
+                    );
+                }
+            }
+            return;
+        }
         if s.status != "running" {
             return;
         }

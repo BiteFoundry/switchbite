@@ -187,3 +187,34 @@ fn insufficient_context_and_bounded_repair() {
         "retry"
     );
 }
+#[test]
+fn runs_have_unique_action_ids_and_cancel_unknown_is_reconciled() {
+    let dir = tempfile::tempdir().unwrap();
+    let w = Workflow::new(dir.path().to_path_buf());
+    let a = w.start(&request()).unwrap();
+    let b = w.start(&request()).unwrap();
+    assert_ne!(a["actions"][0]["id"], b["actions"][0]["id"]);
+    let run = a["run_id"].as_str().unwrap();
+    let a = send(
+        &w,
+        run,
+        action(&a, "route", "one"),
+        json!({"status":"ready","candidate_id":"a"}),
+    );
+    let a = send(&w, run, action(&a, "prepare", "one"), prepared());
+    assert_eq!(action(&a, "launch", "one")["kind"], "launch");
+    let a = w.control(run, "cancel").unwrap();
+    let inspection = action(&a, "inspect", "one").clone();
+    let a = send(&w, run, &inspection, json!({"status":"unknown"}));
+    let next = action(&a, "inspect", "one").clone();
+    assert_ne!(next["id"], inspection["id"]);
+    let a = send(&w, run, &next, json!({"status":"failed","cancelled":true}));
+    assert!(
+        !a["actions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|x| x["task_id"] == "one")
+    );
+    assert_eq!(a["tasks"][0]["status"], "cancelled");
+}
