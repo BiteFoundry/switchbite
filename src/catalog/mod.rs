@@ -200,6 +200,7 @@ fn candidate(
         "claude" => "Implementation, refactoring and bug fixes",
         "codex" => "Orchestration, planning and independent review",
         "cursor" => "General coding, exploration and debugging",
+        "antigravity" => "Mockups, writing and general coding",
         _ => "Explicit model and custom agent work",
     };
     json!({"id":id,"description":format!("{role}; {provider} model {model}, {effort} effort."),"capabilities":["file.read","file.write","code.change","code.review","html.write","data.write","writing","code.explore"],"available":crate::adapters::supports_provider(provider),"provider":provider,"executable":exe.to_string_lossy(),"model":model,"effort":effort,"resource_key":format!("{provider}:{scope}"),"catalog_info":{"source":source,"readiness":"unverified","observed_at_ms":observed}})
@@ -255,6 +256,21 @@ fn claude_efforts(help: &str) -> Vec<&'static str> {
         })
         .collect()
 }
+fn antigravity_efforts(help: &str) -> Vec<&'static str> {
+    let Some(line) = help
+        .lines()
+        .find(|line| line.trim_start().starts_with("--effort "))
+    else {
+        return Vec::new();
+    };
+    let Some(options) = line.split('(').nth(1).and_then(|s| s.split(')').next()) else {
+        return Vec::new();
+    };
+    ["low", "medium", "high", "xhigh", "max"]
+        .into_iter()
+        .filter(|effort| options.split('|').any(|s| s.trim() == *effort))
+        .collect()
+}
 fn codex_models(value: &Value) -> Vec<(String, String, u64)> {
     let mut result = Vec::new();
     if let Some(models) = value.get("models").and_then(Value::as_array) {
@@ -303,7 +319,7 @@ fn codex_cache() -> Vec<(String, String, u64)> {
         .unwrap_or_default()
 }
 // Replace the complete cache file in one operation. Concurrent writers use distinct names.
-fn write_cache(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+pub(crate) fn write_cache(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     use std::io::Write;
     use std::sync::atomic::{AtomicU64, Ordering};
     static SEQUENCE: AtomicU64 = AtomicU64::new(0);
@@ -485,11 +501,18 @@ pub fn snapshot(workspace: &Path, selection: &Value) -> Result<Value, CatalogErr
         } else {
             Vec::new()
         };
+        let antigravity_levels = if provider == "antigravity" {
+            probe(&exe, &["--help"])
+                .map(|help| antigravity_efforts(&help))
+                .unwrap_or_default()
+        } else {
+            Vec::new()
+        };
         for (model, source) in models {
             candidates.push(candidate(
                 provider, &exe, &model, "default", &source, timestamp, &scope,
             ));
-            for effort in &claude_levels {
+            for effort in claude_levels.iter().chain(antigravity_levels.iter()) {
                 candidates.push(candidate(
                     provider,
                     &exe,
@@ -728,6 +751,14 @@ pub fn shortlist(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn antigravity_effort_options_come_from_help() {
+        assert_eq!(
+            antigravity_efforts("  --effort  Reasoning effort (low|medium|high|xhigh|max)"),
+            vec!["low", "medium", "high", "xhigh", "max"]
+        );
+        assert!(antigravity_efforts("--help").is_empty());
+    }
     #[test]
     fn observed_new_cli_model_formats_are_parsed_without_headers() {
         let grok = "You are not authenticated.\n\nDefault model: grok-4.7-build-fast\n\nAvailable models:\n  - grok-4.7\n  * grok-4.7-build-fast (default)\n";

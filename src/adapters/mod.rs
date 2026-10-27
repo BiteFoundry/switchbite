@@ -4,7 +4,10 @@ mod workers;
 use workers::verified_receipt;
 
 pub fn supports_provider(provider: &str) -> bool {
-    matches!(provider, "claude" | "codex" | "cursor" | "opencode")
+    matches!(
+        provider,
+        "claude" | "codex" | "cursor" | "opencode" | "antigravity"
+    )
 }
 use sha2::{Digest, Sha256};
 use std::{
@@ -371,7 +374,7 @@ impl LocalHost {
         })
     }
     pub fn describe(&self) -> Value {
-        json!({"kind":"local","base":self.base,"providers":["claude","codex","cursor","opencode"],"process_tree":if cfg!(windows) {"windows_job"} else {"unsupported"},"timeout_seconds":self.timeout,"requires":["git","candidate.provider","candidate.executable","candidate.model","candidate.effort"]})
+        json!({"kind":"local","base":self.base,"providers":["claude","codex","cursor","opencode","antigravity"],"process_tree":if cfg!(windows) {"windows_job"} else {"unsupported"},"timeout_seconds":self.timeout,"requires":["git","candidate.provider","candidate.executable","candidate.model","candidate.effort"]})
     }
     pub fn perform(&self, action: &Value) -> Result<Value, HostError> {
         let id = string(action, "id")?;
@@ -735,6 +738,9 @@ impl LocalHost {
         let stream_path = messages.join(format!("{}.jsonl", hash(id)));
         fs::write(&stream_path, &output).map_err(|_| HostError("io_error"))?;
         let mut result = json!({"status":if ok && verified {"completed"} else {"failed"},"execution_id":id,"completion_verified":ok && verified,"requested_model":model,"resolved_model":resolved_model,"message_ref":if message_path.exists(){Some(message_path)}else{None},"stream_ref":stream_path,"reason":if !ok {Some(stderr_hint.or_else(|| failure_hint(&output)).unwrap_or("provider_exit_failed"))} else if !verified {Some("provider_receipt_invalid")} else {None}});
+        if ok && verified && provider == "antigravity" {
+            result["session_id"] = json!(workers::antigravity_session(&output));
+        }
         attach_rate_limit_error(&mut result);
         if stderr_hint == Some("rate_limited") {
             result["stderr_ref"] =

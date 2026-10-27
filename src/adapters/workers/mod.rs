@@ -7,6 +7,10 @@ pub(super) fn verified_receipt(
     output: &[u8],
     session: &str,
 ) -> (bool, Option<String>) {
+    if provider == "antigravity" {
+        let receipt = antigravity_receipt(output);
+        return (receipt.is_some(), receipt.and_then(|r| r.1));
+    }
     if provider == "cursor" || provider == "opencode" {
         return native_receipt(provider, output);
     }
@@ -219,6 +223,25 @@ pub(super) fn command(
                 prompt,
             ]);
         }
+        "antigravity" => {
+            cmd.args([
+                "--print",
+                prompt,
+                "--output-format",
+                "stream-json",
+                "--model",
+                model,
+                "--sandbox",
+                "--mode",
+                "accept-edits",
+            ]);
+            if effort != "default" {
+                if !["low", "medium", "high", "xhigh", "max"].contains(&effort) {
+                    return Err(HostError("unsupported_effort"));
+                }
+                cmd.args(["--effort", effort]);
+            }
+        }
         "opencode" => {
             let selected = if effort == "default" {
                 model.to_owned()
@@ -321,6 +344,9 @@ fn native_command(provider: &str, executable: &str) -> Result<Command, HostError
 }
 
 pub(super) fn message(provider: &str, output: &[u8]) -> Option<String> {
+    if provider == "antigravity" {
+        return antigravity_receipt(output).map(|r| r.2);
+    }
     let mut text = String::new();
     for line in output.split(|b| *b == b'\n').filter(|l| !l.is_empty()) {
         let v: Value = serde_json::from_slice(line).ok()?;
@@ -337,6 +363,73 @@ pub(super) fn message(provider: &str, output: &[u8]) -> Option<String> {
         }
     }
     (!text.is_empty()).then_some(text)
+}
+
+// The observed stream has one init and one matching successful result. The
+// native conversation ID is allocated by agy, not the host's session UUID.
+fn antigravity_receipt(output: &[u8]) -> Option<(String, Option<String>, String)> {
+    let mut session: Option<String> = None;
+    let mut result: Option<(String, Option<String>, String)> = None;
+    for line in output.split(|b| *b == b'\n').filter(|l| !l.is_empty()) {
+        let v: Value = serde_json::from_slice(line).ok()?;
+        let event = v.get("event")?.as_str()?;
+        if result.is_some() {
+            return None;
+        }
+        match event {
+            "init" => {
+                if session.is_some() {
+                    return None;
+                }
+                let id = v["conversation_id"]
+                    .as_str()
+                    .filter(|s| !s.is_empty() && s.len() <= 256)?;
+                session = Some(id.to_owned());
+            }
+            "result" => {
+                let id = session.as_deref()?;
+                let terminal = v.get("result")?.as_object()?;
+                if terminal.get("conversation_id")?.as_str()? != id
+                    || terminal.get("status")?.as_str()? != "SUCCESS"
+                {
+                    return None;
+                }
+                let response = terminal.get("response")?.as_str()?.to_owned();
+                let model = terminal
+                    .get("model")
+                    .and_then(Value::as_str)
+                    .filter(|s| !s.is_empty() && s.len() <= 256)
+                    .map(str::to_owned);
+                result = Some((id.to_owned(), model, response));
+            }
+            "error" | "cancelled" | "canceled" => return None,
+            _ => {
+                let id = session.as_deref()?;
+                if v.get("conversation_id")
+                    .is_some_and(|x| x.as_str() != Some(id))
+                {
+                    return None;
+                }
+                if event == "step_update" {
+                    let step = v.get("step_update")?.as_object()?;
+                    if step.get("conversation_id").and_then(Value::as_str) != Some(id) {
+                        return None;
+                    }
+                    if step
+                        .get("state")
+                        .and_then(Value::as_str)
+                        .is_some_and(|s| ["ERROR", "FAILED", "CANCELLED", "CANCELED"].contains(&s))
+                    {
+                        return None;
+                    }
+                }
+            }
+        }
+    }
+    result
+}
+pub(super) fn antigravity_session(output: &[u8]) -> Option<String> {
+    antigravity_receipt(output).map(|r| r.0)
 }
 
 fn native_receipt(provider: &str, output: &[u8]) -> (bool, Option<String>) {
@@ -446,6 +539,108 @@ fn native_receipt(provider: &str, output: &[u8]) -> (bool, Option<String>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn antigravity_observed_receipt_requires_matching_successful_terminal() {
+        // Derived from the observed successful stream; identifiers and response are sanitized.
+        let success = b"{\"event\":\"init\",\"conversation_id\":\"s\",\"init\":{}}\n{\"event\":\"step_update\",\"step_update\":{\"conversation_id\":\"s\",\"step_index\":1,\"state\":\"DONE\",\"step_type\":\"agent_response\",\"text_delta\":\"OK\"}}\n{\"event\":\"result\",\"result\":{\"conversation_id\":\"s\",\"status\":\"SUCCESS\",\"response\":\"OK\\n\"}}\n";
+        assert_eq!(
+            verified_receipt("antigravity", success, "host-session"),
+            (true, None)
+        );
+        assert_eq!(antigravity_session(success).as_deref(), Some("s"));
+        assert_eq!(message("antigravity", success).as_deref(), Some("OK\n"));
+        // Synthetic failure, incomplete, foreign-session and contradictory-terminal streams.
+        let input = String::from_utf8(success.to_vec()).unwrap();
+        assert!(
+            !verified_receipt(
+                "antigravity",
+                input.replace("SUCCESS", "ERROR").as_bytes(),
+                ""
+            )
+            .0
+        );
+        assert!(
+            !verified_receipt(
+                "antigravity",
+                input
+                    .lines()
+                    .take(2)
+                    .collect::<Vec<_>>()
+                    .join("\n")
+                    .as_bytes(),
+                ""
+            )
+            .0
+        );
+        assert!(
+            !verified_receipt(
+                "antigravity",
+                input
+                    .replace(
+                        "\"conversation_id\":\"s\",\"status\"",
+                        "\"conversation_id\":\"foreign\",\"status\""
+                    )
+                    .as_bytes(),
+                ""
+            )
+            .0
+        );
+        assert!(
+            !verified_receipt(
+                "antigravity",
+                format!("{input}{{\"event\":\"error\"}}\n").as_bytes(),
+                ""
+            )
+            .0
+        );
+    }
+    #[test]
+    fn antigravity_command_uses_sandbox_and_checked_effort() {
+        let cmd = command(
+            "antigravity",
+            "agy",
+            "model",
+            "high",
+            "ignored",
+            Path::new("message"),
+            Path::new("."),
+            "prompt",
+        )
+        .unwrap();
+        let args: Vec<_> = cmd
+            .get_args()
+            .map(|a| a.to_string_lossy().to_string())
+            .collect();
+        assert_eq!(
+            args,
+            [
+                "--print",
+                "prompt",
+                "--output-format",
+                "stream-json",
+                "--model",
+                "model",
+                "--sandbox",
+                "--mode",
+                "accept-edits",
+                "--effort",
+                "high"
+            ]
+        );
+        assert!(
+            command(
+                "antigravity",
+                "agy",
+                "model",
+                "invalid",
+                "",
+                Path::new("message"),
+                Path::new("."),
+                "prompt"
+            )
+            .is_err()
+        );
+    }
     #[test]
     fn native_receipts_distinguish_recovered_tool_errors_from_turn_failures() {
         let cursor = b"{\"type\":\"system\",\"subtype\":\"init\",\"session_id\":\"s\",\"model\":\"m\"}\n{\"type\":\"tool_call\",\"session_id\":\"s\",\"subtype\":\"completed\"}\n{\"type\":\"result\",\"session_id\":\"s\",\"subtype\":\"success\",\"is_error\":false,\"result\":\"done\"}\n";
