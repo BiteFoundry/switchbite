@@ -1,5 +1,6 @@
 use serde_json::{Value, json};
 mod process;
+pub mod stackbite_backend;
 mod workers;
 use workers::verified_receipt;
 
@@ -93,6 +94,7 @@ pub struct LocalHost {
     worktrees: PathBuf,
     base: String,
     timeout: u64,
+    backend: Option<PathBuf>,
 }
 fn git_lock(root: &Path) -> Result<fs::File, HostError> {
     lock_at(&root.join("git.lock"))
@@ -433,6 +435,7 @@ impl LocalHost {
             state,
             worktrees,
             base,
+            backend: stackbite_backend::configured(config)?,
             timeout: config
                 .get("timeout_seconds")
                 .and_then(Value::as_u64)
@@ -797,6 +800,14 @@ impl LocalHost {
             &dir,
             if prompt_path.is_some() { "-" } else { &prompt },
         )?;
+        if let Some(backend) = &self.backend {
+            cmd = stackbite_backend::wrap(
+                backend,
+                provider,
+                cmd,
+                &messages.join(format!("{}.backend.json", hash(id))),
+            )?;
+        }
         for (key, _) in std::env::vars_os() {
             let name = key.to_string_lossy().to_ascii_uppercase();
             if [
@@ -850,6 +861,9 @@ impl LocalHost {
         let stream_path = messages.join(format!("{}.jsonl", hash(id)));
         fs::write(&stream_path, &output).map_err(|_| HostError("io_error"))?;
         let mut result = json!({"status":if ok && verified {"completed"} else {"failed"},"execution_id":id,"completion_verified":ok && verified,"requested_model":model,"resolved_model":resolved_model,"message_ref":if message_path.exists(){Some(message_path)}else{None},"stream_ref":stream_path,"reason":if !ok {Some(stderr_hint.or_else(|| failure_hint(&output)).unwrap_or("provider_exit_failed"))} else if !verified {Some("provider_receipt_invalid")} else {None}});
+        if self.backend.is_some() {
+            result["backend"] = json!("stackbite_private_clone");
+        }
         if provider == "claude"
             && verified
             && let Some(count) = workers::permission_denial_count(&output)
@@ -1239,6 +1253,7 @@ mod tests {
             worktrees: temp.path().to_owned(),
             base: String::new(),
             timeout: 20,
+            backend: None,
         };
         let prompt = format!("{}한글", "x".repeat(70_000));
         let path = temp.path().join("prompt");
@@ -1275,6 +1290,7 @@ mod tests {
             worktrees: temp.path().to_owned(),
             base: String::new(),
             timeout: 20,
+            backend: None,
         };
         let mut cmd = Command::new("powershell.exe");
         cmd.args(["-NoProfile", "-Command", "[Console]::Out.WriteLine('partial'); [Console]::Error.WriteLine('ActionRequiredError: Weekly usage limit reached. It resets in 1 day.'); Start-Sleep -Seconds 15"]);
@@ -1307,6 +1323,7 @@ mod tests {
             worktrees: temp.path().to_owned(),
             base: String::new(),
             timeout: 20,
+            backend: None,
         };
         let mut cmd = Command::new("powershell.exe");
         cmd.args([
@@ -1339,6 +1356,7 @@ mod tests {
                 worktrees: worker_root.clone(),
                 base: String::new(),
                 timeout: 10,
+                backend: None,
             };
             let mut cmd = Command::new("powershell.exe");
             cmd.args(["-NoProfile", "-Command", "[Console]::Out.WriteLine('live'); [Console]::Error.WriteLine('error'); Start-Sleep -Seconds 2"]);
@@ -1389,6 +1407,7 @@ mod tests {
                     worktrees: worker_root.clone(),
                     base: String::new(),
                     timeout: 2,
+                    backend: None,
                 };
                 let mut cmd = Command::new("powershell.exe");
                 cmd.args(["-NoProfile", "-Command", "[Console]::Out.WriteLine('partial'); [Console]::Error.WriteLine('detail'); Start-Sleep -Seconds 15"]);
@@ -1435,6 +1454,7 @@ mod tests {
             worktrees: root.to_owned(),
             base: String::new(),
             timeout: 10,
+            backend: None,
         };
         let mut cmd = Command::new("powershell.exe");
         cmd.args(["-NoProfile", "-Command", "[Console]::Out.Write(('x' * 3000000)); [Console]::Error.Write(('e' * 3000000)); Start-Sleep -Seconds 5"]);
