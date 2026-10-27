@@ -721,15 +721,25 @@ fn drive(run: &Run, judge: Option<Arc<ConfiguredJudge>>) -> Result<(), Value> {
                 let id = action["id"].as_str().ok_or_else(lock_error)?;
                 let result = job
                     .join()
-                    .map_err(|_| error("coordinator_panic", "조율자 작업이 중단되었습니다."))??;
-                workflow
-                    .observe(
-                        &run.id,
-                        &json!({"action_id":id,"event_id":format!("web:{id}"),"result":result}),
-                    )
-                    .map_err(|e| e.to_value())?;
-                *run.coordinator.lock().map_err(|_| lock_error())? =
-                    json!({"status":"coordinating"});
+                    .map_err(|_| error("coordinator_panic", "조율자 작업이 중단되었습니다."))
+                    .and_then(|result| result);
+                match result {
+                    Ok(result) => {
+                        workflow
+                            .observe(
+                                &run.id,
+                                &json!({"action_id":id,"event_id":format!("web:{id}"),"result":result}),
+                            )
+                            .map_err(|e| e.to_value())?;
+                        *run.coordinator.lock().map_err(|_| lock_error())? =
+                            json!({"status":"coordinating"});
+                    }
+                    Err(error) => {
+                        if attention.is_none() {
+                            attention = Some(error);
+                        }
+                    }
+                }
             } else {
                 let _ = job.join();
             }
@@ -822,6 +832,15 @@ mod parallel_tests {
 
     #[test]
     fn coordinator_review_does_not_block_independent_worker() {
+        coordinator_overlap(false);
+    }
+
+    #[test]
+    fn coordinator_failure_drains_independent_worker() {
+        coordinator_overlap(true);
+    }
+
+    fn coordinator_overlap(fail_coordinator: bool) {
         let tmp = tempfile::tempdir().unwrap();
         let repo = tmp.path().join("repo");
         fs::create_dir(&repo).unwrap();
@@ -863,9 +882,17 @@ fn main() {{
  println!("{{{{\"type\":\"thread.started\",\"thread_id\":\"test\"}}}}"); println!("{{{{\"type\":\"turn.started\"}}}}");
  if prompt.contains("Review the proposed worker assignment") {{
   fs::write({coordinator_started:?}, "started").unwrap();
+  if {fail_coordinator} {{
+   while !std::path::Path::new({worker_started:?}).exists() {{thread::sleep(Duration::from_millis(20));}}
+   std::process::exit(1);
+  }}
   while !std::path::Path::new({release:?}).exists() {{thread::sleep(Duration::from_millis(20));}}
   fs::write("switchbite-observation.json",r#"{{"status":"ready","candidate_id":"worker","reason_codes":["coordinator_review"],"summary":"Eligible"}}"#).unwrap();
- }} else {{ fs::write({worker_started:?}, "started").unwrap(); fs::write("two.txt","done").unwrap(); }}
+ }} else {{
+  fs::write({worker_started:?}, "started").unwrap();
+  if {fail_coordinator} {{ while !std::path::Path::new({release:?}).exists() {{thread::sleep(Duration::from_millis(20));}} }}
+  fs::write("two.txt","done").unwrap();
+ }}
  println!("{{{{\"type\":\"turn.completed\"}}}}");
 }}"##, coordinator_started=coordinator_started.to_str().unwrap(), worker_started=worker_started.to_str().unwrap(), release=release.to_str().unwrap())).unwrap();
         assert!(
@@ -906,6 +933,34 @@ fn main() {{
         let task = run.clone();
         let driver = thread::spawn(move || drive(&task, None));
         let deadline = Instant::now() + Duration::from_secs(20);
+        if fail_coordinator {
+            while Instant::now() < deadline {
+                if coordinator_started.exists()
+                    && worker_started.exists()
+                    && run.active_action.lock().unwrap().is_none()
+                {
+                    break;
+                }
+                thread::sleep(Duration::from_millis(25));
+            }
+            let draining = coordinator_started.exists()
+                && worker_started.exists()
+                && run.active_action.lock().unwrap().is_none()
+                && !driver.is_finished();
+            fs::write(&release, "release").unwrap();
+            let result = driver.join().unwrap();
+            let state = workflow.status(&id).unwrap();
+            assert!(draining, "driver stopped before the running worker settled");
+            assert_eq!(result.unwrap_err()["code"], "coordinator_execution_failed");
+            assert!(
+                state["events"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .any(|event| event["kind"] == "launch" && event["task_id"] == "two")
+            );
+            return;
+        }
         let mut completed = false;
         while Instant::now() < deadline {
             let state = workflow.status(&id).unwrap();
