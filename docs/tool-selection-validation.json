@@ -1,0 +1,54 @@
+{
+  "date": "2026-10-27",
+  "version": "0.8.2-tools.1",
+  "branch": "feature/automatic-model-pool",
+  "runtime_commit": "6263394d2d75f8e90c626e9e51960233daabc975",
+  "connection_mode": "existing CLI authentication, new task sessions",
+  "checks": {
+    "default_suite": { "passed": 196, "failed": 0, "ignored": 2 },
+    "format": "passed",
+    "clippy_all_targets_deny_warnings": "passed",
+    "release_build": "passed",
+    "package_readback_and_payload_hashes": "passed"
+  },
+  "web_selection": {
+    "detected": ["claude", "codex", "cursor", "opencode", "grok", "antigravity"],
+    "selectable_adapters": ["claude", "codex", "cursor", "opencode", "antigravity"],
+    "grok": "installed and model list discovered; execution adapter awaits qualification",
+    "scope": "selected CLI providers constrain coordinator and workflow catalog.providers",
+    "tested": ["empty execution selection rejected", "unknown preference rejected", "unselected coordinator rejected", "persisted preferences survive process restart", "temporarily unavailable preferences preserved", "catalog refresh retains run provider scope", "custom CODEX_HOME inherited by native workers"],
+    "preference_storage": "atomic per-user local JSON",
+    "browser": "Aside MCP desktop: checkbox change, auto-save, reload persistence, restoration and final layout checked",
+    "mobile_runtime_capture": false,
+    "opencode_default": "configured anthropic/claude-opus-5-5 observed first in deployed coordinator list"
+  },
+  "antigravity_native": {
+    "adapter_commit": "e73be77",
+    "project": "owned synthetic file-contract project",
+    "run_id": "run-1793094900310127000-41844",
+    "requested_model": "gemini-3.8-flash-high",
+    "reported_model": null,
+    "status": "completed",
+    "completed": 1,
+    "total": 1,
+    "checks_passed": 2,
+    "checks_failed": 0,
+    "artifact": { "worker": "antigravity", "value": 7 },
+    "independent_host_readback": "passed",
+    "integration": "passed",
+    "receipt": "matching native conversation ID and successful terminal result; native sandbox and accept-edits mode"
+  },
+  "package": {
+    "filename": "switchbite-0.8.2-tools.1-windows-x64.zip",
+    "payload_files": 22,
+    "sha256": "6ec5e163d52c33d11f2d356ebe6519fad3bc384253059568b75a2ac76d95793a",
+    "binary_sha256": "d1b8d2b20cad0c5f14eb7be1233515dff62c2de0cbb403977bea75372c8f40cd"
+  },
+  "boundaries": {
+    "original_stackbite_modified": false,
+    "existing_main_and_private_clone_changes": "preserved",
+    "history_or_active_terminal_attachment": "outside the user-selected new-session mode",
+    "unused_session_worker_outputs": ".switchbite/worktrees/cli-sessions/target preserved without StorageGuardian enrollment; no verified WorkBite binding",
+    "agent_started_user_project_work": false
+  }
+}
