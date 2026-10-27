@@ -1,0 +1,53 @@
+{
+  "date": "2026-10-27",
+  "version": "0.8.4-live.1",
+  "runtime_commit": "32a7face1a552b1f25e6092ca5b54ba3898678eb",
+  "reported_stall": {
+    "first_task": "completed and integrated",
+    "next_task": "timed out and entered repair",
+    "repair": "native coordinator returned a seven-node split plan; core rejected new task IDs and restated completed nodes",
+    "monitor": "lost failed execution reference during repair and selected old completed output; separate viewer did not read coordinator errors",
+    "deployment": "previous correction was not used by the existing live.1 driver"
+  },
+  "changes": [
+    "repair supports additional subtasks and unchanged completed or active nodes; changed completed or active work is rejected",
+    "failed execution references resolved through launch action evidence during repair",
+    "automatic output selection follows the latest stage when no native process is alive",
+    "coordinator checkpoint persists status, error, selected model and output action references",
+    "standalone viewer reads coordinator checkpoint and shows errors",
+    "app --resume restores an existing run and its original provider scope; old runs may specify a coordinator explicitly"
+  ],
+  "checks": {
+    "default_suite": { "passed": 213, "failed": 0, "ignored": 2 },
+    "format": "passed",
+    "clippy_all_targets_deny_warnings": "passed",
+    "ui_javascript_syntax": "passed",
+    "release_build": "passed",
+    "package_readback_and_payload_hashes": "passed",
+    "regressions": ["split repair preserves integrated work and releases new independent tasks", "completed work mutation rejected", "failed launch output remains visible during repair", "reopened app retains saved coordinator and provider scope", "viewer reads persisted attention state"]
+  },
+  "real_recovery": {
+    "running_native_records_before_server_replacement": 0,
+    "old_server": "stopped only after needs_attention and no running native executions were verified",
+    "artifact": "registered the existing seven-node coordinator result through workflow observe; no hand-authored task changes",
+    "same_run": true,
+    "completed_work_preserved": true,
+    "app": "http://127.0.0.1:58422/",
+    "viewer": "http://127.0.0.1:58424/",
+    "new_tasks": "http://127.0.0.1:58425/",
+    "driver": "0.8.4-live.1",
+    "observed": "1/7 complete; coordinator coordinating with no error; Codex research worker alive with 73321 stdout bytes; browser confirmed fresh worker output",
+    "completed_report_claim": false
+  },
+  "package": {
+    "filename": "switchbite-0.8.4-live.1-windows-x64.zip",
+    "payload_files": 22,
+    "sha256": "f1aae2c7bd532bbaab5b07953adff08e52a42b8ce6bb03e9c5cb43470f8213ab",
+    "binary_sha256": "3fe17a51c68fd40c2cd4f1c1f34de77acdb165a6c93a387ee83eb1fc638c2dd4"
+  },
+  "boundaries": {
+    "stackbite_and_existing_main": "unchanged",
+    "cli_authentication": "existing credentials, new worker sessions",
+    "storage": "existing registered or unregistered paths preserved; no inferred WorkBite binding"
+  }
+}
