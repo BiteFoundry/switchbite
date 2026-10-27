@@ -181,7 +181,7 @@ impl Workflow {
     }
     fn response(s: &State) -> Value {
         let done = s.tasks.iter().filter(|t| t.state == "done").count();
-        let mut result = json!({"schema_version":s.schema_version,"run_id":s.run_id,"status":s.status,"summary":format!("{done}/{} tasks completed",s.tasks.len()),"tasks":s.tasks.iter().map(|t|json!({"task":t.node,"id":t.node["id"],"status":t.state,"candidate":t.candidate,"prepared":t.prepared,"execution_id":t.execution_id,"repair_rounds":t.attempts,"evidence":t.evidence,"next_inspect_at_ms":t.next_inspect_at_ms})).collect::<Vec<_>>(),"actions":s.actions,"events":s.recent_events,"event_count":s.events.len(),"event_cursor":{"first":s.events.len().saturating_sub(s.recent_events.len())+if s.recent_events.is_empty(){0}else{1},"last":s.events.len()},"revision":s.revision,"progress":{"done":done,"total":s.tasks.len(),"blocked":s.tasks.iter().filter(|t| ["held","blocked"].contains(&t.state.as_str())).count()}});
+        let mut result = json!({"schema_version":s.schema_version,"run_id":s.run_id,"status":s.status,"max_parallel":s.request["max_parallel"].as_u64().unwrap_or(2),"summary":format!("{done}/{} tasks completed",s.tasks.len()),"tasks":s.tasks.iter().map(|t|json!({"task":t.node,"id":t.node["id"],"status":t.state,"candidate":t.candidate,"prepared":t.prepared,"execution_id":t.execution_id,"repair_rounds":t.attempts,"evidence":t.evidence,"next_inspect_at_ms":t.next_inspect_at_ms,"wait_reason":Self::wait_reason(s, t)})).collect::<Vec<_>>(),"actions":s.actions,"events":s.recent_events,"event_count":s.events.len(),"event_cursor":{"first":s.events.len().saturating_sub(s.recent_events.len())+if s.recent_events.is_empty(){0}else{1},"last":s.events.len()},"revision":s.revision,"progress":{"done":done,"total":s.tasks.len(),"blocked":s.tasks.iter().filter(|t| ["held","blocked"].contains(&t.state.as_str())).count()}});
         if let Some(catalog) = &s.catalog {
             result["catalog"] = json!({"revision":catalog["revision"],"candidate_count":catalog["candidates"].as_array().map_or(0, Vec::len),"diagnostics":catalog["diagnostics"]});
         }
@@ -315,8 +315,17 @@ impl Workflow {
         let _g = MUTATION.lock().map_err(|_| err("storage_error"))?;
         let _lock = self.lock()?;
         let mut s = self.load(run_id)?;
-        if s.status != "running" {
+        if !["running", "paused"].contains(&s.status.as_str()) {
             return Ok(Self::response(&s));
+        }
+        for task in &mut s.tasks {
+            if task.state == "routed"
+                && let Some(candidate) = &mut task.candidate
+                && let Some(current) = matching_catalog_candidate(&catalog, candidate)
+                && let Some(capacity) = current.get("resource_capacity")
+            {
+                candidate["resource_capacity"] = capacity.clone();
+            }
         }
         s.catalog = Some(catalog);
         let abandoned: BTreeSet<String> = s
@@ -358,6 +367,21 @@ impl Workflow {
         if serde_json::to_vec(&s).map_err(|_| err("storage_error"))? != before {
             self.save(&mut s)?;
         }
+        Ok(Self::response(&s))
+    }
+    pub fn set_parallelism(&self, run_id: &str, limit: u64) -> Result<Value, WorkflowError> {
+        if !(1..=16).contains(&limit) {
+            return Err(err("invalid_request"));
+        }
+        let _g = MUTATION.lock().map_err(|_| err("storage_error"))?;
+        let _lock = self.lock()?;
+        let mut s = self.load(run_id)?;
+        if !["running", "paused"].contains(&s.status.as_str()) {
+            return Err(err("invalid_state"));
+        }
+        s.request["max_parallel"] = json!(limit);
+        self.schedule(&mut s);
+        self.save(&mut s)?;
         Ok(Self::response(&s))
     }
     /// Check dispatch authorization against the current durable lease and run state.
@@ -585,6 +609,7 @@ impl Workflow {
                                         "effort",
                                         "executable",
                                         "resource_key",
+                                        "resource_capacity",
                                         "args",
                                     ]
                                     .iter()
@@ -923,7 +948,6 @@ impl Workflow {
             s.status = "completed".into();
             return;
         }
-        let max = s.request["max_parallel"].as_u64().unwrap_or(2) as usize;
         for i in 0..s.tasks.len() {
             let tid = s.tasks[i].node["id"].clone();
             if s.actions.iter().any(|a| a["task_id"] == tid) {
@@ -940,24 +964,8 @@ impl Workflow {
             {
                 continue;
             }
-            let active = s
-                .tasks
-                .iter()
-                .filter(|t| {
-                    ![
-                        "pending",
-                        "done",
-                        "held",
-                        "failed",
-                        "blocked",
-                        "needs_pool",
-                        "awaiting_pool",
-                    ]
-                    .contains(&t.state.as_str())
-                })
-                .count();
             match state.as_str() {
-                "pending" if active < max => {
+                "pending" => {
                     let node = &s.tasks[i].node;
                     let dependencies: Vec<Value> = s.tasks.iter().filter(|t| deps.iter().any(|d| t.node["id"] == *d))
                         .map(|t| json!({"id":t.node["id"],"outputs":t.node["outputs"],"status":t.state,"integration":t.evidence.iter().rev().find(|e| e["stage"] == "integrate")})).collect();
@@ -1025,7 +1033,7 @@ impl Workflow {
                     self.action(s,"route",Some(i),json!({"route_input":route_input,"candidate_snapshot":candidates,"catalog_revision":revision}));
                 }
                 "routed" => {
-                    if self.conflicts(s, i) {
+                    if Self::wait_reason(s, &s.tasks[i]).is_some() {
                         continue;
                     }
                     s.tasks[i].state = "preparing".into();
@@ -1071,49 +1079,117 @@ impl Workflow {
             }
         }
     }
-    fn conflicts(&self, s: &State, i: usize) -> bool {
-        let c = &s.tasks[i];
-        let key = c
-            .candidate
-            .as_ref()
-            .and_then(|v| v.get("resource_key").or_else(|| v.get("id")))
-            .and_then(Value::as_str);
+    fn wait_reason(s: &State, task: &Task) -> Option<Value> {
+        if s.status != "running" || task.state != "routed" {
+            return None;
+        }
+        let candidate = task.candidate.as_ref()?;
+        let key = resource_key(candidate)?;
+        let active: Vec<&Task> = s.tasks.iter().filter(|t| reserves(t)).collect();
         let outputs = strings(
-            c.node.get("write_paths").or_else(|| c.node.get("outputs")),
+            task.node
+                .get("write_paths")
+                .or_else(|| task.node.get("outputs")),
             1000,
         )
         .unwrap_or_default();
-        s.tasks.iter().enumerate().any(|(j, t)| {
-            if j == i
-                || ![
-                    "preparing",
-                    "prepared",
-                    "launching",
-                    "running",
-                    "unknown",
-                    "verifying",
-                    "integrating",
-                ]
-                .contains(&t.state.as_str())
-            {
-                return false;
-            }
-            let other = t
-                .candidate
-                .as_ref()
-                .and_then(|v| v.get("resource_key").or_else(|| v.get("id")))
-                .and_then(Value::as_str);
+        for other in &active {
             let paths = strings(
-                t.node.get("write_paths").or_else(|| t.node.get("outputs")),
+                other
+                    .node
+                    .get("write_paths")
+                    .or_else(|| other.node.get("outputs")),
                 1000,
             )
             .unwrap_or_default();
-            (key.is_some() && key == other)
-                || outputs
-                    .iter()
-                    .any(|a| paths.iter().any(|b| path_overlap(a, b)))
-        })
+            if outputs
+                .iter()
+                .any(|a| paths.iter().any(|b| path_overlap(a, b)))
+            {
+                return Some(json!({"code":"write_conflict", "task_id":other.node["id"]}));
+            }
+        }
+        let pool = s
+            .catalog
+            .as_ref()
+            .map(|c| &c["candidates"])
+            .unwrap_or(&s.request["pool"]);
+        let limit = pool
+            .as_array()
+            .into_iter()
+            .flatten()
+            .chain(active.iter().filter_map(|t| t.candidate.as_ref()))
+            .chain(std::iter::once(candidate))
+            .filter(|c| resource_key(c) == Some(key))
+            .map(|c| effective_capacity(s, c))
+            .min()
+            .unwrap_or(1);
+        if active
+            .iter()
+            .filter(|t| t.candidate.as_ref().and_then(resource_key) == Some(key))
+            .count()
+            >= limit
+        {
+            return Some(json!({"code":"resource_capacity", "resource_key":key, "limit":limit}));
+        }
+        let max = s.request["max_parallel"].as_u64().unwrap_or(2) as usize;
+        if active.len() >= max {
+            return Some(json!({"code":"parallel_limit", "limit":max}));
+        }
+        None
     }
+}
+fn matching_catalog_candidate<'a>(catalog: &'a Value, candidate: &Value) -> Option<&'a Value> {
+    catalog["candidates"].as_array()?.iter().find(|current| {
+        [
+            "id",
+            "provider",
+            "model",
+            "effort",
+            "executable",
+            "resource_key",
+            "args",
+        ]
+        .iter()
+        .all(|key| current.get(*key) == candidate.get(*key))
+    })
+}
+fn effective_capacity(s: &State, candidate: &Value) -> usize {
+    if candidate.get("resource_capacity").is_none() {
+        if let Some(current) = s
+            .catalog
+            .as_ref()
+            .and_then(|c| matching_catalog_candidate(c, candidate))
+        {
+            return resource_capacity(current);
+        }
+    }
+    resource_capacity(candidate)
+}
+fn resource_key(candidate: &Value) -> Option<&str> {
+    candidate
+        .get("resource_key")
+        .or_else(|| candidate.get("id"))
+        .and_then(Value::as_str)
+}
+fn resource_capacity(candidate: &Value) -> usize {
+    candidate
+        .get("resource_capacity")
+        .and_then(Value::as_u64)
+        .filter(|n| (1..=16).contains(n))
+        .unwrap_or(1) as usize
+}
+fn reserves(task: &Task) -> bool {
+    [
+        "preparing",
+        "prepared",
+        "launching",
+        "running",
+        "unknown",
+        "verifying",
+        "integrating",
+    ]
+    .contains(&task.state.as_str())
 }
 fn clean_candidate(candidate: &Value) -> Value {
     let mut c = candidate.clone();
@@ -1162,6 +1238,7 @@ fn validate_pool(value: &Value) -> Result<(), WorkflowError> {
                 "effort",
                 "executable",
                 "resource_key",
+                "resource_capacity",
                 "args",
             ]
             .contains(&k.as_str())
@@ -1172,6 +1249,11 @@ fn validate_pool(value: &Value) -> Result<(), WorkflowError> {
             if c.get(key).is_some() {
                 text(c, key, 4096)?;
             }
+        }
+        if c.get("resource_capacity")
+            .is_some_and(|v| v.as_u64().filter(|n| (1..=16).contains(n)).is_none())
+        {
+            return Err(err("invalid_request"));
         }
         strings(c.get("args"), 4096)?;
         let mut route_candidate = c.clone();

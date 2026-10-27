@@ -27,7 +27,7 @@ pub fn tools() -> Vec<Tool> {
         "capabilities":{"type":"array","items":{"type":"string"}},"available":{"type":"boolean"},
         "provider":{"type":"string","description":"Actual worker harness, e.g. codex or claude when using the local host."},
         "model":{"type":"string","description":"Exact model identity available to this worker."},"effort":{"type":"string"},
-        "executable":{"type":"string","description":"Worker executable for the configured host."},"resource_key":{"type":"string","description":"Shared resource identity to prevent conflicting reservations."},
+        "executable":{"type":"string","description":"Worker executable for the configured host."},"resource_key":{"type":"string","description":"Shared resource identity for concurrency limits."},"resource_capacity":{"type":"integer","minimum":1,"maximum":16,"default":1},
         "args":{"type":"array","items":{"type":"string"}},"estimated_cost":{"type":"number"},"estimated_latency_ms":{"type":"number"},"has_context":{"type":"boolean"}
     }});
     let start = json!({"type":"object","additionalProperties":false,"required":["request"],"properties":{"request":{

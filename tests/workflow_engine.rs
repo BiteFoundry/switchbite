@@ -707,3 +707,160 @@ fn cancelled_claimed_prepare_receipt_leaves_task_cancelled() {
             .any(|a| a["task_id"] == "one")
     );
 }
+
+fn parallel_request(capacity: Option<u64>) -> Value {
+    let mut req = json!({"workspace":"workspace","max_parallel":3,"pool":[
+        {"id":"a","description":"worker","capabilities":[],"available":true,"resource_key":"shared"},
+        {"id":"b","description":"worker","capabilities":[],"available":true,"resource_key":"other"}],
+        "plan":{"nodes":[{"id":"one","objective":"one","outputs":["src/one"]},
+            {"id":"two","objective":"two","outputs":["src/two"]},
+            {"id":"three","objective":"three","outputs":["src/three"]}]}});
+    if let Some(capacity) = capacity {
+        req["pool"][0]["resource_capacity"] = json!(capacity);
+    }
+    req
+}
+fn task<'a>(s: &'a Value, id: &str) -> &'a Value {
+    s["tasks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|t| t["id"] == id)
+        .unwrap()
+}
+#[test]
+fn capacity_three_reserves_independent_sessions() {
+    let dir = tempfile::tempdir().unwrap();
+    let w = Workflow::new(dir.path().to_path_buf());
+    let mut s = w.start(&parallel_request(Some(3))).unwrap();
+    let run = s["run_id"].as_str().unwrap().to_owned();
+    for id in ["one", "two", "three"] {
+        s = send(
+            &w,
+            &run,
+            action(&s, "route", id),
+            json!({"status":"ready","candidate_id":"a"}),
+        );
+    }
+    for id in ["one", "two", "three"] {
+        assert_eq!(action(&s, "prepare", id)["kind"], "prepare");
+    }
+    for id in ["one", "two", "three"] {
+        s = send(&w, &run, action(&s, "prepare", id), prepared());
+    }
+    for id in ["one", "two", "three"] {
+        assert_eq!(action(&s, "launch", id)["kind"], "launch");
+    }
+}
+#[test]
+fn capacity_defaults_to_one_and_waiting_does_not_starve_other_resources() {
+    let dir = tempfile::tempdir().unwrap();
+    let w = Workflow::new(dir.path().to_path_buf());
+    let mut req = parallel_request(None);
+    req["max_parallel"] = json!(2);
+    let mut s = w.start(&req).unwrap();
+    let run = s["run_id"].as_str().unwrap().to_owned();
+    for (id, candidate) in [("one", "a"), ("two", "a"), ("three", "b")] {
+        s = send(
+            &w,
+            &run,
+            action(&s, "route", id),
+            json!({"status":"ready","candidate_id":candidate}),
+        );
+    }
+    assert_eq!(
+        task(&s, "two")["wait_reason"],
+        json!({"code":"resource_capacity","resource_key":"shared","limit":1})
+    );
+    assert_eq!(action(&s, "prepare", "one")["kind"], "prepare");
+    assert_eq!(action(&s, "prepare", "three")["kind"], "prepare");
+}
+#[test]
+fn capacity_is_conservative_and_write_conflicts_still_wait() {
+    let dir = tempfile::tempdir().unwrap();
+    let w = Workflow::new(dir.path().to_path_buf());
+    let mut req = parallel_request(Some(3));
+    req["pool"][1]["resource_key"] = json!("shared");
+    req["pool"][1]["resource_capacity"] = json!(1);
+    req["plan"]["nodes"][2]["outputs"] = json!(["src/one/child"]);
+    let mut s = w.start(&req).unwrap();
+    let run = s["run_id"].as_str().unwrap().to_owned();
+    for id in ["one", "two", "three"] {
+        s = send(
+            &w,
+            &run,
+            action(&s, "route", id),
+            json!({"status":"ready","candidate_id":"a"}),
+        );
+    }
+    assert_eq!(task(&s, "two")["wait_reason"]["code"], "resource_capacity");
+    assert_eq!(
+        task(&s, "three")["wait_reason"],
+        json!({"code":"write_conflict","task_id":"one"})
+    );
+}
+#[test]
+fn rejects_invalid_resource_capacity() {
+    let dir = tempfile::tempdir().unwrap();
+    let w = Workflow::new(dir.path().to_path_buf());
+    for capacity in [json!(0), json!(17), json!(-1), json!("3"), Value::Null] {
+        let mut req = parallel_request(None);
+        req["pool"][0]["resource_capacity"] = capacity;
+        assert_eq!(w.start(&req).unwrap_err().code, "invalid_request");
+    }
+}
+#[test]
+fn parallel_limit_is_reported_for_routed_tasks() {
+    let dir = tempfile::tempdir().unwrap();
+    let w = Workflow::new(dir.path().to_path_buf());
+    let mut req = parallel_request(Some(3));
+    req["max_parallel"] = json!(1);
+    let mut s = w.start(&req).unwrap();
+    let run = s["run_id"].as_str().unwrap().to_owned();
+    for (id, candidate) in [("one", "a"), ("two", "b")] {
+        s = send(
+            &w,
+            &run,
+            action(&s, "route", id),
+            json!({"status":"ready","candidate_id":candidate}),
+        );
+    }
+    assert_eq!(s["max_parallel"], 1);
+    assert_eq!(
+        task(&s, "two")["wait_reason"],
+        json!({"code":"parallel_limit","limit":1})
+    );
+}
+#[test]
+fn parallelism_changes_preserve_claims_and_resume_queued_work() {
+    let dir = tempfile::tempdir().unwrap();
+    let w = Workflow::new(dir.path().to_path_buf());
+    let mut req = parallel_request(Some(3));
+    req["max_parallel"] = json!(1);
+    let mut s = w.start(&req).unwrap();
+    let run = s["run_id"].as_str().unwrap().to_owned();
+    for id in ["one", "two"] {
+        s = send(
+            &w,
+            &run,
+            action(&s, "route", id),
+            json!({"status":"ready","candidate_id":"a"}),
+        );
+    }
+    let first = action(&s, "prepare", "one")["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    assert!(w.claim(&run, &first).unwrap());
+    w.control(&run, "pause").unwrap();
+    assert_eq!(
+        w.set_parallelism(&run, 0).unwrap_err().code,
+        "invalid_request"
+    );
+    let s = w.set_parallelism(&run, 3).unwrap();
+    assert_eq!(s["max_parallel"], 3);
+    assert_eq!(s["status"], "paused");
+    let s = w.control(&run, "resume").unwrap();
+    assert_eq!(action(&s, "prepare", "one")["id"], first);
+    assert_eq!(action(&s, "prepare", "two")["kind"], "prepare");
+}

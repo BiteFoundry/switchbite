@@ -230,7 +230,7 @@ fn candidate(
         "antigravity" => "Mockups, writing and general coding",
         _ => "Explicit model and custom agent work",
     };
-    json!({"id":id,"description":format!("{role}; {provider} model {model}, {effort} effort."),"capabilities":["file.read","file.write","code.change","code.review","html.write","data.write","writing","code.explore"],"available":crate::adapters::supports_provider(provider),"provider":provider,"executable":exe.to_string_lossy(),"model":model,"effort":effort,"resource_key":format!("{provider}:{scope}"),"catalog_info":{"source":source,"readiness":"unverified","observed_at_ms":observed}})
+    json!({"id":id,"description":format!("{role}; {provider} model {model}, {effort} effort."),"capabilities":["file.read","file.write","code.change","code.review","html.write","data.write","writing","code.explore"],"available":crate::adapters::supports_provider(provider),"provider":provider,"executable":exe.to_string_lossy(),"model":model,"effort":effort,"resource_key":format!("{provider}:{scope}"),"resource_capacity":3,"catalog_info":{"source":source,"readiness":"unverified","observed_at_ms":observed}})
 }
 fn models_from_output(provider: &str, output: &str) -> Vec<String> {
     let mut models = BTreeSet::new();
@@ -836,6 +836,19 @@ mod tests {
             vec!["claude-opus-5-5-high", "gemini-4-argon-medium"]
         );
         assert!(models_from_output("grok", "Default model: bogus\n").is_empty());
+    }
+    #[test]
+    fn native_candidate_has_three_session_capacity() {
+        let entry = candidate(
+            "codex",
+            Path::new("codex"),
+            "model",
+            "high",
+            "test",
+            0,
+            "local",
+        );
+        assert_eq!(entry["resource_capacity"], 3);
     }
     #[test]
     fn catalog_limit_preserves_provider_diversity() {
