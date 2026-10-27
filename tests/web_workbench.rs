@@ -1,0 +1,225 @@
+#![cfg(windows)]
+use serde_json::{Value, json};
+use std::{
+    env, fs,
+    io::{Read, Write},
+    net::{TcpListener, TcpStream},
+    path::{Path, PathBuf},
+    process::{Child, Command, Stdio},
+    thread,
+    time::{Duration, Instant},
+};
+
+struct Server(Child);
+impl Drop for Server {
+    fn drop(&mut self) {
+        let _ = self.0.kill();
+        let _ = self.0.wait();
+    }
+}
+fn git(repo: &Path, args: &[&str]) -> String {
+    let o = Command::new("git")
+        .current_dir(repo)
+        .args(args)
+        .output()
+        .unwrap();
+    assert!(
+        o.status.success(),
+        "git: {}",
+        String::from_utf8_lossy(&o.stderr)
+    );
+    String::from_utf8(o.stdout).unwrap().trim().to_owned()
+}
+fn http(
+    port: u16,
+    method: &str,
+    path: &str,
+    token: &str,
+    origin: &str,
+    body: &str,
+) -> (u16, String) {
+    let mut s = TcpStream::connect(("127.0.0.1", port)).unwrap();
+    s.set_read_timeout(Some(Duration::from_secs(10))).unwrap();
+    write!(s, "{method} {path} HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nOrigin: {origin}\r\nX-Switchbite-Session: {token}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).unwrap();
+    let mut raw = String::new();
+    s.read_to_string(&mut raw).unwrap();
+    let (head, body) = raw.split_once("\r\n\r\n").unwrap();
+    (
+        head.split_whitespace().nth(1).unwrap().parse().unwrap(),
+        body.to_owned(),
+    )
+}
+fn make_fake(dir: &Path) -> PathBuf {
+    let source = dir.join("fake.rs");
+    fs::write(&source, r###"use std::{env,fs,io::Write};
+fn main() {
+ let args:Vec<String>=env::args().collect();
+ if args.iter().any(|s|s=="--version") { println!("codex fixture 1.0"); return; }
+ let prompt=args.last().unwrap();
+ let log=env::var("FAKE_LOG").unwrap();
+ writeln!(fs::OpenOptions::new().create(true).append(true).open(log).unwrap(),"launch").unwrap();
+ if prompt.contains("switchbite-observation.json") {
+  fs::write("switchbite-observation.json",r#"{"plan":{"nodes":[{"id":"build","objective":"Create result","role":"implementation","outputs":["result.txt"],"write_paths":["result.txt"],"acceptance":["result exists"],"routing":{"provider":"codex","model":"fake-build","effort":"high"}},{"id":"review","objective":"Review result and write report","role":"review","depends_on":["build"],"outputs":["review.md"],"write_paths":["review.md"],"acceptance":["report exists"],"routing":{"provider":"codex","model":"fake-review","effort":"high"}}]}}"#).unwrap();
+ } else if args.iter().any(|s|s=="fake-build") { fs::write("result.txt","built").unwrap(); }
+ else if args.iter().any(|s|s=="fake-review") { assert_eq!(fs::read_to_string("result.txt").unwrap(),"built"); fs::write("review.md","reviewed").unwrap(); }
+ else { panic!("unexpected model"); }
+ println!("{{\"type\":\"thread.started\",\"thread_id\":\"fixture\"}}"); println!("{{\"type\":\"turn.started\"}}"); println!("{{\"type\":\"turn.completed\"}}");
+}"###).unwrap();
+    let exe = dir.join("codex.exe");
+    assert!(
+        Command::new("rustc")
+            .arg(source)
+            .arg("-o")
+            .arg(&exe)
+            .status()
+            .unwrap()
+            .success()
+    );
+    exe
+}
+#[test]
+fn web_submission_runs_real_workflow_with_isolated_fake_provider() {
+    let tmp = tempfile::tempdir().unwrap();
+    let repo = tmp.path().join("project");
+    fs::create_dir(&repo).unwrap();
+    git(&repo, &["init", "-q"]);
+    git(&repo, &["config", "user.name", "Fixture"]);
+    git(&repo, &["config", "user.email", "fixture@localhost"]);
+    fs::write(repo.join("original.txt"), "unchanged").unwrap();
+    git(&repo, &["add", "original.txt"]);
+    git(&repo, &["commit", "-q", "-m", "base"]);
+    let head = git(&repo, &["rev-parse", "HEAD"]);
+    let bin = tmp.path().join("bin");
+    fs::create_dir(&bin).unwrap();
+    make_fake(&bin);
+    let home = tmp.path().join("home");
+    let codex = home.join("codex");
+    let appdata = home.join("appdata");
+    let local = home.join("local");
+    for p in [&home, &codex, &appdata, &local] {
+        fs::create_dir_all(p).unwrap();
+    }
+    fs::write(codex.join("models_cache.json"),json!({"models":[{"slug":"fake-build","visibility":"list","supported_reasoning_levels":[{"effort":"high"}]},{"slug":"fake-review","visibility":"list","supported_reasoning_levels":[{"effort":"high"}]}]}).to_string()).unwrap();
+    let git_dir = env::split_paths(&env::var_os("PATH").unwrap())
+        .find(|p| p.join("git.exe").is_file())
+        .expect("git on PATH");
+    let system = PathBuf::from(env::var_os("SystemRoot").unwrap());
+    let path = env::join_paths([
+        bin.clone(),
+        git_dir,
+        system.join("System32"),
+        system.join("System32/WindowsPowerShell/v1.0"),
+    ])
+    .unwrap();
+    let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+    let port = listener.local_addr().unwrap().port();
+    drop(listener);
+    let log = tmp.path().join("calls.txt");
+    let mut command = Command::new(env!("CARGO_BIN_EXE_switchbite"));
+    command
+        .args(["workflow", "app", "--port", &port.to_string(), "--offline"])
+        .current_dir(&repo)
+        .env_clear()
+        .env("PATH", path)
+        .env("SystemRoot", &system)
+        .env("WINDIR", &system)
+        .env("TEMP", tmp.path())
+        .env("TMP", tmp.path())
+        .env("USERPROFILE", &home)
+        .env("HOME", &home)
+        .env("CODEX_HOME", &codex)
+        .env("APPDATA", &appdata)
+        .env("LOCALAPPDATA", &local)
+        .env("FAKE_LOG", &log)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    let mut server = Server(command.spawn().unwrap());
+    let deadline = Instant::now() + Duration::from_secs(20);
+    while TcpStream::connect(("127.0.0.1", port)).is_err() {
+        assert!(
+            Instant::now() < deadline && server.0.try_wait().unwrap().is_none(),
+            "server did not start"
+        );
+        thread::sleep(Duration::from_millis(50));
+    }
+    let origin = format!("http://127.0.0.1:{port}");
+    let (_, html) = http(port, "GET", "/", "", "", "");
+    let token = html
+        .split("const token='")
+        .nth(1)
+        .unwrap()
+        .split('\'')
+        .next()
+        .unwrap();
+    let (_, info) = http(port, "GET", "/api/app", "", "", "");
+    let info: Value = serde_json::from_str(&info).unwrap();
+    let coordinator = info["coordinators"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|c| c["model"] == "fake-build" && c["effort"] == "high")
+        .expect("fixture candidate")["id"]
+        .clone();
+    let body=json!({"workspace":repo,"goal":"Create a result and independent review","coordinator_id":coordinator}).to_string();
+    assert_eq!(
+        http(
+            port,
+            "POST",
+            "/api/start",
+            token,
+            "http://evil.invalid",
+            &body
+        )
+        .0,
+        403
+    );
+    let missing =
+        json!({"workspace":tmp.path().join("missing"),"goal":"goal","coordinator_id":coordinator})
+            .to_string();
+    assert_eq!(
+        http(port, "POST", "/api/start", token, &origin, &missing).0,
+        400
+    );
+    let nongit = tmp.path().join("nongit");
+    fs::create_dir(&nongit).unwrap();
+    let bad = json!({"workspace":nongit,"goal":"goal","coordinator_id":coordinator}).to_string();
+    assert_eq!(
+        http(port, "POST", "/api/start", token, &origin, &bad).0,
+        400
+    );
+    assert!(!log.exists());
+    assert_eq!(
+        http(port, "POST", "/api/start", token, &origin, &body).0,
+        202
+    );
+    let deadline = Instant::now() + Duration::from_secs(120);
+    loop {
+        let (_, body) = http(port, "GET", "/api/state", "", "", "");
+        let state: Value = serde_json::from_str(&body).unwrap();
+        if state["status"] == "completed" {
+            assert_eq!(state["progress"]["done"], 2);
+            assert_eq!(state["progress"]["total"], 2);
+            let result = Path::new(state["result"]["workspace"].as_str().unwrap());
+            assert_eq!(
+                fs::read_to_string(result.join("result.txt")).unwrap(),
+                "built"
+            );
+            assert_eq!(
+                fs::read_to_string(result.join("review.md")).unwrap(),
+                "reviewed"
+            );
+            break;
+        }
+        assert!(
+            Instant::now() < deadline && state.get("attention").is_none(),
+            "workflow did not complete: {state}"
+        );
+        thread::sleep(Duration::from_millis(250));
+    }
+    assert_eq!(git(&repo, &["rev-parse", "HEAD"]), head);
+    assert_eq!(
+        fs::read_to_string(repo.join("original.txt")).unwrap(),
+        "unchanged"
+    );
+    assert!(!repo.join("result.txt").exists());
+}
