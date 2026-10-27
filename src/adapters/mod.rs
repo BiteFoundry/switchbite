@@ -7,7 +7,7 @@ use std::{
     path::{Path, PathBuf},
     process::{Command, Stdio},
     thread,
-    time::{Duration, Instant},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
 const MAX_OUTPUT: u64 = 1024 * 1024;
@@ -238,9 +238,15 @@ impl LocalHost {
         mut cmd: Command,
         dir: &Path,
         tag: &str,
+        launch: bool,
     ) -> Result<(bool, Vec<u8>), HostError> {
         let logs = self.state.join("output");
         fs::create_dir_all(&logs).map_err(|_| HostError("io_error"))?;
+        let execution_dir = self.state.join("executions");
+        let cancel = execution_dir.join(format!("{}.cancel", hash(tag)));
+        if launch && cancel.exists() {
+            return Err(HostError("cancelled"));
+        }
         let out = logs.join(format!("{}.out", hash(tag)));
         let err = logs.join(format!("{}.err", hash(tag)));
         let stdout = fs::File::create(&out).map_err(|_| HostError("io_error"))?;
@@ -252,6 +258,14 @@ impl LocalHost {
             .stderr(Stdio::from(stderr))
             .spawn()
             .map_err(|_| HostError("spawn_failed"))?;
+        if launch {
+            fs::create_dir_all(&execution_dir).map_err(|_| HostError("io_error"))?;
+            if write_atomic(&execution_dir.join(format!("{}.json", hash(tag))), &json!({"execution_id":tag,"token":hash(tag),"pid":child.id(),"owner_pid":std::process::id(),"started_unix_ms":SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_millis()})).is_err() {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(HostError("io_error"));
+            }
+        }
         let started = Instant::now();
         loop {
             if let Some(status) = child.try_wait().map_err(|_| HostError("process_failed"))? {
@@ -259,6 +273,13 @@ impl LocalHost {
                 let _ = fs::remove_file(&out);
                 let _ = fs::remove_file(&err);
                 return Ok((status.success(), bytes));
+            }
+            if launch && cancel.exists() {
+                let _ = child.kill();
+                let _ = child.wait();
+                let _ = fs::remove_file(&out);
+                let _ = fs::remove_file(&err);
+                return Err(HostError("cancelled"));
             }
             if started.elapsed() >= Duration::from_secs(self.timeout) {
                 let _ = child.kill();
@@ -339,7 +360,15 @@ impl LocalHost {
             }
         }
         let id = string(a, "id")?;
-        let (ok, output) = self.execute(cmd, &dir, id)?;
+        let (ok, output) = match self.execute(cmd, &dir, id, true) {
+            Ok(result) => result,
+            Err(HostError("cancelled")) => {
+                return Ok(
+                    json!({"status":"failed","execution_id":id,"completion_verified":false,"cancelled":true}),
+                );
+            }
+            Err(error) => return Err(error),
+        };
         let verified = output
             .split(|b| *b == b'\n')
             .filter_map(|line| serde_json::from_slice::<Value>(line).ok())
@@ -354,15 +383,18 @@ impl LocalHost {
     }
     fn inspect(&self, p: &Value) -> Result<Value, HostError> {
         let id = string(p, "execution_id")?;
-        if p.get("operation").and_then(Value::as_str) == Some("cancel") {
-            return Ok(json!({"status":"unknown","execution_id":id,"completion_verified":false}));
-        }
         let record = self
             .state
             .join("actions")
             .join(format!("{}.json", hash(id)));
         if record.exists() {
             return Ok(value_file(&record)?["result"].clone());
+        }
+        if p.get("operation").and_then(Value::as_str) == Some("cancel") {
+            let executions = self.state.join("executions");
+            fs::create_dir_all(&executions).map_err(|_| HostError("io_error"))?;
+            fs::write(executions.join(format!("{}.cancel", hash(id))), b"cancel")
+                .map_err(|_| HostError("io_error"))?;
         }
         Ok(json!({"status":"unknown","execution_id":id,"completion_verified":false}))
     }
@@ -395,7 +427,7 @@ impl LocalHost {
                 );
             }
             let ok = self
-                .execute(cmd, &dir, &format!("check-{}-{i}", dir.display()))
+                .execute(cmd, &dir, &format!("check-{}-{i}", dir.display()), false)
                 .map(|(ok, _)| ok)
                 .unwrap_or(false);
             passed &= ok;
@@ -459,7 +491,11 @@ impl LocalHost {
             return Err(HostError("invalid_action"));
         }
         for r in &refs {
-            let rel = Path::new(r.as_str().ok_or(HostError("invalid_action"))?);
+            let reference = r.as_str().ok_or(HostError("invalid_action"))?;
+            if reference.starts_with("artifact:") {
+                continue;
+            }
+            let rel = Path::new(reference);
             let resolved = fs::canonicalize(self.workspace.join(rel))
                 .map_err(|_| HostError("context_missing"))?;
             if !resolved.starts_with(&self.workspace) || !resolved.is_file() {

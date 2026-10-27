@@ -54,6 +54,14 @@ fn owned_workflow_and_idempotence() {
     );
     let state = tmp.path().join("state");
     let host = LocalHost::new(&repo, &state, &json!({"timeout_seconds":10})).unwrap();
+    let gathered = host
+        .perform(&action(
+            "context",
+            "gather_context",
+            json!({"task":{"context_refs":["artifact:design/mockup"]}}),
+        ))
+        .unwrap();
+    assert_eq!(gathered["context_refs"][0], "artifact:design/mockup");
     let task = json!({"id":"task-1","objective":"Make the change"});
     let candidate = json!({"provider":"codex","executable":exe,"model":"example","effort":"high"});
     let prepare = action("prepare-1", "prepare", json!({"task":task}));
@@ -146,4 +154,85 @@ fn incomplete_receipt_and_failed_check_do_not_advance() {
         host.perform(&action("v", "verify", payload)).unwrap()["status"],
         "failed"
     );
+}
+#[test]
+fn cancel_from_another_host_signals_only_owned_child() {
+    let tmp = tempfile::tempdir().unwrap();
+    let repo = tmp.path().join("repo");
+    fs::create_dir(&repo).unwrap();
+    git(&repo, &["init"]);
+    git(
+        &repo,
+        &[
+            "-c",
+            "user.name=Test",
+            "-c",
+            "user.email=test@localhost",
+            "commit",
+            "--allow-empty",
+            "-m",
+            "base",
+        ],
+    );
+    let source = tmp.path().join("slow.rs");
+    fs::write(
+        &source,
+        "fn main() { std::thread::sleep(std::time::Duration::from_secs(30)); }",
+    )
+    .unwrap();
+    let exe = tmp
+        .path()
+        .join(if cfg!(windows) { "slow.exe" } else { "slow" });
+    assert!(
+        Command::new("rustc")
+            .arg(&source)
+            .arg("-o")
+            .arg(&exe)
+            .status()
+            .unwrap()
+            .success()
+    );
+    let state = tmp.path().join("state");
+    let host = LocalHost::new(&repo, &state, &json!({"timeout_seconds":20})).unwrap();
+    let task = json!({"id":"t", "objective":"work"});
+    let prepared = host
+        .perform(&action("p", "prepare", json!({"task":task})))
+        .unwrap();
+    let launch = action(
+        "slow-launch",
+        "launch",
+        json!({"task":task, "prepared":prepared, "candidate":{"provider":"codex", "executable":exe, "model":"m", "effort":"high"}}),
+    );
+    let owner = std::thread::spawn(move || host.perform(&launch).unwrap());
+    let execution_dir = state.join("executions");
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    while !execution_dir.exists()
+        || !fs::read_dir(&execution_dir)
+            .unwrap()
+            .filter_map(Result::ok)
+            .any(|e| e.path().extension().is_some_and(|x| x == "json"))
+    {
+        assert!(std::time::Instant::now() < deadline);
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    let observer = LocalHost::new(&repo, &state, &json!({})).unwrap();
+    let cancel = observer
+        .perform(&action(
+            "cancel",
+            "inspect",
+            json!({"execution_id":"slow-launch", "operation":"cancel"}),
+        ))
+        .unwrap();
+    assert_eq!(cancel["status"], "unknown");
+    let result = owner.join().unwrap();
+    assert_eq!(result["status"], "failed");
+    assert_eq!(result["cancelled"], true);
+    let recovered = observer
+        .perform(&action(
+            "inspect",
+            "inspect",
+            json!({"execution_id":"slow-launch"}),
+        ))
+        .unwrap();
+    assert_eq!(recovered, result);
 }
