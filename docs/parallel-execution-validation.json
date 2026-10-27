@@ -1,0 +1,72 @@
+{
+  "date": "2026-10-27",
+  "version": "0.8.5-parallel.1",
+  "runtime_commit": "4b007800836b48d5c04f112dacad948941312197",
+  "implementation_workers": {
+    "requested_model": "Codex GPT-6.1-Terra high",
+    "assignments": ["scheduler/catalog/schema", "web settings and wait reasons", "independent concurrency qualification and review"],
+    "execution": "isolated Git worktrees; root serialized Cargo builds and integrated commits",
+    "scope": "CLI session slots, queue behavior, current-run configuration and qualification",
+    "writing_skills": "avoid-ai-writing and anti-defensive-writing applied to assignments, explanations and scope review; structured source preserved; no English detector claim for Korean UI"
+  },
+  "behavior": {
+    "native_resource_capacity": 3,
+    "explicit_pool_omitted_capacity": 1,
+    "valid_capacity_range": [1, 16],
+    "web_default_max_parallel": 3,
+    "queued_routed_tasks_consume_worker_slots": false,
+    "worker_slot_release": "after CLI completion; output paths remain reserved through verification and integration",
+    "quota": "undispatched candidates rechecked; unpinned tasks automatically reroute; pinned tasks wait for a pool update; claimed work remains tracked",
+    "ui": "current-run concurrency setting and resource/path/overall slot wait reasons"
+  },
+  "checks": {
+    "default_suite": { "passed": 226, "failed": 0, "ignored": 2 },
+    "format": "passed",
+    "clippy_all_targets_deny_warnings": "passed",
+    "release_build": "passed",
+    "package_readback_and_payload_hashes": "passed",
+    "fake_cli": "three same-resource processes must all start before any completes; distinct PIDs/workspaces, integrated outputs and dependent review verified",
+    "regressions": ["capacity-one serialization", "same-resource capacity three", "write-path serialization", "queued-task starvation", "slot release before verification", "quota rerouting and claimed job preservation", "paused refresh and provider-scope preservation"]
+  },
+  "native_qualification": {
+    "run_id": "run-1793105768747978300-43624",
+    "provider": "codex",
+    "requested_model": "gpt-6.1-terra",
+    "requested_effort": "high",
+    "distinct_processes": 3,
+    "distinct_workspaces": 3,
+    "common_execution_overlap_ms": 11056,
+    "process_intervals_unix_ms": [
+      { "pid": 77872, "start": 1793105769311, "finish": 1793105796100 },
+      { "pid": 43976, "start": 1793105769778, "finish": 1793105781076 },
+      { "pid": 95712, "start": 1793105770020, "finish": 1793105781423 }
+    ],
+    "status": "completed",
+    "done": 3,
+    "total": 3,
+    "artifacts": "lane-a.json, lane-b.json and lane-c.json independently parsed from integration workspace; lane and value=7 matched",
+    "source_head_preserved": "5e60be36525d91152a8d53c1b238d5948da5c226",
+    "source_changes": "only local .switchbite state is untracked"
+  },
+  "deployment": {
+    "existing_run_app": "http://127.0.0.1:58422/",
+    "viewer": "http://127.0.0.1:58424/",
+    "new_task_app": "http://127.0.0.1:58425/",
+    "handover": "paused new dispatches, let the active worker finish, verified zero live streams, replaced owned servers, restored same run",
+    "browser": "Aside confirmed current limit changed from 2 to 3, saved and resumed; native catalog refreshed before dispatch",
+    "observed_existing_run": "3/7 integrated; remaining workflow research launched; coordinator coordinating with no error",
+    "existing_research": "two of the three independent research tasks already finished before deployment; remaining research runs before dependent report stages",
+    "project_mcp": "Jev-Router Codex and Claude settings updated to content-addressed native executable"
+  },
+  "package": {
+    "filename": "switchbite-0.8.5-parallel.1-windows-x64.zip",
+    "payload_files": 22,
+    "sha256": "d2642aee604211a8e45b15620c738cb13bf94b96f7b4badcd5136b40e96ec525",
+    "binary_sha256": "33fecdc88541d50a882b3fba6f72db38ffdf87625207d6f664e7c029cee13e93"
+  },
+  "boundaries": {
+    "original_stackbite_modified": false,
+    "existing_main_and_private_clone_changes": "preserved",
+    "storage": "existing Rust target reused; no worker-created Cargo target directories; new synthetic qualification source retained without enrollment because no verified WorkBite Task ID is bound"
+  }
+}
