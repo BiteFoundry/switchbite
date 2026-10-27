@@ -235,7 +235,7 @@ pub fn resume_to_completion(
             }
             if actions
                 .iter()
-                .any(|a| ["plan", "repair", "review"].iter().any(|k| a["kind"] == *k))
+                .any(|a| ["plan", "repair", "review", "refresh_pool"].iter().any(|k| a["kind"] == *k))
             {
                 state["next_action"] = json!("continue_with_coordinator");
                 return Ok(state);
@@ -245,11 +245,8 @@ pub fn resume_to_completion(
             }
             if actions.is_empty()
                 && state["tasks"].as_array().is_some_and(|tasks| {
-                    tasks.iter().all(|t| {
-                        ["done", "blocked", "held", "cancelled"]
-                            .iter()
-                            .any(|s| t["status"] == *s)
-                    })
+                    tasks.iter().any(|t| t["status"]=="blocked"||t["status"]=="held")
+                        && !tasks.iter().any(|t|["running","unknown"].iter().any(|s|t["status"]==*s))
                 })
             {
                 state["next_action"] = json!("continue_with_coordinator");
