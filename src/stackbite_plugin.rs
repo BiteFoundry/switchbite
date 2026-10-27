@@ -10,7 +10,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
-const NEXT_ACTION: &str = "Start a new coordinator session in this workspace. Use switchbite-stackbite's switchbite_start with a goal or plan and factual worker pool, then switchbite_next to continue. The coordinator supplies plans, repairs and pool updates when requested; configured local workers can run through verification and integration in the background. Jev needs TYPESAFE_API_KEY in the coordinator environment; Laya needs its configured local server.";
+const NEXT_ACTION: &str = "Start a new coordinator session in this workspace. Call switchbite-stackbite's switchbite_start with a goal or plan; omit pool to discover installed workers automatically. Call switchbite_next to start execution and check progress. The coordinator supplies plans and repairs when requested. Jev needs TYPESAFE_API_KEY in the coordinator environment; Laya uses its configured local server.";
 const PLUGIN_KIND: &str = "switchbite.stackbite-coordinator-mcp";
 pub const SERVER_NAME: &str = "switchbite-stackbite";
 
