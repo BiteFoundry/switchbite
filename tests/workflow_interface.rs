@@ -29,3 +29,27 @@ fn workflow_plan_action_survives_reopening_and_pause_resume() {
     );
     assert_eq!(reopened.status(run).unwrap()["actions"][0], action);
 }
+
+#[test]
+fn workflow_schema_explains_plans_observations_and_controls() {
+    let items = tools();
+    let start = serde_json::to_value(&items[0]).unwrap();
+    let request = &start["inputSchema"]["properties"]["request"];
+    assert_eq!(request["required"], json!(["workspace", "pool"]));
+    assert!(
+        request["properties"]["plan"]["properties"]["nodes"]["items"]["properties"]["write_paths"]
+            .is_object()
+    );
+    assert!(request["properties"]["pool"]["items"]["properties"]["model"].is_object());
+    let next = serde_json::to_value(&items[1]).unwrap();
+    assert_eq!(
+        next["inputSchema"]["properties"]["operation"]["default"],
+        "next"
+    );
+    let observe = serde_json::to_value(&items[2]).unwrap();
+    assert_eq!(
+        observe["inputSchema"]["properties"]["event"]["required"],
+        json!(["action_id", "event_id", "result"])
+    );
+    assert!(observe["inputSchema"]["examples"][0]["event"]["result"]["plan"]["nodes"].is_array());
+}

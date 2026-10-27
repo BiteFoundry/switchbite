@@ -71,3 +71,11 @@ switchbite stackbite --judge laya --workspace C:\path\to\project --client both -
 ## 실행 경계
 
 이 패키지는 프로젝트 범위의 coordinator MCP 플러그인입니다. 원본 StackBite 설치와 세션은 변경하지 않습니다. 워크플로 상태는 프로젝트에 저장되며, 호스트가 지원하는 실행과 검증 결과를 관찰해 진행합니다.
+
+## 워크플로 입력과 결과
+
+`switchbite_start`에 절대 경로 `workspace`, 실제 작업자 `pool`, 그리고 `goal` 또는 `plan`을 전달합니다. 각 후보에는 고유한 `id`, `description`, `capabilities`, `available`이 필요합니다. 로컬 실행에는 실제 `provider`, `model`, `effort`, `executable`을 함께 기재합니다. 실행 ID와 액션 ID, 기본 병렬 수와 복구 횟수는 엔진이 정합니다.
+
+계획의 `nodes`에는 작업별 `id`, `objective`, 선행 작업 ID 배열 `depends_on`, 확인할 `acceptance`, 저장소 상대 경로 `write_paths`를 넣습니다. 산출물 참조는 `outputs`에 넣고, 작성 경로 소유권은 `write_paths`에 명시합니다. 목표만 전달했다면 반환된 `plan` 액션에 대한 관찰 결과로 `{"plan":{"nodes":[...]}}`를 보냅니다. `repair` 액션에는 같은 ID의 수정 작업을 `{"task":{...}}`로 보내거나 미완료 작업의 변경 계획을 `{"plan":{"nodes":[...]}}`로 보냅니다. 두 경우 모두 `switchbite_observe`의 `event`에 반환된 `action_id`, 고유하고 안정적인 `event_id`, 해당 `result`를 담습니다. 동일한 관찰의 재전송은 멱등입니다. 상세 예시는 `docs/coordinator.md`를 참고하세요.
+
+`switchbite_next`는 선택된 판단기로 라우팅하고 다음 액션을 반환합니다. 로컬 `host` 설정(예: `"host": {}`)이 있거나 작업자 풀에 로컬 실행 정보가 모두 있으면 지원하는 준비·실행·확인·검증·통합·맥락 수집을 진행할 수 있습니다. 그렇지 않으면 조율자가 호스트 도구로 액션을 수행하고 결과를 관찰합니다. 검증과 통합이 끝나야 후속 작업을 시작합니다. 결과가 불명확한 실행은 중복 실행하지 않고 확인하며, 실패 시 제한된 범위에서 복구합니다. `operation`에 `status`, `pause`, `resume`, `cancel`을 지정해 실행을 제어할 수 있습니다.
