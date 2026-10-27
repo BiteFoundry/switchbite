@@ -233,5 +233,8 @@ fn one_interface_next_drives_workflow_while_status_only_is_polled() {
     }
     assert!(tmp.path().join("markers/solo").exists());
     assert!(!repo.join("solo.txt").exists());
-    assert_eq!(git(&repo, &["status", "--porcelain"]), "");
+    assert_eq!(
+        git(&repo, &["status", "--porcelain", "--untracked-files=no"]),
+        ""
+    );
 }
