@@ -12,7 +12,14 @@ use std::{
 };
 
 const MODEL_TTL: u64 = 86_400_000;
-const PROVIDERS: [&str; 4] = ["claude", "codex", "cursor", "opencode"];
+const PROVIDERS: [&str; 6] = [
+    "claude",
+    "codex",
+    "cursor",
+    "opencode",
+    "grok",
+    "antigravity",
+];
 #[derive(Debug)]
 pub struct CatalogError(&'static str);
 impl fmt::Display for CatalogError {
@@ -67,17 +74,19 @@ fn executable(provider: &str) -> Option<PathBuf> {
         let special = match provider {
             "codex" => app.map(|p| p.join("npm/node_modules/@openai/codex/node_modules/@openai/codex-win32-x64/vendor/x86_64-pc-windows-msvc/bin/codex.exe")),
             "opencode" => app.map(|p| p.join("npm/node_modules/@opencode/cli/bin/opencode.exe")),
-            "cursor" => local.map(|p| p.join("cursor-agent/cursor-agent.cmd")),
+            "cursor" => local.as_ref().map(|p| p.join("cursor-agent/cursor-agent.cmd")),
+            "grok" => home().map(|p| p.join(".grok/bin/grok.exe")),
+            "antigravity" => local.map(|p| p.join("agy/bin/agy.exe")),
             _ => None,
         };
         if let Some(p) = special.filter(|p| p.is_file()) {
             return fs::canonicalize(p).ok();
         }
     }
-    let name = if provider == "cursor" {
-        "cursor-agent"
-    } else {
-        provider
+    let name = match provider {
+        "cursor" => "cursor-agent",
+        "antigravity" => "agy",
+        _ => provider,
     };
     let path = std::env::var_os("PATH")?;
     for dir in std::env::split_paths(&path).filter(|p| p.is_absolute()) {
@@ -130,11 +139,11 @@ fn probe(exe: &Path, args: &[&str]) -> Option<String> {
                     return None;
                 }
                 let bytes = receiver
-                    .recv_timeout(Duration::from_secs(5).saturating_sub(started.elapsed()))
+                    .recv_timeout(Duration::from_secs(10).saturating_sub(started.elapsed()))
                     .ok()?;
                 return String::from_utf8(bytes).ok();
             }
-            Ok(None) if started.elapsed() < Duration::from_secs(5) => {
+            Ok(None) if started.elapsed() < Duration::from_secs(10) => {
                 thread::sleep(Duration::from_millis(25))
             }
             _ => {
@@ -193,24 +202,39 @@ fn candidate(
         "cursor" => "General coding, exploration and debugging",
         _ => "Explicit model and custom agent work",
     };
-    json!({"id":id,"description":format!("{role}; {provider} model {model}, {effort} effort."),"capabilities":["file.read","file.write","code.change","code.review","html.write","data.write","writing","code.explore"],"available":true,"provider":provider,"executable":exe.to_string_lossy(),"model":model,"effort":effort,"resource_key":format!("{provider}:{scope}"),"catalog_info":{"source":source,"readiness":"unverified","observed_at_ms":observed}})
+    json!({"id":id,"description":format!("{role}; {provider} model {model}, {effort} effort."),"capabilities":["file.read","file.write","code.change","code.review","html.write","data.write","writing","code.explore"],"available":crate::adapters::supports_provider(provider),"provider":provider,"executable":exe.to_string_lossy(),"model":model,"effort":effort,"resource_key":format!("{provider}:{scope}"),"catalog_info":{"source":source,"readiness":"unverified","observed_at_ms":observed}})
 }
 fn models_from_output(provider: &str, output: &str) -> Vec<String> {
     let mut models = BTreeSet::new();
+    let mut grok_section = false;
     for line in output.lines().take(4096) {
-        let first = line
-            .split_whitespace()
-            .next()
-            .unwrap_or("")
-            .trim_matches(|c: char| c == '*' || c == '-');
-        let valid = valid_model(first)
-            && match provider {
+        if provider == "grok" && line.trim() == "Available models:" {
+            grok_section = true;
+            continue;
+        }
+        let first = match provider {
+            "grok" if grok_section => line
+                .trim()
+                .strip_prefix("- ")
+                .or_else(|| line.trim().strip_prefix("* "))
+                .and_then(|s| s.split_whitespace().next()),
+            "antigravity" => line.split_once('\t').map(|(id, _)| id),
+            "opencode" | "cursor" => line
+                .split_whitespace()
+                .next()
+                .map(|s| s.trim_matches(|c: char| c == '*' || c == '-')),
+            _ => None,
+        };
+        if let Some(first) = first.filter(|s| valid_model(s)) {
+            let valid = match provider {
                 "opencode" => first.contains('/'),
                 "cursor" => line.contains(" - ") && !first.contains('/'),
+                "grok" | "antigravity" => true,
                 _ => false,
             };
-        if valid {
-            models.insert(first.to_string());
+            if valid {
+                models.insert(first.to_string());
+            }
         }
     }
     models.into_iter().collect()
@@ -393,8 +417,10 @@ pub fn snapshot(workspace: &Path, selection: &Value) -> Result<Value, CatalogErr
             models.push(("sonnet".into(), "official_alias".into()));
             models.push(("opus".into(), "official_alias".into()));
         }
-        if provider == "cursor" || provider == "opencode" {
+        if ["cursor", "opencode", "grok", "antigravity"].contains(&provider) {
+            let mut login_required = false;
             let discovered = if fresh {
+                login_required = cached.as_ref().is_some_and(|v| v["login_required"] == true);
                 cached
                     .as_ref()
                     .and_then(|v| v["models"].as_array())
@@ -409,20 +435,31 @@ pub fn snapshot(workspace: &Path, selection: &Value) -> Result<Value, CatalogErr
             } else {
                 let args: &[&str] = if provider == "cursor" {
                     &["--list-models"]
-                } else {
+                } else if provider == "opencode" {
                     &["models", "--standalone"]
+                } else {
+                    &["models"]
                 };
                 match probe(&exe, args) {
-                    Some(out) => models_from_output(provider, &out),
+                    Some(out) => {
+                        login_required = provider == "grok"
+                            && out
+                                .lines()
+                                .any(|line| line.trim() == "You are not authenticated.");
+                        models_from_output(provider, &out)
+                    }
                     None => {
                         diagnostics.push(json!({"provider":provider,"code":"model_probe_failed"}));
                         Vec::new()
                     }
                 }
             };
+            if login_required {
+                diagnostics.push(json!({"provider":provider,"code":"login_required"}));
+            }
             if !fresh && !discovered.is_empty() {
                 let _ = fs::create_dir_all(&dir);
-                let bytes = serde_json::to_vec(&json!({"version":version,"scope":scope,"observed_at_ms":timestamp,"models":discovered})).unwrap_or_default();
+                let bytes = serde_json::to_vec(&json!({"version":version,"scope":scope,"observed_at_ms":timestamp,"models":discovered,"login_required":login_required})).unwrap_or_default();
                 if write_cache(&cache_path, &bytes).is_err() {
                     diagnostics.push(json!({"provider":provider,"code":"cache_write_failed"}));
                 }
@@ -498,7 +535,7 @@ pub fn snapshot(workspace: &Path, selection: &Value) -> Result<Value, CatalogErr
     if candidates.len() > 1024 {
         diagnostics.push(json!({"provider":"all","code":"catalog_limit","total":candidates.len(),"limit":1024,"message":"Catalog is limited to 1024 candidates; narrow selection.providers to inspect individual providers."}));
     }
-    candidates.truncate(1024);
+    candidates = diverse_limit(candidates, 1024);
     let revision = hash(
         &serde_json::to_string(
             &candidates
@@ -511,6 +548,84 @@ pub fn snapshot(workspace: &Path, selection: &Value) -> Result<Value, CatalogErr
     Ok(
         json!({"schema_version":1,"revision":revision,"observed_at_ms":timestamp,"candidates":candidates,"diagnostics":diagnostics}),
     )
+}
+// Reserve the highest-ranked entry from every represented provider before filling
+// the remaining slots in the existing global priority order.
+fn diverse_limit(candidates: Vec<Value>, limit: usize) -> Vec<Value> {
+    if candidates.len() <= limit {
+        return candidates;
+    }
+    let mut providers = BTreeSet::new();
+    let mut reserved = BTreeSet::new();
+    for (i, c) in candidates.iter().enumerate() {
+        if let Some(provider) = c["provider"].as_str()
+            && providers.insert(provider.to_owned())
+            && reserved.len() < limit
+        {
+            reserved.insert(i);
+        }
+    }
+    let mut selected = reserved.clone();
+    for i in 0..candidates.len() {
+        if selected.len() == limit {
+            break;
+        }
+        selected.insert(i);
+    }
+    candidates
+        .into_iter()
+        .enumerate()
+        .filter_map(|(i, c)| selected.contains(&i).then_some(c))
+        .collect()
+}
+
+/// Discover all supported and known local CLI tools for a picker.
+pub fn inventory(workspace: &Path, refresh: bool) -> Result<Value, CatalogError> {
+    let snapshot = snapshot(workspace, &json!({"refresh":refresh}))?;
+    let candidates = snapshot["candidates"]
+        .as_array()
+        .ok_or(CatalogError("invalid_snapshot"))?;
+    let tools: Vec<Value> = PROVIDERS
+        .iter()
+        .map(|provider| {
+            let installed = executable(provider).is_some();
+            let models: BTreeSet<&str> = candidates
+                .iter()
+                .filter(|c| c["provider"] == *provider)
+                .filter_map(|c| c["model"].as_str())
+                .collect();
+            let runnable = crate::adapters::supports_provider(provider);
+            let selectable = installed && runnable && !models.is_empty();
+            let login_required = snapshot["diagnostics"].as_array().is_some_and(|entries| {
+                entries
+                    .iter()
+                    .any(|d| d["provider"] == *provider && d["code"] == "login_required")
+            });
+            let (code, label) = if !installed {
+                ("not_installed", "설치되지 않음")
+            } else if login_required {
+                ("login_required", "로그인 필요")
+            } else if !runnable {
+                ("adapter_unavailable", "설치됨·실행 시 인증 확인")
+            } else if models.is_empty() {
+                ("no_models", "모델을 찾을 수 없음")
+            } else {
+                ("installed", "설치됨·실행 시 인증 확인")
+            };
+            let name = match *provider {
+                "claude" => "Claude",
+                "codex" => "Codex",
+                "cursor" => "Cursor",
+                "opencode" => "OpenCode",
+                "grok" => "Grok",
+                _ => "Antigravity",
+            };
+            json!({"id":provider,"name":name,"installed":installed,"selectable":selectable,
+            "model_count":models.len(),"connection_mode":"cli","status":{"code":code,"label":label},
+            "session_capabilities":{"new_session":runnable,"resume":false,"attach":false}})
+        })
+        .collect();
+    Ok(json!({"snapshot":snapshot,"tools":tools}))
 }
 fn candidate_order(a: &Value, b: &Value) -> std::cmp::Ordering {
     let key = |v: &Value| {
@@ -613,6 +728,32 @@ pub fn shortlist(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn observed_new_cli_model_formats_are_parsed_without_headers() {
+        let grok = "You are not authenticated.\n\nDefault model: grok-4.7-build-fast\n\nAvailable models:\n  - grok-4.7\n  * grok-4.7-build-fast (default)\n";
+        assert_eq!(
+            models_from_output("grok", grok),
+            vec!["grok-4.7", "grok-4.7-build-fast"]
+        );
+        let agy = "Fetching available models...\ngemini-4-argon-medium\tGemini 4 Argon (Medium)\nclaude-opus-5-5-high\tClaude Opus 5.5 (High)\nbad model\tBad\n";
+        assert_eq!(
+            models_from_output("antigravity", agy),
+            vec!["claude-opus-5-5-high", "gemini-4-argon-medium"]
+        );
+        assert!(models_from_output("grok", "Default model: bogus\n").is_empty());
+    }
+    #[test]
+    fn catalog_limit_preserves_provider_diversity() {
+        let mut candidates: Vec<Value> = (0..1100)
+            .map(|i| json!({"provider":"opencode", "id":i}))
+            .collect();
+        candidates.push(json!({"provider":"grok", "id":"g"}));
+        candidates.push(json!({"provider":"antigravity", "id":"a"}));
+        let kept = diverse_limit(candidates, 1024);
+        assert_eq!(kept.len(), 1024);
+        assert!(kept.iter().any(|c| c["provider"] == "grok"));
+        assert!(kept.iter().any(|c| c["provider"] == "antigravity"));
+    }
     #[test]
     fn claude_help_efforts_allow_exact_opus_medium_pin() {
         let efforts = claude_efforts(
