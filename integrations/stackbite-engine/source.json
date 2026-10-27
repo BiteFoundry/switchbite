@@ -1,0 +1,8 @@
+{
+  "stackbite_base_commit": "a29952dfd09c85dc854c275fdf7c5efc7f47421f",
+  "stackbite_app_version": "0.5.54",
+  "engine_commit": "0431b7cf",
+  "build_location": "apps/stackbite/rust/crates/switchbite-engine",
+  "build_command": "cargo build --release -p switchbite-stackbite-engine",
+  "note": "Copy this crate into a separate compatible StackBite source clone. Original StackBite installation is unchanged."
+}
