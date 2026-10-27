@@ -224,6 +224,11 @@ fn read_bounded(path: &Path) -> Result<Vec<u8>, HostError> {
     }
     Ok(b)
 }
+fn cursor_weekly_limit(bytes: &[u8]) -> bool {
+    bytes
+        .windows(b"ActionRequiredError: Weekly usage limit reached.".len())
+        .any(|window| window == b"ActionRequiredError: Weekly usage limit reached.")
+}
 fn failure_hint(bytes: &[u8]) -> Option<&'static str> {
     let message = String::from_utf8_lossy(bytes).to_ascii_lowercase();
     if (message.contains("effort") || message.contains("variant"))
@@ -519,6 +524,7 @@ impl LocalHost {
         dir: &Path,
         tag: &str,
         launch: bool,
+        cursor: bool,
     ) -> Result<(bool, Vec<u8>, Option<&'static str>), HostError> {
         let logs = self.state.join("output");
         fs::create_dir_all(&logs).map_err(|_| HostError("io_error"))?;
@@ -557,6 +563,7 @@ impl LocalHost {
             }
         }
         let started = Instant::now();
+        let mut last_stderr_poll = started;
         loop {
             if let Some(status) = tree
                 .child
@@ -574,6 +581,10 @@ impl LocalHost {
                     return Err(HostError("output_limit"));
                 }
                 let stderr = read_bounded(&err)?;
+                if launch && cursor && cursor_weekly_limit(&stderr) {
+                    let _ = fs::remove_file(&out);
+                    return Ok((false, bytes, Some("rate_limited")));
+                }
                 let hint = if status.success() {
                     None
                 } else {
@@ -609,6 +620,17 @@ impl LocalHost {
                 let _ = fs::remove_file(&out);
                 let _ = fs::remove_file(&err);
                 return Err(HostError("output_limit"));
+            }
+            if launch && cursor && last_stderr_poll.elapsed() >= Duration::from_millis(500) {
+                last_stderr_poll = Instant::now();
+                let stderr = read_bounded(&err)?;
+                if cursor_weekly_limit(&stderr) {
+                    tree.terminate()
+                        .map_err(|_| HostError("process_ownership_unavailable"))?;
+                    let bytes = read_bounded(&out)?;
+                    let _ = fs::remove_file(&out);
+                    return Ok((false, bytes, Some("rate_limited")));
+                }
             }
             thread::sleep(Duration::from_millis(50));
         }
@@ -682,7 +704,13 @@ impl LocalHost {
                 cmd.env_remove(key);
             }
         }
-        let (ok, output, stderr_hint) = match self.execute(cmd, &dir, id, true) {
+        let (ok, output, stderr_hint) = match self.execute(
+            cmd,
+            &dir,
+            id,
+            true,
+            provider == "cursor",
+        ) {
             Ok(result) => result,
             Err(HostError("cancelled")) => {
                 return Ok(
@@ -701,9 +729,13 @@ impl LocalHost {
         // and prepare a repair. Browser summaries never expose these raw logs.
         let stream_path = messages.join(format!("{}.jsonl", hash(id)));
         fs::write(&stream_path, &output).map_err(|_| HostError("io_error"))?;
-        Ok(
-            json!({"status":if ok && verified {"completed"} else {"failed"},"execution_id":id,"completion_verified":ok && verified,"requested_model":model,"resolved_model":resolved_model,"message_ref":if message_path.exists(){Some(message_path)}else{None},"stream_ref":stream_path,"reason":if !ok {Some(stderr_hint.or_else(|| failure_hint(&output)).unwrap_or("provider_exit_failed"))} else if !verified {Some("provider_receipt_invalid")} else {None}}),
-        )
+        let mut result = json!({"status":if ok && verified {"completed"} else {"failed"},"execution_id":id,"completion_verified":ok && verified,"requested_model":model,"resolved_model":resolved_model,"message_ref":if message_path.exists(){Some(message_path)}else{None},"stream_ref":stream_path,"reason":if !ok {Some(stderr_hint.or_else(|| failure_hint(&output)).unwrap_or("provider_exit_failed"))} else if !verified {Some("provider_receipt_invalid")} else {None}});
+        if stderr_hint == Some("rate_limited") {
+            result["error"] = json!({"code":"rate_limited"});
+            result["stderr_ref"] =
+                json!(self.state.join("output").join(format!("{}.err", hash(id))));
+        }
+        Ok(result)
     }
     fn inspect(&self, p: &Value) -> Result<Value, HostError> {
         let id = string(p, "execution_id")?;
@@ -807,7 +839,13 @@ impl LocalHost {
                         .ok_or(HostError("invalid_action"))?,
                 );
             }
-            let outcome = self.execute(cmd, &dir, &format!("check-{}-{i}", dir.display()), false);
+            let outcome = self.execute(
+                cmd,
+                &dir,
+                &format!("check-{}-{i}", dir.display()),
+                false,
+                false,
+            );
             let ok = matches!(&outcome, Ok((true, _, _)));
             passed &= ok;
             let reason = match outcome {
@@ -1051,7 +1089,47 @@ impl LocalHost {
 }
 #[cfg(test)]
 mod tests {
-    use super::verified_receipt;
+    use super::{cursor_weekly_limit, verified_receipt};
+    #[test]
+    fn cursor_weekly_limit_requires_the_definite_error() {
+        assert!(cursor_weekly_limit(b"ActionRequiredError: Weekly usage limit reached. It resets in 1 day. Buy credits to keep going now."));
+        assert!(!cursor_weekly_limit(b"Weekly usage limit reached."));
+        assert!(!cursor_weekly_limit(
+            b"ActionRequiredError: temporary rate limit"
+        ));
+    }
+    #[cfg(windows)]
+    #[test]
+    fn cursor_quota_terminates_owned_job_and_preserves_output() {
+        use super::*;
+        let temp = tempfile::tempdir().unwrap();
+        let host = LocalHost {
+            workspace: temp.path().to_owned(),
+            state: temp.path().to_owned(),
+            worktrees: temp.path().to_owned(),
+            base: String::new(),
+            timeout: 20,
+        };
+        let mut cmd = Command::new("powershell.exe");
+        cmd.args(["-NoProfile", "-Command", "[Console]::Out.WriteLine('partial'); [Console]::Error.WriteLine('ActionRequiredError: Weekly usage limit reached. It resets in 1 day.'); Start-Sleep -Seconds 15"]);
+        let start = Instant::now();
+        let (ok, output, hint) = host
+            .execute(cmd, temp.path(), "quota-test", true, true)
+            .unwrap();
+        assert!(!ok);
+        assert_eq!(hint, Some("rate_limited"));
+        assert!(start.elapsed() < Duration::from_secs(10));
+        assert!(String::from_utf8_lossy(&output).contains("partial"));
+        assert!(cursor_weekly_limit(
+            &read_bounded(
+                &temp
+                    .path()
+                    .join("output")
+                    .join(format!("{}.err", hash("quota-test")))
+            )
+            .unwrap()
+        ));
+    }
     #[test]
     fn receipts_fail_closed_on_contradictions() {
         let valid = b"{\"type\":\"thread.started\",\"thread_id\":\"t\"}\n{\"type\":\"turn.started\"}\n{\"type\":\"turn.completed\"}\n";
