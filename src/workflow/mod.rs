@@ -529,6 +529,18 @@ impl Workflow {
             }
             "launch" | "inspect" => {
                 let i = index.ok_or(err("invalid_receipt"))?;
+                let expected = if kind == "launch" {
+                    Some(aid)
+                } else {
+                    s.tasks[i].execution_id.as_deref()
+                };
+                let received = result.get("execution_id").and_then(Value::as_str);
+                if received.is_some() && received != expected {
+                    return Err(err("invalid_receipt"));
+                }
+                if result["status"] == "completed" && (expected.is_none() || received != expected) {
+                    return Err(err("invalid_receipt"));
+                }
                 match result["status"].as_str() {
                     Some("running") | Some("unknown") => {
                         let ex = result
@@ -655,6 +667,7 @@ impl Workflow {
             let t = &s.tasks[i];
             tid = t.node["id"].clone();
             payload["task"] = t.node.clone();
+            payload["attempt"] = json!(t.attempts);
             payload["candidate"] = t.candidate.clone().unwrap_or(Value::Null);
             payload["prepared"] = t.prepared.clone().unwrap_or(Value::Null);
             if let Some(ex) = &t.execution_id {

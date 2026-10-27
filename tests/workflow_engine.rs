@@ -12,7 +12,14 @@ fn action<'a>(v: &'a Value, kind: &str, task: &str) -> &'a Value {
         .find(|a| a["kind"] == kind && a["task_id"] == task)
         .unwrap()
 }
-fn send(w: &Workflow, run: &str, a: &Value, result: Value) -> Value {
+fn send(w: &Workflow, run: &str, a: &Value, mut result: Value) -> Value {
+    if result["status"] == "completed" && result.get("execution_id").is_none() {
+        result["execution_id"] = if a["kind"] == "launch" {
+            a["id"].clone()
+        } else {
+            a["payload"]["execution_id"].clone()
+        };
+    }
     let aid = a["id"].as_str().unwrap();
     w.observe(
         run,
@@ -188,6 +195,7 @@ fn insufficient_context_and_bounded_repair() {
         action(&s, "repair", "one"),
         json!({"task":{"id":"one","objective":"retry","outputs":["src/one"]}}),
     );
+    assert_eq!(action(&s, "route", "one")["payload"]["attempt"], 1);
     assert_eq!(
         action(&s, "route", "one")["payload"]["task"]["objective"],
         "retry"
@@ -377,7 +385,9 @@ fn compact_events_preserve_idempotency_and_bound_snapshots() {
         let result = match a["kind"].as_str().unwrap() {
             "route" => json!({"status":"ready","candidate_id":format!("c{suffix}")}),
             "prepare" => prepared(),
-            "launch" => json!({"status":"completed","completion_verified":true}),
+            "launch" => {
+                json!({"status":"completed","completion_verified":true,"execution_id":a["id"]})
+            }
             "verify" => {
                 json!({"status":"passed","evidence":[{"status":"passed","private":"never expose"}]})
             }
@@ -495,4 +505,34 @@ fn refresh_pool_resumes_holds_and_protects_active_candidates() {
         "stable_id"
     );
     assert_eq!(action(&s, "prepare", "one")["kind"], "prepare");
+}
+#[test]
+fn rejects_wrong_and_missing_execution_ids() {
+    let dir = tempfile::tempdir().unwrap();
+    let w = Workflow::new(dir.path().to_path_buf());
+    let s = w.start(&request()).unwrap();
+    let run = s["run_id"].as_str().unwrap();
+    let s = send(
+        &w,
+        run,
+        action(&s, "route", "one"),
+        json!({"status":"ready","candidate_id":"a"}),
+    );
+    let s = send(&w, run, action(&s, "prepare", "one"), prepared());
+    let launch = action(&s, "launch", "one");
+    for result in [
+        json!({"status":"completed","completion_verified":true}),
+        json!({"status":"completed","completion_verified":true,"execution_id":"another"}),
+        json!({"status":"running","execution_id":"another"}),
+    ] {
+        let event = json!({"action_id":launch["id"],"event_id":"bad-identity","result":result});
+        assert_eq!(w.observe(run, &event).unwrap_err().code, "invalid_receipt");
+    }
+    let s = send(
+        &w,
+        run,
+        launch,
+        json!({"status":"completed","completion_verified":true}),
+    );
+    assert_eq!(action(&s, "verify", "one")["kind"], "verify");
 }
