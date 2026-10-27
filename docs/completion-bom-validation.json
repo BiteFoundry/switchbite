@@ -1,0 +1,55 @@
+{
+  "date": "2026-10-27",
+  "version": "0.8.6-review.3",
+  "runtime_commit": "1873de84a3938e042b32d08b263a03465586f583",
+  "reported_failure": {
+    "coordinator": "repair artifact starts EF BB BF; valid UTF-8 JSON after that prefix; parser returned coordinator_artifact_invalid",
+    "worker": "Claude requested opus, reported claude-opus-5-5, emitted success/is_error=false with one Read denial and produced a 40053-byte report; strict receipt check returned provider_receipt_invalid"
+  },
+  "changes": {
+    "observation": "remove one leading UTF-8 BOM before JSON decoding; preserve size, path, JSON and schema checks",
+    "completion": "matching successful Claude terminal result accepts a permission_denials array with recovered denials; actual errors, refusals and session mismatches remain failures",
+    "evidence": "permission_denial_count retained in native result, workflow evidence and HTTP summary",
+    "execution_permissions": "unchanged",
+    "output_checks": "required files, configured checks and declared write paths continue through verification and integration"
+  },
+  "checks": {
+    "default_suite": { "passed": 234, "failed": 0, "ignored": 2 },
+    "format": "passed",
+    "clippy_all_targets_deny_warnings": "passed",
+    "release_build": "passed",
+    "package_readback_and_payload_hashes": "passed",
+    "bom": "plan, repair and routing-review BOM/plain equivalence; malformed JSON, duplicate BOM, UTF-16 and invalid schemas still rejected",
+    "claude": "fake native Claude writes 40KB report with successful recovered Read denial; completed/count=1, verification and integration pass; missing output and out-of-scope write fail their proper checks"
+  },
+  "live_recovery": {
+    "same_run": true,
+    "source_artifact_retained": true,
+    "method": "used supported repair observation with original acceptance contract, added a bounded copy-and-verify objective and explicit Codex Terra high target; normal worker, verify and integrate stages followed",
+    "original_launch_receipt_rewritten": false,
+    "source_bytes": 40053,
+    "source_and_recovery_workspace_sha256": "88a9669d426fa68491ad483c98176bfbee4f537b2c112fce3161ad7e69272f65",
+    "integration": "Git converted 319 LF endings to CRLF; normalized text SHA256 matches preserved source",
+    "report_draft_status": "done",
+    "observed_progress": "5/7 integrated; independent review running on Codex gpt-6.1-sol max; coordinator has no error",
+    "completed_final_report_claim": false
+  },
+  "deployment": {
+    "current_app": "http://127.0.0.1:58422/",
+    "viewer": "http://127.0.0.1:58424/",
+    "new_tasks": "http://127.0.0.1:58425/",
+    "prior_driver_replacement": "verified no live native processes and exact owned server executables before replacement",
+    "project_mcp": "Codex and Claude configured with content-addressed review.3 executable"
+  },
+  "package": {
+    "filename": "switchbite-0.8.6-review.3-windows-x64.zip",
+    "payload_files": 22,
+    "sha256": "57c5173e4a4e922fca5bf33f6c6b43b7a5a2d71ea7270f3ea5abbdfa32b920d0",
+    "binary_sha256": "b4bb1022f4aaf9fdde18c9ae2c868f64ed680d69119af93bc4f2c794d603d4b1"
+  },
+  "boundaries": {
+    "original_stackbite_modified": false,
+    "existing_main_and_private_clone_changes": "preserved",
+    "storage": "existing Rust target reused; no new worker Cargo targets; no inferred WorkBite binding"
+  }
+}
