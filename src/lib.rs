@@ -20,6 +20,7 @@ pub mod local_laya;
 pub mod route_context;
 pub mod routing;
 pub mod runtime;
+pub mod runtime_bundle;
 pub mod stackbite_plugin;
 pub mod web_coordinator;
 pub mod web_workbench;

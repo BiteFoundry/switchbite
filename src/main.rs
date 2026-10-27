@@ -609,6 +609,32 @@ fn install_stackbite(args: &[String]) -> Result<(), Box<dyn std::error::Error + 
 }
 fn main() {
     let mut args: Vec<String> = std::env::args().skip(1).collect();
+    if args.first().is_some_and(|s| s == "runtime") {
+        let result = match args.as_slice() {
+            [_, command] if command == "status" => switchbite::runtime_bundle::status(),
+            [_, command] if command == "sync" => switchbite::runtime_bundle::sync().map(|v| v.unwrap_or(serde_json::json!({"status":"unconfigured"}))),
+            [_, command, flag, source] if command == "configure" && flag == "--manifest" => switchbite::runtime_bundle::configure(source),
+            _ => Err("Usage: switchbite runtime status|sync|configure --manifest ABSOLUTE_PATH_OR_HTTPS_URL".into()),
+        };
+        match result {
+            Ok(value) => println!("{value}"),
+            Err(_) => {
+                eprintln!(
+                    "Runtime configuration or update failed; check the manifest and engine files."
+                );
+                std::process::exit(1);
+            }
+        }
+        return;
+    }
+    match switchbite::runtime_bundle::launch_current(&args) {
+        Ok(Some(status)) => std::process::exit(status.code().unwrap_or(1)),
+        Ok(None) => {}
+        Err(_) => {
+            eprintln!("Engine update failed. Check the configured runtime manifest.");
+            std::process::exit(1);
+        }
+    }
     if args.first().is_some_and(|s| s == "stackbite") {
         if let Err(error) = install_stackbite(&args) {
             eprintln!("{error}");

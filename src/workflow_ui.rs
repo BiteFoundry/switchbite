@@ -569,7 +569,7 @@ pub fn serve_app_resume(
     resume: Option<&str>,
     coordinator: Option<&str>,
 ) -> Result<(), AnyError> {
-    let app = Workbench::new(workspace, judge).map_err(|value| value.to_string())?;
+    let app = Arc::new(Workbench::new(workspace, judge).map_err(|value| value.to_string())?);
     let workflow = Workflow::new(workspace.join(".switchbite/workflow"));
     let token = random_token()?;
     let listener = TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, port))?;
@@ -577,7 +577,21 @@ pub fn serve_app_resume(
         app.resume_existing(run, coordinator)
             .map_err(|value| value.to_string())?;
     }
+    let initial = if resume.is_none() {
+        crate::runtime_bundle::initial_submission()?
+    } else {
+        None
+    };
     let host = format!("127.0.0.1:{}", listener.local_addr()?.port());
+    crate::runtime_bundle::publish_web_ready(&host)?;
+    if let Some(body) = initial {
+        let app = app.clone();
+        std::thread::spawn(move || {
+            if let Err(error) = app.start(&body) {
+                app.record_start_error(error);
+            }
+        });
+    }
     eprintln!("Switchbite app: http://{host}/");
     for stream in listener.incoming().flatten() {
         let _ = handle(stream, &workflow, "", &host, &token, Some(&app));

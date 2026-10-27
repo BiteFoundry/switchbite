@@ -1,6 +1,6 @@
 [package]
 name = "switchbite"
-version = "0.8.6-review.3"
+version = "0.9.0-preview.1"
 edition = "2024"
 rust-version = "1.88"
 description = "The decision layer for your agents: portable worker and model-pool routing over MCP"

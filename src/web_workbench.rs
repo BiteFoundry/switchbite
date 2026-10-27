@@ -80,6 +80,7 @@ pub struct Workbench {
     preferences: PathBuf,
     judge: Option<Arc<ConfiguredJudge>>,
     current: Mutex<Option<Arc<Run>>>,
+    startup_error: Mutex<Option<Value>>,
 }
 
 fn error(code: &str, message: &str) -> Value {
@@ -208,6 +209,7 @@ impl Workbench {
             preferences,
             judge,
             current: Mutex::new(None),
+            startup_error: Mutex::new(None),
         })
     }
 
@@ -384,6 +386,16 @@ impl Workbench {
                 "커밋이 있는 Git 프로젝트 폴더를 선택하세요.",
             )
         })?;
+        if let Some(handoff) = crate::runtime_bundle::handoff_new_run(body, &self.workspace)
+            .map_err(|_| {
+                error(
+                    "runtime_update_failed",
+                    "엔진 업데이트를 완료하지 못했습니다. 다시 시작해 주세요.",
+                )
+            })?
+        {
+            return Ok(handoff);
+        }
         let state = Workflow::new(root.clone()).start(&json!({"workspace":workspace,"goal":goal,"catalog":{"providers":selected},"max_parallel":max_parallel,"host":{"timeout_seconds":900}})).map_err(|e| e.to_value())?;
         let run = Arc::new(Run {
             root,
@@ -405,9 +417,11 @@ impl Workbench {
     pub fn status(&self) -> Result<Value, Value> {
         let current = self.current.lock().map_err(|_| lock_error())?.clone();
         let Some(run) = current else {
-            return Ok(
-                json!({"status":"idle","tasks":[],"actions":[],"progress":{"done":0,"total":0},"event_count":0}),
-            );
+            let mut state = json!({"status":"idle","tasks":[],"actions":[],"progress":{"done":0,"total":0},"event_count":0});
+            if let Some(detail) = self.startup_error.lock().map_err(|_| lock_error())?.clone() {
+                state["attention"] = detail;
+            }
+            return Ok(state);
         };
         let workflow = Workflow::new(run.root.clone());
         run.checkpoint()?;
@@ -422,7 +436,11 @@ impl Workbench {
         state["goal"] = request["goal"].clone();
         state["max_parallel"] = request["max_parallel"].clone();
         state["tools"] = json!(run.tools);
-        state["connection"] = json!({"mode":"native_cli_new_session","label":"기존 CLI 로그인으로 새 작업 세션 실행"});
+        state["connection"] = if request["host"]["backend"]["type"] == "stackbite" {
+            json!({"mode":"stackbite_engine","label":"StackBite 엔진 · 로그인된 CLI로 실행"})
+        } else {
+            json!({"mode":"native_cli_new_session","label":"기존 CLI 로그인으로 새 작업 세션 실행"})
+        };
         if let Some(detail) = coordinator.get("error") {
             state["attention"] = detail.clone();
         }
@@ -455,6 +473,12 @@ impl Workbench {
             state["result"] = json!({"workspace":task["prepared"]["integration_workspace"],"branch":task["prepared"]["integration_branch"],"commit":commit});
         }
         Ok(state)
+    }
+
+    pub(crate) fn record_start_error(&self, error: Value) {
+        if let Ok(mut slot) = self.startup_error.lock() {
+            *slot = Some(error);
+        }
     }
 
     /// Reattach the web coordinator after its previous server has stopped.

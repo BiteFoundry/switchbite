@@ -76,6 +76,8 @@ struct Task {
     next_inspect_at_ms: u64,
     #[serde(default)]
     evidence: Vec<Value>,
+    #[serde(default)]
+    observed: Value,
 }
 #[derive(Serialize, Deserialize)]
 struct State {
@@ -181,7 +183,8 @@ impl Workflow {
     }
     fn response(s: &State) -> Value {
         let done = s.tasks.iter().filter(|t| t.state == "done").count();
-        let mut result = json!({"schema_version":s.schema_version,"run_id":s.run_id,"status":s.status,"max_parallel":s.request["max_parallel"].as_u64().unwrap_or(2),"summary":format!("{done}/{} tasks completed",s.tasks.len()),"tasks":s.tasks.iter().map(|t|json!({"task":t.node,"id":t.node["id"],"status":t.state,"candidate":t.candidate,"prepared":t.prepared,"execution_id":t.execution_id,"repair_rounds":t.attempts,"evidence":t.evidence,"next_inspect_at_ms":t.next_inspect_at_ms,"wait_reason":Self::wait_reason(s, t)})).collect::<Vec<_>>(),"actions":s.actions,"events":s.recent_events,"event_count":s.events.len(),"event_cursor":{"first":s.events.len().saturating_sub(s.recent_events.len())+if s.recent_events.is_empty(){0}else{1},"last":s.events.len()},"revision":s.revision,"progress":{"done":done,"total":s.tasks.len(),"blocked":s.tasks.iter().filter(|t| ["held","blocked"].contains(&t.state.as_str())).count()}});
+        let mut result = json!({"schema_version":s.schema_version,"run_id":s.run_id,"status":s.status,"max_parallel":s.request["max_parallel"].as_u64().unwrap_or(2),"summary":format!("{done}/{} tasks completed",s.tasks.len()),"tasks":s.tasks.iter().map(|t|json!({"task":t.node,"id":t.node["id"],"status":t.state,"candidate":t.candidate,"prepared":t.prepared,"execution_id":t.execution_id,"repair_rounds":t.attempts,"evidence":t.evidence,"observed":t.observed,"next_inspect_at_ms":t.next_inspect_at_ms,"wait_reason":Self::wait_reason(s, t)})).collect::<Vec<_>>(),"actions":s.actions,"events":s.recent_events,"event_count":s.events.len(),"event_cursor":{"first":s.events.len().saturating_sub(s.recent_events.len())+if s.recent_events.is_empty(){0}else{1},"last":s.events.len()},"revision":s.revision,"progress":{"done":done,"total":s.tasks.len(),"blocked":s.tasks.iter().filter(|t| ["held","blocked"].contains(&t.state.as_str())).count()}});
+        result["runtime"] = s.request["runtime"].clone();
         if let Some(catalog) = &s.catalog {
             result["catalog"] = json!({"revision":catalog["revision"],"candidate_count":catalog["candidates"].as_array().map_or(0, Vec::len),"diagnostics":catalog["diagnostics"]});
         }
@@ -235,6 +238,7 @@ impl Workflow {
             }
         }
         let mut request = request.clone();
+        crate::runtime_bundle::pin_request(&mut request).map_err(|_| err("runtime_unavailable"))?;
         let catalog = if let Some(pool) = request.get("pool") {
             validate_pool(pool)?;
             request.as_object_mut().unwrap().remove("catalog");
@@ -782,6 +786,11 @@ impl Workflow {
                             return Err(err("invalid_receipt"));
                         }
                         s.tasks[i].state = "verifying".into();
+                        if let Some(model) = result["resolved_model"].as_str().filter(|s| {
+                            !s.is_empty() && s.len() <= 256 && !s.chars().any(char::is_control)
+                        }) {
+                            s.tasks[i].observed = json!({"model":model});
+                        }
                     }
                     Some("failed")
                         if s.status != "cancelled"
@@ -996,6 +1005,7 @@ impl Workflow {
             }
             match state.as_str() {
                 "pending" => {
+                    s.tasks[i].observed = Value::Null;
                     let node = &s.tasks[i].node;
                     let dependencies: Vec<Value> = s.tasks.iter().filter(|t| deps.iter().any(|d| t.node["id"] == *d))
                         .map(|t| json!({"id":t.node["id"],"outputs":t.node["outputs"],"status":t.state,"integration":t.evidence.iter().rev().find(|e| e["stage"] == "integrate")})).collect();
@@ -1617,6 +1627,7 @@ fn validate_plan(plan: &Value) -> Result<Vec<Task>, WorkflowError> {
             context_summary: None,
             next_inspect_at_ms: 0,
             evidence: vec![],
+            observed: Value::Null,
         });
     }
     let mut done = BTreeSet::new();
