@@ -498,7 +498,9 @@ impl Workbench {
             return Err(error("run_active", "현재 실행을 먼저 확인하세요."));
         }
         if state["status"] == "running"
-            && state["actions"].as_array().is_some_and(|actions| actions.iter().any(|a| a["kind"] == "refresh_pool"))
+            && state["actions"]
+                .as_array()
+                .is_some_and(|actions| actions.iter().any(|a| a["kind"] == "refresh_pool"))
         {
             workflow.refresh_catalog(id).map_err(|e| e.to_value())?;
         }
@@ -714,7 +716,11 @@ fn drive(run: &Run, judge: Option<Arc<ConfiguredJudge>>) -> Result<(), Value> {
                 .as_array()
                 .into_iter()
                 .flatten()
-                .find(|a| ["plan", "repair", "review_route"].iter().any(|kind| a["kind"] == *kind))
+                .find(|a| {
+                    ["plan", "repair", "review_route"]
+                        .iter()
+                        .any(|kind| a["kind"] == *kind)
+                })
                 .cloned()
             {
                 action["coordinator_attempt"] = json!(run.attempt.load(Ordering::Acquire));
@@ -724,8 +730,7 @@ fn drive(run: &Run, judge: Option<Arc<ConfiguredJudge>>) -> Result<(), Value> {
                     *run.latest_coordinator_action
                         .lock()
                         .map_err(|_| lock_error())? = Some(action.clone());
-                    *run.coordinator.lock().map_err(|_| lock_error())? =
-                        json!({"status":if action["kind"] == "plan" {"planning"} else if action["kind"] == "review_route" {"routing"} else {"repairing"}});
+                    *run.coordinator.lock().map_err(|_| lock_error())? = json!({"status":if action["kind"] == "plan" {"planning"} else if action["kind"] == "review_route" {"routing"} else {"repairing"}});
                     run.checkpoint()?;
                     // Recheck after publishing the cancellation target.
                     let result = if workflow.status(&run.id).map_err(|e| e.to_value())?["status"]

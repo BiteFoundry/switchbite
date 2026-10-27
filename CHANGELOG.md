@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.8.6-review.1 — 2026-10-27 (branch preview)
+
+- Low-confidence and tied routing decisions request a native coordinator review.
+  Its selected candidate is checked against the original snapshot, current
+  availability, task requirements, model pins and reviewer exclusions.
+- The web driver consumes routing reviews and continues execution. Existing
+  pool waits are refreshed when reconnecting to a running web workflow.
+- The current run shows its coordinator separately from each task's assigned
+  worker model and effort.
+
 ## 0.8.5-parallel.1 — 2026-10-27 (branch preview)
 
 - Native CLI pools provide three independent session slots per shared resource.

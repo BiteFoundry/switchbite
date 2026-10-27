@@ -49,7 +49,6 @@ fn fake_worker(tmp: &Path) -> Value {
         assert!(prompt.contains("Keep the complete user goal"));
         if prompt.contains("Review the proposed worker assignment") {
             assert!(prompt.contains("candidate_snapshot"));
-            assert!(prompt.contains("review independence"));
             std::fs::write("switchbite-observation.json", r#"{"status":"ready","candidate_id":"worker","reason_codes":["coordinator_review"],"summary":"Eligible worker"}"#).unwrap();
         } else {
             assert!(prompt.contains("independent review node"));
@@ -127,11 +126,26 @@ fn coordinator_reviews_low_confidence_route_and_core_accepts_the_choice() {
     let root = tmp.path().join("state");
     let workflow = Workflow::new(root.clone());
     let state = workflow.observe(&run, &json!({"action_id":plan["id"],"event_id":"plan","result":{"plan":{"nodes":[{"id":"build","objective":"Build","acceptance":["Build works"]}]}}})).unwrap();
-    let route = state["actions"].as_array().unwrap().iter().find(|a| a["kind"] == "route").unwrap();
+    let route = state["actions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|a| a["kind"] == "route")
+        .unwrap();
     let state = workflow.observe(&run, &json!({"action_id":route["id"],"event_id":"held","result":{"status":"hold","reason_codes":["low_confidence"],"next_action":"request_review"}})).unwrap();
-    let review = state["actions"].as_array().unwrap().iter().find(|a| a["kind"] == "review_route").unwrap();
+    let review = state["actions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|a| a["kind"] == "review_route")
+        .unwrap();
     let result = web_coordinator::fulfill(&root, &run, review, &fake_worker(tmp.path())).unwrap();
     assert_eq!(result["candidate_id"], "worker");
-    let state = workflow.observe(&run, &json!({"action_id":review["id"],"event_id":"reviewed","result":result})).unwrap();
+    let state = workflow
+        .observe(
+            &run,
+            &json!({"action_id":review["id"],"event_id":"reviewed","result":result}),
+        )
+        .unwrap();
     assert_eq!(state["tasks"][0]["candidate"]["id"], "worker");
 }

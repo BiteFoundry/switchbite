@@ -513,7 +513,15 @@ fn main() {
  } else { panic!("unexpected model"); }
  println!("{{\"type\":\"turn.completed\"}}");
 }"###).unwrap();
-    assert!(Command::new("rustc").arg(source).arg("-o").arg(dir.join("codex.exe")).status().unwrap().success());
+    assert!(
+        Command::new("rustc")
+            .arg(source)
+            .arg("-o")
+            .arg(dir.join("codex.exe"))
+            .status()
+            .unwrap()
+            .success()
+    );
 }
 
 fn low_confidence_judge() -> (u16, thread::JoinHandle<()>) {
@@ -521,7 +529,9 @@ fn low_confidence_judge() -> (u16, thread::JoinHandle<()>) {
     let port = listener.local_addr().unwrap().port();
     let handle = thread::spawn(move || {
         let (mut stream, _) = listener.accept().unwrap();
-        stream.set_read_timeout(Some(Duration::from_secs(15))).unwrap();
+        stream
+            .set_read_timeout(Some(Duration::from_secs(15)))
+            .unwrap();
         let mut bytes = Vec::new();
         let (body_start, content_length) = loop {
             let mut chunk = [0u8; 4096];
@@ -530,10 +540,14 @@ fn low_confidence_judge() -> (u16, thread::JoinHandle<()>) {
             bytes.extend_from_slice(&chunk[..n]);
             if let Some(pos) = bytes.windows(4).position(|w| w == b"\r\n\r\n") {
                 let headers = String::from_utf8_lossy(&bytes[..pos]);
-                let length = headers.lines().find_map(|line| {
-                    let (name, value) = line.split_once(':')?;
-                    name.eq_ignore_ascii_case("content-length").then(|| value.trim().parse::<usize>().unwrap())
-                }).unwrap();
+                let length = headers
+                    .lines()
+                    .find_map(|line| {
+                        let (name, value) = line.split_once(':')?;
+                        name.eq_ignore_ascii_case("content-length")
+                            .then(|| value.trim().parse::<usize>().unwrap())
+                    })
+                    .unwrap();
                 break (pos + 4, length);
             }
         };
@@ -543,7 +557,8 @@ fn low_confidence_judge() -> (u16, thread::JoinHandle<()>) {
             assert!(n > 0);
             bytes.extend_from_slice(&chunk[..n]);
         }
-        let request: Value = serde_json::from_slice(&bytes[body_start..body_start + content_length]).unwrap();
+        let request: Value =
+            serde_json::from_slice(&bytes[body_start..body_start + content_length]).unwrap();
         let mut answers = serde_json::Map::new();
         for (key, question) in request["questions"].as_object().unwrap() {
             let answer = if question["type"] == "noul" {
@@ -577,36 +592,89 @@ fn held_route_is_reviewed_by_native_coordinator_and_workflow_completes() {
     let codex = home.join("codex");
     let appdata = home.join("appdata");
     let local = home.join("local");
-    for p in [&home, &codex, &appdata, &local] { fs::create_dir_all(p).unwrap(); }
+    for p in [&home, &codex, &appdata, &local] {
+        fs::create_dir_all(p).unwrap();
+    }
     fs::write(codex.join("models_cache.json"),json!({"models":[{"slug":"fake-build","visibility":"list","supported_reasoning_levels":[{"effort":"high"}]},{"slug":"fake-review","visibility":"list","supported_reasoning_levels":[{"effort":"high"}]}]}).to_string()).unwrap();
-    let git_dir = env::split_paths(&env::var_os("PATH").unwrap()).find(|p| p.join("git.exe").is_file()).unwrap();
+    let git_dir = env::split_paths(&env::var_os("PATH").unwrap())
+        .find(|p| p.join("git.exe").is_file())
+        .unwrap();
     let system = PathBuf::from(env::var_os("SystemRoot").unwrap());
-    let path = env::join_paths([bin, git_dir, system.join("System32"), system.join("System32/WindowsPowerShell/v1.0")]).unwrap();
+    let path = env::join_paths([
+        bin,
+        git_dir,
+        system.join("System32"),
+        system.join("System32/WindowsPowerShell/v1.0"),
+    ])
+    .unwrap();
     let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
     let port = listener.local_addr().unwrap().port();
     drop(listener);
     let (judge_port, judge) = low_confidence_judge();
     let log = tmp.path().join("calls.txt");
-    let mut server = Server(Command::new(env!("CARGO_BIN_EXE_switchbite"))
-        .args(["workflow", "app", "--port", &port.to_string(), "--judge", "laya", "--endpoint", &format!("http://127.0.0.1:{judge_port}"), "--model", "laya:fixture"])
-        .current_dir(&repo).env_clear().env("PATH", path).env("SystemRoot", &system).env("WINDIR", &system)
-        .env("TEMP", tmp.path()).env("TMP", tmp.path()).env("USERPROFILE", &home).env("HOME", &home)
-        .env("CODEX_HOME", &codex).env("APPDATA", &appdata).env("LOCALAPPDATA", &local).env("FAKE_LOG", &log)
-        .stdout(Stdio::null()).stderr(Stdio::null()).spawn().unwrap());
+    let mut server = Server(
+        Command::new(env!("CARGO_BIN_EXE_switchbite"))
+            .args([
+                "workflow",
+                "app",
+                "--port",
+                &port.to_string(),
+                "--judge",
+                "laya",
+                "--endpoint",
+                &format!("http://127.0.0.1:{judge_port}"),
+                "--model",
+                "laya:fixture",
+            ])
+            .current_dir(&repo)
+            .env_clear()
+            .env("PATH", path)
+            .env("SystemRoot", &system)
+            .env("WINDIR", &system)
+            .env("TEMP", tmp.path())
+            .env("TMP", tmp.path())
+            .env("USERPROFILE", &home)
+            .env("HOME", &home)
+            .env("CODEX_HOME", &codex)
+            .env("APPDATA", &appdata)
+            .env("LOCALAPPDATA", &local)
+            .env("FAKE_LOG", &log)
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap(),
+    );
     let deadline = Instant::now() + Duration::from_secs(20);
     while TcpStream::connect(("127.0.0.1", port)).is_err() {
-        assert!(Instant::now() < deadline && server.0.try_wait().unwrap().is_none(), "server did not start");
+        assert!(
+            Instant::now() < deadline && server.0.try_wait().unwrap().is_none(),
+            "server did not start"
+        );
         thread::sleep(Duration::from_millis(50));
     }
     let origin = format!("http://127.0.0.1:{port}");
     let (_, html) = http(port, "GET", "/", "", "", "");
-    let token = html.split("const token='").nth(1).unwrap().split('\'').next().unwrap();
+    let token = html
+        .split("const token='")
+        .nth(1)
+        .unwrap()
+        .split('\'')
+        .next()
+        .unwrap();
     let (_, info) = http(port, "GET", "/api/app", "", "", "");
     let info: Value = serde_json::from_str(&info).unwrap();
-    let coordinator = info["coordinators"].as_array().unwrap().iter()
-        .find(|c| c["model"] == "fake-build" && c["effort"] == "high").unwrap()["id"].clone();
+    let coordinator = info["coordinators"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|c| c["model"] == "fake-build" && c["effort"] == "high")
+        .unwrap()["id"]
+        .clone();
     let body = json!({"workspace":repo,"goal":"Create a result and independent review","coordinator_id":coordinator,"tools":["codex"]}).to_string();
-    assert_eq!(http(port, "POST", "/api/start", token, &origin, &body).0, 202);
+    assert_eq!(
+        http(port, "POST", "/api/start", token, &origin, &body).0,
+        202
+    );
     let deadline = Instant::now() + Duration::from_secs(90);
     loop {
         let (_, body) = http(port, "GET", "/api/state", "", "", "");
@@ -614,19 +682,45 @@ fn held_route_is_reviewed_by_native_coordinator_and_workflow_completes() {
         if state["status"] == "completed" {
             assert_eq!(state["progress"]["done"], 2);
             assert_eq!(state["tools"], json!(["codex"]));
-            let stored = switchbite::workflow::Workflow::new(repo.join(".switchbite/workflow")).request(state["run_id"].as_str().unwrap()).unwrap();
+            let stored = switchbite::workflow::Workflow::new(repo.join(".switchbite/workflow"))
+                .request(state["run_id"].as_str().unwrap())
+                .unwrap();
             assert_eq!(stored["catalog"]["providers"], json!(["codex"]));
             let result = Path::new(state["result"]["workspace"].as_str().unwrap());
-            assert_eq!(fs::read_to_string(result.join("result.txt")).unwrap(), "built");
-            assert_eq!(fs::read_to_string(result.join("review.md")).unwrap(), "reviewed");
+            assert_eq!(
+                fs::read_to_string(result.join("result.txt")).unwrap(),
+                "built"
+            );
+            assert_eq!(
+                fs::read_to_string(result.join("review.md")).unwrap(),
+                "reviewed"
+            );
             break;
         }
-        assert!(Instant::now() < deadline && state.get("attention").is_none(), "workflow did not complete: {state}");
+        assert!(
+            Instant::now() < deadline && state.get("attention").is_none(),
+            "workflow did not complete: {state}"
+        );
         thread::sleep(Duration::from_millis(250));
     }
     judge.join().unwrap();
     let calls = fs::read_to_string(log).unwrap();
-    assert_eq!(calls.lines().filter(|line| line.starts_with("review_route:")).count(), 1, "{calls}");
-    assert_eq!(calls.lines().filter(|line| *line == "build").count(), 1, "{calls}");
-    assert_eq!(calls.lines().filter(|line| *line == "review").count(), 1, "{calls}");
+    assert_eq!(
+        calls
+            .lines()
+            .filter(|line| line.starts_with("review_route:"))
+            .count(),
+        1,
+        "{calls}"
+    );
+    assert_eq!(
+        calls.lines().filter(|line| *line == "build").count(),
+        1,
+        "{calls}"
+    );
+    assert_eq!(
+        calls.lines().filter(|line| *line == "review").count(),
+        1,
+        "{calls}"
+    );
 }
