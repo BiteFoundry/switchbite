@@ -215,6 +215,22 @@ fn models_from_output(provider: &str, output: &str) -> Vec<String> {
     }
     models.into_iter().collect()
 }
+fn claude_efforts(help: &str) -> Vec<&'static str> {
+    let Some(section) = help.split("--effort <level>").nth(1) else {
+        return Vec::new();
+    };
+    let Some(options) = section.split('(').nth(1).and_then(|s| s.split(')').next()) else {
+        return Vec::new();
+    };
+    ["low", "medium", "high", "xhigh", "max"]
+        .into_iter()
+        .filter(|effort| {
+            options
+                .split(|c: char| !c.is_ascii_alphanumeric())
+                .any(|word| word == *effort)
+        })
+        .collect()
+}
 fn codex_models(value: &Value) -> Vec<(String, String, u64)> {
     let mut result = Vec::new();
     if let Some(models) = value.get("models").and_then(Value::as_array) {
@@ -425,10 +441,28 @@ pub fn snapshot(workspace: &Path, selection: &Value) -> Result<Value, CatalogErr
         } else {
             None
         };
+        let claude_levels = if provider == "claude" {
+            probe(&exe, &["--help"])
+                .map(|help| claude_efforts(&help))
+                .unwrap_or_default()
+        } else {
+            Vec::new()
+        };
         for (model, source) in models {
             candidates.push(candidate(
                 provider, &exe, &model, "default", &source, timestamp, &scope,
             ));
+            for effort in &claude_levels {
+                candidates.push(candidate(
+                    provider,
+                    &exe,
+                    &model,
+                    effort,
+                    "cli_effort",
+                    timestamp,
+                    &scope,
+                ));
+            }
             if source == "user_config" {
                 if let Some(effort) = &configured {
                     candidates.push(candidate(
@@ -484,9 +518,12 @@ fn candidate_order(a: &Value, b: &Value) -> std::cmp::Ordering {
         let configured = info["source"] == "user_config";
         let configured_default = configured && v["effort"] == "default";
         let cli_default = v["provider"] == "cursor" && v["model"] == "auto";
+        let claude_option = v["provider"] == "claude"
+            && (info["source"] == "official_alias" || info["source"] == "cli_effort");
         (
             !configured,
             configured_default,
+            !claude_option,
             !cli_default,
             info["priority"].as_u64().unwrap_or(u64::MAX),
             v["model"].as_str().unwrap_or("").to_owned(),
@@ -576,6 +613,37 @@ pub fn shortlist(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn claude_help_efforts_allow_exact_opus_medium_pin() {
+        let efforts = claude_efforts(
+            "--effort <level> Effort level\n  (low, medium, high, xhigh, max)\n --other",
+        );
+        assert_eq!(efforts, vec!["low", "medium", "high", "xhigh", "max"]);
+        let candidates: Vec<_> = efforts
+            .iter()
+            .map(|effort| {
+                candidate(
+                    "claude",
+                    Path::new("claude"),
+                    "opus",
+                    effort,
+                    "cli_effort",
+                    0,
+                    "host",
+                )
+            })
+            .collect();
+        let found = shortlist(
+            &json!({"candidates":candidates}),
+            &json!({"routing":{"provider":"claude","model":"opus","effort":"medium"}}),
+            "",
+            16,
+        )
+        .unwrap();
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0]["effort"], "medium");
+        assert!(claude_efforts("--help without effort").is_empty());
+    }
     #[test]
     fn discovered_workers_support_review_and_html_tasks() {
         let entry = candidate(
