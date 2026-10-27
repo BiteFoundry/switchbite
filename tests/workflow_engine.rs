@@ -202,6 +202,66 @@ fn insufficient_context_and_bounded_repair() {
         "retry"
     );
 }
+
+#[test]
+fn repair_can_split_work_and_restate_completed_nodes_without_changing_them() {
+    let dir = tempfile::tempdir().unwrap();
+    let w = Workflow::new(dir.path().to_path_buf());
+    let request = json!({"workspace":"workspace","pool":[{"id":"a","description":"worker","capabilities":[],"available":true}],"plan":{"nodes":[{"id":"done","objective":"Done","outputs":["done.md"]},{"id":"research","objective":"Research","depends_on":["done"],"outputs":["research.md"]}]}});
+    let s = w.start(&request).unwrap();
+    let run = s["run_id"].as_str().unwrap().to_owned();
+    let s = send(
+        &w,
+        &run,
+        action(&s, "route", "done"),
+        json!({"status":"ready","candidate_id":"a"}),
+    );
+    let s = send(&w, &run, action(&s, "prepare", "done"), prepared());
+    let s = send(
+        &w,
+        &run,
+        action(&s, "launch", "done"),
+        json!({"status":"completed","completion_verified":true}),
+    );
+    let s = send(
+        &w,
+        &run,
+        action(&s, "verify", "done"),
+        json!({"status":"passed","evidence":["check"]}),
+    );
+    let s = send(
+        &w,
+        &run,
+        action(&s, "integrate", "done"),
+        json!({"status":"integrated","commit":"abc"}),
+    );
+    let s = send(
+        &w,
+        &run,
+        action(&s, "route", "research"),
+        json!({"status":"ready","candidate_id":"a"}),
+    );
+    let s = send(&w, &run, action(&s, "prepare", "research"), prepared());
+    let s = send(
+        &w,
+        &run,
+        action(&s, "launch", "research"),
+        json!({"status":"failed","reason":"timeout"}),
+    );
+    let repair = action(&s, "repair", "research");
+    let mut nodes = request["plan"]["nodes"].as_array().unwrap().clone();
+    nodes[1]["objective"] = json!("A smaller research task");
+    nodes.push(json!({"id":"research-two","objective":"Second category","depends_on":["done"],"outputs":["second.md"]}));
+    let mut invalid = nodes.clone();
+    invalid[0]["objective"] = json!("Rewrite completed work");
+    assert_eq!(w.observe(&run,&json!({"event_id":"invalid-repair","action_id":repair["id"],"result":{"plan":{"nodes":invalid}}})).unwrap_err().code,"invalid_receipt");
+    let result = send(&w, &run, repair, json!({"plan":{"nodes":nodes}}));
+    assert_eq!(result["progress"]["done"], 1);
+    assert_eq!(result["progress"]["total"], 3);
+    assert_eq!(result["tasks"][0]["status"], "done");
+    assert_eq!(action(&result, "route", "research-two")["kind"], "route");
+    assert_eq!(action(&result, "route", "research")["kind"], "route");
+}
 #[test]
 fn runs_have_unique_action_ids_and_cancel_unknown_is_reconciled() {
     let dir = tempfile::tempdir().unwrap();

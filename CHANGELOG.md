@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.8.4-live.1 — 2026-10-27 (branch preview)
+
+- Resume an existing web execution after stopping its previous server with
+  `workflow app --resume RUN [--coordinator ID]`.
+- Preserve coordinator state and output references for standalone monitors.
+  Failed worker output remains selectable through repair, and automatic output
+  selection follows the most recent stage when no process is running.
+- Repair plans may add smaller subtasks and restate unchanged completed nodes;
+  completed or active work remains protected from modification.
+
 ## 0.8.3-live.2 — 2026-10-27 (branch preview)
 
 - Coordinator instructions specify node field types and an executable example.

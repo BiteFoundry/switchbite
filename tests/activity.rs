@@ -227,3 +227,31 @@ fn command_lifecycle_updates_one_entry_but_keeps_separate_executions() {
     );
     assert_ne!(entries[0]["id"], entries[2]["id"]);
 }
+
+#[test]
+fn failed_launch_output_remains_visible_while_a_task_is_being_repaired() {
+    let (root, run, mut state, hash) = setup();
+    state["tasks"][0]["status"] = json!("repairing");
+    state["tasks"][0]["execution_id"] = Value::Null;
+    state["tasks"][0]["evidence"] =
+        json!([{"stage":"launch","status":"failed","action_id":"owned-execution"}]);
+    let host = root.path().join(&run).join("host");
+    fs::create_dir_all(host.join("executions")).unwrap();
+    fs::write(
+        host.join("executions").join(format!("{hash}.json")),
+        br#"{"status":"timeout"}"#,
+    )
+    .unwrap();
+    fs::write(
+        host.join("output").join(format!("{hash}.out")),
+        "Last research progress\n",
+    )
+    .unwrap();
+    let value = snapshot(root.path(), &run, &state, None, None, 10_000).unwrap();
+    assert_eq!(value["selected_stream"]["status"], "timeout");
+    assert_eq!(value["selected_stream"]["health"], "failed");
+    assert_eq!(
+        value["selected_stream"]["entries"][0]["text"],
+        "Last research progress"
+    );
+}

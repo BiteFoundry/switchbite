@@ -27,6 +27,48 @@ struct Run {
     tools: Vec<String>,
 }
 
+impl Run {
+    fn checkpoint(&self) -> Result<(), Value> {
+        let mut coordinator = self.coordinator.lock().map_err(|_| lock_error())?.clone();
+        for key in ["provider", "model", "effort"] {
+            coordinator[key] = self.candidate[key].clone();
+        }
+        let latest = self
+            .latest_coordinator_action
+            .lock()
+            .map_err(|_| lock_error())?
+            .clone();
+        let action = latest.map(|a| json!({"id":a["id"],"kind":a["kind"],"task_id":a["task_id"],"coordinator_attempt":a["coordinator_attempt"]}));
+        let value = json!({"candidate_id":self.candidate["id"],"owner_pid":std::process::id(),"attempt":self.attempt.load(Ordering::Acquire),"coordinator":coordinator,"trace":{"action":action,"candidate":{"provider":self.candidate["provider"]},"active":self.active_action.lock().map_err(|_|lock_error())?.is_some()}});
+        catalog::write_cache(
+            &self.root.join(&self.id).join("web-session.json"),
+            &serde_json::to_vec(&value).map_err(|_| lock_error())?,
+        )
+        .map_err(|_| error("session_unwritable", "실행 상태를 저장할 수 없습니다."))
+    }
+}
+
+pub(crate) fn recorded_state(workflow: &Workflow, run: &str) -> Result<Value, Value> {
+    let mut state = workflow.status(run).map_err(|e| e.to_value())?;
+    if let Some(record) = recorded(workflow.root(), run) {
+        state["coordinator"] = record["coordinator"].clone();
+        state["coordinator_trace"] = record["trace"].clone();
+        if let Some(error) = record["coordinator"].get("error") {
+            state["attention"] = error.clone();
+        }
+    }
+    Ok(state)
+}
+
+fn recorded(root: &Path, run: &str) -> Option<Value> {
+    let path = root.join(run).join("web-session.json");
+    let meta = std::fs::symlink_metadata(&path).ok()?;
+    if !meta.is_file() || meta.len() > 128 * 1024 {
+        return None;
+    }
+    serde_json::from_slice(&std::fs::read(path).ok()?).ok()
+}
+
 struct ToolState {
     inventory: Value,
     selected: Vec<String>,
@@ -349,6 +391,7 @@ impl Workbench {
             );
         };
         let workflow = Workflow::new(run.root.clone());
+        run.checkpoint()?;
         let mut state = workflow.status(&run.id).map_err(|e| e.to_value())?;
         let request = workflow.request(&run.id).map_err(|e| e.to_value())?;
         let mut coordinator = run.coordinator.lock().map_err(|_| lock_error())?.clone();
@@ -392,6 +435,77 @@ impl Workbench {
             state["result"] = json!({"workspace":task["prepared"]["integration_workspace"],"branch":task["prepared"]["integration_branch"],"commit":commit});
         }
         Ok(state)
+    }
+
+    /// Reattach the web coordinator after its previous server has stopped.
+    pub fn resume_existing(&self, id: &str, candidate_id: Option<&str>) -> Result<Value, Value> {
+        let root = self.workspace.join(".switchbite/workflow");
+        let workflow = Workflow::new(root.clone());
+        let state = workflow.status(id).map_err(|e| e.to_value())?;
+        let request = workflow.request(id).map_err(|e| e.to_value())?;
+        let saved = recorded(&root, id).unwrap_or(Value::Null);
+        let candidate_id = candidate_id
+            .or_else(|| saved["candidate_id"].as_str())
+            .ok_or_else(|| {
+                error(
+                    "coordinator_required",
+                    "기존 실행의 조율자 모델을 지정하세요.",
+                )
+            })?;
+        let allowed = request["catalog"]["providers"]
+            .as_array()
+            .ok_or_else(|| error("invalid_request", "웹에서 시작한 실행을 선택하세요."))?;
+        let tools = self.tools.lock().map_err(|_| lock_error())?;
+        let candidate = tools.inventory["snapshot"]["candidates"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .find(|c| {
+                c["id"] == candidate_id
+                    && c["available"] == true
+                    && allowed.contains(&c["provider"])
+            })
+            .cloned()
+            .ok_or_else(|| {
+                error(
+                    "coordinator_unavailable",
+                    "이 실행에서 허용한 조율자 모델을 선택하세요.",
+                )
+            })?;
+        drop(tools);
+        let mut current = self.current.lock().map_err(|_| lock_error())?;
+        if current.is_some() {
+            return Err(error("run_active", "현재 실행을 먼저 확인하세요."));
+        }
+        let run = Arc::new(Run {
+            root,
+            id: id.to_owned(),
+            candidate,
+            coordinator: Mutex::new(json!({"status":"coordinating"})),
+            active_action: Mutex::new(None),
+            latest_coordinator_action: Mutex::new(
+                saved["trace"]["action"]
+                    .as_object()
+                    .map(|_| saved["trace"]["action"].clone()),
+            ),
+            alive: AtomicBool::new(false),
+            attempt: AtomicU64::new(
+                crate::agent::now_ms()
+                    .max(saved["attempt"].as_u64().unwrap_or(0).saturating_add(1)),
+            ),
+            tools: allowed
+                .iter()
+                .filter_map(Value::as_str)
+                .map(str::to_owned)
+                .collect(),
+        });
+        run.checkpoint()?;
+        *current = Some(run.clone());
+        drop(current);
+        if state["status"] == "running" {
+            self.spawn(run);
+        }
+        self.status()
     }
 
     pub fn activity(&self, selected: Option<&str>) -> Result<Value, Value> {
@@ -527,6 +641,7 @@ impl Workbench {
                 *state = json!({"status":"needs_attention","error":friendly(&detail)});
             }
             run.alive.store(false, Ordering::Release);
+            let _ = run.checkpoint();
         });
     }
 }
@@ -561,6 +676,7 @@ fn drive(run: &Run, judge: Option<Arc<ConfiguredJudge>>) -> Result<(), Value> {
                         .map_err(|_| lock_error())? = Some(action.clone());
                     *run.coordinator.lock().map_err(|_| lock_error())? =
                         json!({"status":if action["kind"] == "plan" {"planning"}else{"repairing"}});
+                    run.checkpoint()?;
                     // Recheck after publishing the cancellation target.
                     let result = if workflow.status(&run.id).map_err(|e| e.to_value())?["status"]
                         == "cancelled"

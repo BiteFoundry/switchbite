@@ -328,6 +328,8 @@ fn cli(
         if args.get(1).is_some_and(|command| command == "app") {
             let mut port = 58420;
             let mut offline = false;
+            let mut resume = None;
+            let mut coordinator = None;
             let mut index = 2;
             while index < args.len() {
                 match args[index].as_str() {
@@ -336,18 +338,31 @@ fn cli(
                         port = args[index].parse()?;
                     }
                     "--offline" if !offline => offline = true,
+                    "--resume" if index + 1 < args.len() && resume.is_none() => {
+                        index += 1;
+                        resume = Some(args[index].as_str());
+                    }
+                    "--coordinator" if index + 1 < args.len() && coordinator.is_none() => {
+                        index += 1;
+                        coordinator = Some(args[index].as_str());
+                    }
                     _ => {
                         return Err(
-                            "Usage: switchbite workflow app [--port PORT] [--offline]".into()
+                            "Usage: switchbite workflow app [--port PORT] [--offline] [--resume RUN [--coordinator ID]]".into()
                         );
                     }
                 }
                 index += 1;
             }
-            return switchbite::workflow_ui::serve_app(
+            if coordinator.is_some() && resume.is_none() {
+                return Err("--coordinator requires --resume RUN".into());
+            }
+            return switchbite::workflow_ui::serve_app_resume(
                 &workspace,
                 port,
                 agent_judge(selection, offline),
+                resume,
+                coordinator,
             );
         }
         if let [_, command, flag, path] = args

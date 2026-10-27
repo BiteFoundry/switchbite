@@ -416,6 +416,7 @@ pub fn snapshot(
     let run_dir = root.join(run);
     let host = run_dir.join("host");
     let mut streams = Vec::new();
+    let coordinator = coordinator.or_else(|| state.get("coordinator_trace"));
     if let Some(c) = coordinator
         && let Some(id) = c["action"]["id"].as_str()
     {
@@ -462,7 +463,15 @@ pub fn snapshot(
                     .find(|a| a["kind"] == "launch" && a["task_id"] == task["id"])
             })
             .and_then(|a| a["id"].as_str())
-            .or_else(|| task["execution_id"].as_str());
+            .or_else(|| task["execution_id"].as_str())
+            .or_else(|| {
+                task["evidence"]
+                    .as_array()?
+                    .iter()
+                    .rev()
+                    .find(|e| e["stage"] == "launch")?["action_id"]
+                    .as_str()
+            });
         let fallback_hash = task["evidence"].as_array().and_then(|es| {
             es.iter().rev().find_map(|e| {
                 if e["stage"] != "launch" {
@@ -564,17 +573,13 @@ pub fn snapshot(
             .filter(|s| s.value["process_alive"] == true)
             .max_by_key(newest)
             .or_else(|| {
-                streams
-                    .iter()
-                    .filter(|s| s.value["stage"] == "worker")
-                    .max_by_key(|s| {
-                        (
-                            s.value["last_output_at_ms"].as_u64().unwrap_or(0),
-                            s.started.unwrap_or(0),
-                        )
-                    })
+                streams.iter().max_by_key(|s| {
+                    (
+                        s.value["last_output_at_ms"].as_u64().unwrap_or(0),
+                        s.started.unwrap_or(0),
+                    )
+                })
             })
-            .or_else(|| streams.iter().max_by_key(newest))
     };
     let selected_value = chosen.map(|s| {
         let id = s.value["id"].as_str().unwrap_or("");

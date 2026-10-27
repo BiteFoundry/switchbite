@@ -511,20 +511,27 @@ impl Workflow {
                     if !seen.insert(name.to_owned()) {
                         return Err(err("invalid_receipt"));
                     }
-                    let j = s
-                        .tasks
-                        .iter()
-                        .position(|t| t.node["id"] == name)
-                        .ok_or(err("invalid_receipt"))?;
-                    if j != i && s.tasks[j].state != "pending" && s.tasks[j].state != "blocked" {
-                        return Err(err("invalid_receipt"));
+                    if let Some(j) = s.tasks.iter().position(|t| t.node["id"] == name) {
+                        if j != i
+                            && s.tasks[j].state != "pending"
+                            && s.tasks[j].state != "blocked"
+                            && node != s.tasks[j].node
+                        {
+                            return Err(err("invalid_receipt"));
+                        }
+                        merged[j] = node;
+                    } else {
+                        merged.push(node);
                     }
-                    merged[j] = node;
                 }
                 let validated =
                     validate_plan(&json!({"nodes": merged})).map_err(|_| err("invalid_receipt"))?;
-                for (old, new) in s.tasks.iter_mut().zip(validated) {
-                    old.node = new.node;
+                for (j, new) in validated.into_iter().enumerate() {
+                    if let Some(old) = s.tasks.get_mut(j) {
+                        old.node = new.node;
+                    } else {
+                        s.tasks.push(new);
+                    }
                 }
                 s.tasks[i].state = "pending".into();
                 s.tasks[i].candidate = None;

@@ -259,19 +259,16 @@ fn handle(
             let result = if let Some(app) = app {
                 app.activity(selected.as_deref())
             } else {
-                workflow
-                    .status(run_id)
-                    .map_err(|e| e.to_value())
-                    .and_then(|state| {
-                        crate::activity::snapshot(
-                            workflow.root(),
-                            run_id,
-                            &state,
-                            None,
-                            selected.as_deref(),
-                            crate::agent::now_ms(),
-                        )
-                    })
+                crate::web_workbench::recorded_state(workflow, run_id).and_then(|state| {
+                    crate::activity::snapshot(
+                        workflow.root(),
+                        run_id,
+                        &state,
+                        None,
+                        selected.as_deref(),
+                        crate::agent::now_ms(),
+                    )
+                })
             };
             match result {
                 Ok(mut value) => {
@@ -431,7 +428,7 @@ fn handle(
             }
         }
         "GET /api/state HTTP/1.1" => match app.map_or_else(
-            || workflow.status(run_id).map_err(|e| e.to_value()),
+            || crate::web_workbench::recorded_state(workflow, run_id),
             Workbench::status,
         ) {
             Ok(v) => response(
@@ -510,10 +507,24 @@ pub fn serve_app(
     port: u16,
     judge: Option<Arc<ConfiguredJudge>>,
 ) -> Result<(), AnyError> {
+    serve_app_resume(workspace, port, judge, None, None)
+}
+
+pub fn serve_app_resume(
+    workspace: &Path,
+    port: u16,
+    judge: Option<Arc<ConfiguredJudge>>,
+    resume: Option<&str>,
+    coordinator: Option<&str>,
+) -> Result<(), AnyError> {
     let app = Workbench::new(workspace, judge).map_err(|value| value.to_string())?;
     let workflow = Workflow::new(workspace.join(".switchbite/workflow"));
     let token = random_token()?;
     let listener = TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, port))?;
+    if let Some(run) = resume {
+        app.resume_existing(run, coordinator)
+            .map_err(|value| value.to_string())?;
+    }
     let host = format!("127.0.0.1:{}", listener.local_addr()?.port());
     eprintln!("Switchbite app: http://{host}/");
     for stream in listener.incoming().flatten() {

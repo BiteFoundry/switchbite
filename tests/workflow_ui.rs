@@ -59,6 +59,14 @@ fn viewer_restricts_origin_and_session_and_only_exposes_summary() {
     let body = state.split("\r\n\r\n").nth(1).unwrap();
     let value: Value = serde_json::from_str(body).unwrap();
     assert_eq!(value["status"], "running");
+    std::fs::write(root.join(".switchbite/workflow").join(value["run_id"].as_str().unwrap()).join("web-session.json"),
+        serde_json::to_vec(&json!({"coordinator":{"status":"needs_attention","error":{"code":"invalid_receipt","message":"Repair plan needs attention"}},"trace":{}})).unwrap()).unwrap();
+    let updated = request(
+        port,
+        &format!("GET /api/state HTTP/1.1\r\nHost: {host}\r\n\r\n"),
+    );
+    let updated: Value = serde_json::from_str(updated.split("\r\n\r\n").nth(1).unwrap()).unwrap();
+    assert_eq!(updated["attention"]["code"], "invalid_receipt");
     let bad_host = request(
         port,
         "GET /api/state HTTP/1.1\r\nHost: attacker.example\r\n\r\n",
