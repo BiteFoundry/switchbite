@@ -2,31 +2,57 @@
 
 **The decision layer for your agents.** By [BiteFoundry](https://github.com/BiteFoundry).
 
-A Rust library and native MCP server that recommends a target from your worker/model
-pool. Give it a task and factual pool; get a clear next action, recommendation or
-hold. Your host owns authorization, reservations, execution and receipts.
+A Rust workflow engine and MCP server for coordinating work across a factual
+worker/model pool. It routes ready tasks, tracks dependencies and evidence, and
+can run configured local Codex and Claude workers through verification and
+integration. The coordinator supplies plans and handles actions that need its
+judgment or context.
 
-**v0.6.0-stackbite.1 branch preview · Windows x64 · MIT · No Python runtime.**
+**v0.7.0-workflow.1 preview · Windows x64 · MIT · No Python runtime.**
 
-This branch connects Stackbite coordinators to Jev 1.14 (default) or an explicitly
-selected local Laya judge. Install the project-scoped MCP connection:
+Connect a Stackbite coordinator to the project-scoped workflow server:
 
 ```powershell
 .\bin\switchbite.exe stackbite --judge jev --workspace C:\path\to\project --client both
 ```
 
-Start a new coordinator CLI in that workspace and approve its project MCP
-configuration when prompted. The coordinator decomposes the project, validates
-its DAG and calls `switchbite_route` for each newly ready task. Jev evaluates the
-task and factual model pool, returning a recommendation or hold. Stackbite still
-owns worker execution. Jev requires `TYPESAFE_API_KEY` in the coordinator environment;
-installation forwards only the variable name/reference, never its value.
-Original Stackbite sources/runtime and global client settings are not modified.
-The project server is `switchbite-stackbite`, separate from generic user settings.
-Read the [Stackbite setup and workflow guide](docs/stackbite.ko.md).
-For local Laya use `--judge laya --endpoint http://127.0.0.1:11435 --model laya:multilingual`;
-there is no cloud fallback. See [local provisioning](docs/stackbite-laya.ko.md).
+Start a new coordinator session in the project. The installer registers
+`switchbite-stackbite` with the three-tool workflow profile. The default Jev 1.14
+judge reads `TYPESAFE_API_KEY` from the coordinator environment; the installer
+stores a variable reference, not the key value. Local Laya is selected with
+`--judge laya --endpoint http://127.0.0.1:11435 --model laya:multilingual`.
+Judge selection does not silently fall back to another provider. See the
+[Stackbite guide](docs/stackbite.ko.md) and [Laya setup](docs/stackbite-laya.ko.md).
 
+## Run a workflow
+
+Call `switchbite_start` with an absolute workspace, a goal or plan, and a factual
+worker pool. For native execution, describe each worker's actual provider,
+executable, model, and effort. An optional local `host` object configures the
+Git base and worker timeout.
+The engine generates run and action IDs and applies scheduling defaults. A plan
+contains task IDs, objectives, dependencies, acceptance checks, and owned
+`write_paths`; artifact references can go in `outputs`.
+
+Call `switchbite_next` once to start the background driver for a known plan.
+Poll `switchbite_next` with `operation: status` to see progress. Independent work
+runs within resource and path reservations; verification and integration release
+dependent tasks. If the workflow requests `plan`, `repair`, or `refresh_pool`,
+the coordinator supplies the result using `switchbite_observe` and calls next to
+continue. Unknown execution is inspected before any retry. When neither local host
+configuration nor complete worker metadata selects native execution, the coordinator handles the returned
+host actions and records their results. See the [coordinator guide](docs/coordinator.md)
+and [workflow guide](docs/workflow.ko.md).
+
+| Workflow tool | Purpose |
+| --- | --- |
+| `switchbite_start` | Start a run with a goal or plan and a factual pool. |
+| `switchbite_next` | Advance or inspect, pause, resume, and cancel a run. |
+| `switchbite_observe` | Record a plan, repair, pool refresh, or host result. |
+
+The local CLI also supports `workflow run --request-file FILE`, `workflow continue
+RUN`, `workflow status RUN`, and `workflow view RUN`. Run these in the project
+workspace; the viewer listens on loopback and shows the task graph and evidence.
 [한국어 사용 안내](https://github.com/BiteFoundry/switchbite/blob/main/docs/agent-experience.ko.md)
 · [Coordinator guide](https://github.com/BiteFoundry/switchbite/blob/main/docs/coordinator.md)
 · [Policy and snapshots](https://github.com/BiteFoundry/switchbite/blob/main/docs/api-v2.md)
@@ -64,7 +90,7 @@ See [connection behavior and config locations](docs/connection.md).
 For a generic host or manual integration, `setup --client NAME` remains print-only;
 `config --client NAME [--executable ABSOLUTE_PATH]` prints only the MCP snippet.
 
-The recommended agent profile supplies coordinator instructions automatically and
+The generic connection commands above retain the legacy agent profile. It supplies coordinator instructions automatically and
 exposes only four tools:
 
 | Tool | When to use it |
@@ -76,7 +102,7 @@ exposes only four tools:
 
 The default online judge remains **Jev 1.14** (jev-1.14.0). Local Laya is selected
 explicitly with `--judge laya --endpoint http://127.0.0.1:11435 --model laya:multilingual`
-on `serve --profile agent`, `route`, `invoke`, `doctor`, or `probe`. No TypeSafe key
+on `serve --profile workflow`, `serve --profile agent`, `workflow`, `route`, `invoke`, `doctor`, or `probe`. No TypeSafe key
 is read by that transport. `probe --judge laya` checks a synthetic local decision
 without executing workers. `--offline` still means no judge inference, including
 local inference; select Laya explicitly for local-only operation.
@@ -134,8 +160,7 @@ API1's historical replay contract remains available for compatibility.
 Agent defaults: two concurrent decisions, sixteen queued, 5s queue wait and 30s
 total deadline. Queue wait consumes the deadline. Cancellation/timeout never frees
 a still-running blocking provider slot early. Judge errors carry static codes,
-retry guidance and bounded cooldowns. No automatic provider retries or worker
-execution occur. HTTP connections are reused; fixed HTTPS endpoint, TLS,
+retry guidance and bounded cooldowns. The legacy agent profile does not execute workers. HTTP connections are reused; fixed HTTPS endpoint, TLS,
 no redirects/proxies and credential guards remain in place.
 
     .\bin\switchbite.exe route --request-file examples/agent-minimal.json
@@ -152,8 +177,9 @@ or change live policy.
 ## Compatibility and build
 
 No arguments still serves docking API1 (describe/invoke). serve --profile cli
-retains the original switchbite_decide tools. New snippets select serve --profile
-agent. Update profile arguments when migrating; installations are not rewritten.
+retains the original switchbite_decide tools. Generic client connections use
+the legacy four-tool agent profile; the Stackbite installer selects the three-tool
+workflow profile. Existing installations are not rewritten until updated.
 
 Windows x64 MSVC is the packaged target. The manifest declares Rust 1.88;
 release builds use 1.99.1 and CI checks the minimum compiler separately.
@@ -161,17 +187,16 @@ release builds use 1.99.1 and CI checks the minimum compiler separately.
     cargo test --locked
     cargo clippy --all-targets --locked -- -D warnings
     cargo build --release --locked
-    cargo run --release --locked --bin package-plugin -- --binary target/release/switchbite.exe --output dist/switchbite-0.5.0-windows-x64.zip
+    cargo run --release --locked --bin package-plugin -- --binary target/release/switchbite.exe --output dist/switchbite-0.7.0-workflow.1-windows-x64.zip
 
 The deterministic schema-2 ZIP verifies its executable and includes schemas,
 guides, examples, MIT license and dependency/Rust library notices. It is MCP
 software, not a Claude/Codex-specific plugin-manager bundle or an OS sandbox.
 Domain JSON is bounded to 64 KiB with strict schemas and duplicate-key protection.
 
-Native Herdr/Orca/Stackbite discovery/dispatch adapters, automatic decomposition,
-parallel workflow execution, global assignment optimization, alternative judge
-backends and Linux/macOS release binaries are not bundled. Coordinator instructions
-support the host workflow; a host must still make the actual routing calls.
+Local workflow execution uses configured Codex or Claude worker executables and a
+project-owned Git integration workspace. The coordinator supplies factual worker
+profiles; account and quota discovery are not automatic.
 
 ## License
 

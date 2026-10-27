@@ -7,9 +7,8 @@ Switchbite MCP를 등록합니다. Stackbite 자체의 플러그인 레지스트
 
 ## 설치
 
-현재 브랜치 버전은 `0.6.0-stackbite.1`입니다. `feature/stackbite-jev-routing`은
-기존 Laya 브랜치를 확장하며 원본 main의 Studio 작업과 독립적입니다. 기본 판단기는
-Jev이므로 로컬 설치 시 `--judge laya`를 명시합니다. 공통 안내는 `stackbite.ko.md`를 보세요.
+현재 워크플로 미리보기 버전은 `0.7.0-workflow.1`입니다. 기본 판단기는 Jev이므로
+로컬 설치 시 `--judge laya`를 명시합니다. 공통 안내는 `stackbite.ko.md`를 보세요.
 
 로컬 Laya 서버를 준비하고 다음을 실행합니다. `--workspace`에는 coordinator를 시작할
 프로젝트의 절대 경로를 지정합니다.
@@ -26,7 +25,7 @@ switchbite stackbite --judge laya --workspace C:\path\to\project --client both -
 - 연결 설명과 coordinator 지침: `.switchbite/stackbite-plugin.json`
 
 서버 이름은 `switchbite-stackbite`이며, 실행 인자는
-`serve --profile agent --judge laya --endpoint ... --model ...`입니다.
+`serve --profile workflow --judge laya --endpoint ... --model ... --workspace ...`입니다.
 실행 파일은 Switchbite의 콘텐츠 해시 기반 관리 디렉터리에 복사되므로 다운로드 ZIP이나
 원래 실행 파일을 옮겨도 연결이 유지됩니다. PATH와 셸 프로필은 변경하지 않습니다.
 
@@ -56,18 +55,17 @@ switchbite stackbite --judge laya --workspace C:\path\to\project --client both -
 보이는지 확인합니다. 별도 CLI 옵션이나 상위 정책에 의한 설정 재정의는 설치 성공만으로
 검증되지 않습니다.
 
-설치는 자동 계획 수립이나 worker 실행 권한을 추가하지 않습니다. 다음 지침을 coordinator
-요청에 포함할 수 있습니다. 이 설치기는 `AGENTS.md`나 `CLAUDE.md`에 자동으로 쓰지 않습니다.
+조율자는 `switchbite_start`에 목표 또는 계획과 실제 작업자 풀을 전달합니다. 로컬
+실행에 필요한 provider·executable·model·effort가 있는 계획은 `switchbite_next` 한 번으로
+백그라운드에서 진행하고 `operation: status`로 확인할 수 있습니다. `plan`, `repair`,
+`refresh_pool` 액션에는 조율자가 결과를 제공한 뒤 계속 진행합니다. 작업은 검증과
+통합을 거쳐 후속 작업을 시작합니다. 이 설치기는 `AGENTS.md`나 `CLAUDE.md`를 수정하지 않습니다.
 
-> 작업 제약과 실제 worker/model inventory를 `switchbite_route`에 전달하고, 반환된 추천을
-> 참고하여 등록된 worker ID로 작업을 위임하세요. hold이면 제약, inventory 또는 로컬 Laya
-> 연결을 먼저 해결하세요. worker 실행과 결과 검증, 최종 사용자 답변 취합은 coordinator가
-> 담당합니다.
+> 목표를 작업과 의존성으로 분해하고 실제 worker/model pool로 워크플로를 시작해 주세요.
+> 진행 중 필요한 계획, 복구와 풀 갱신을 제공하고 검증과 통합까지 완료해 주세요.
 
-로컬 Laya 응답 실패나 판단을 사용할 수 없는 경우에는 hold를 유지합니다. Jev로 조용히
-대체하지 않습니다. 이 MVP의 판단은 추천 데이터이며, host가 사용 가능한 worker와 실행
-정책을 기준으로 최종 위임을 결정합니다.
-
+로컬 Laya가 응답하지 않으면 Jev로 자동 전환하지 않습니다. 연결을 복구한 뒤 계속할 수
+있습니다. 도구 입력과 관찰 예시는 `docs/coordinator.md`를 참고하세요.
 ## 로컬 모델 준비와 점검
 
 모델과 추론기는 플러그인 ZIP과 별도입니다. Python 없이 동작하는 Ollaya를 사용할 수
@@ -100,17 +98,17 @@ API 형식 호환성과 확신도 의미는 구분합니다. 플러그인은 확
 질문을 생략하고, 명시한 선호는 계속 모델로 전달합니다. 잘림·범위 오류·모델 불일치는
 배정으로 바꾸지 않습니다.
 
-## 2026-10-25 검증 범위
+## 2026-10-25 검증 범위 (0.6 Laya 미리보기)
 
 - Ollaya `0.17.0` Windows CPU 배포본 SHA256 검증 후 전용 폴더에서 실행.
 - 실제 `laya:multilingual` 로컬 추론 응답 확인.
-- 설치된 해시 기반 실행 파일로 MCP 초기화, 도구 4개 발견, 상태 모델명,
+- 당시 0.6 agent 프로필의 해시 기반 실행 파일로 MCP 초기화, 도구 4개 발견, 상태 모델명,
   실제 `switchbite_route`의 `ready / recheck_and_dispatch` 응답 확인.
 - 현재 Jev-Router 작업 폴더의 Codex에서 프로젝트 Laya 설정 선택 확인.
 - Claude에는 프로젝트 설정을 등록했으나 기존 사용자 서버가 실효 설정으로 관찰됨.
   프로토콜 검증은 명시적 프로젝트 설정의 설치 실행 파일을 사용한 MCP 클라이언트에서 수행.
 - worker 실행, 실제 Claude/Codex 모델 호출, 자동 계획 생성, 학습·확률 보정,
-  CUDA 성능, 폐쇄망 설치 및 전체 DAG 실행은 이번 MVP의 검증 범위에 포함하지 않음.
+  CUDA 성능, 폐쇄망 설치 및 전체 DAG 실행은 당시 0.6 검증 범위에 포함하지 않음. 이 기록은 0.7 워크플로 실행의 검증 결과가 아님.
 
 현재 프로비저닝은 원본 Stackbite 설치·기존 세션·전역 CLI 설정을 변경하지 않습니다.
 WorkBite Task binding은 확인되지 않아 `.switchbite/laya-build`와 로컬 런타임은
