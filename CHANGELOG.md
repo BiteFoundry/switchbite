@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.8.5-parallel.1 — 2026-10-27 (branch preview)
+
+- Native CLI pools provide three independent session slots per shared resource.
+  Explicit pools can set `resource_capacity`; omitted capacity retains one slot.
+- Queued assignments leave execution slots available. Completed CLI work releases
+  its slot while output paths remain reserved through verification and integration.
+- The web composer defaults to three concurrent tasks and supports changing the
+  current run's limit. Task cards explain resource, path and overall slot waits.
+- Reconnecting refreshes queued capacities; unavailable accounts are rechecked
+  before unclaimed work is dispatched.
+- Qualification includes a three-process start barrier with distinct workspaces,
+  integration and dependent review.
+
 ## 0.8.4-live.1 — 2026-10-27 (branch preview)
 
 - Resume an existing web execution after stopping its previous server with

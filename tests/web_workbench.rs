@@ -371,22 +371,68 @@ fn web_submission_runs_real_workflow_with_isolated_fake_provider() {
                 assert!(body.contains("Compiling workspace"));
                 assert!(body.contains("REDACTED") && !body.contains("hunter22"));
                 let selected = activity["selected_stream"]["id"].as_str().unwrap();
-                let task_ids: Vec<_> = state["tasks"].as_array().unwrap().iter()
-                    .map(|task| task["id"].clone()).collect();
-                let (code, paused) = http(port, "POST", "/api/control", token, &origin, r#"{"action":"pause"}"#);
+                let task_ids: Vec<_> = state["tasks"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .map(|task| task["id"].clone())
+                    .collect();
+                let (code, paused) = http(
+                    port,
+                    "POST",
+                    "/api/control",
+                    token,
+                    &origin,
+                    r#"{"action":"pause"}"#,
+                );
                 assert_eq!(code, 200, "{paused}");
-                let (code, changed) = http(port, "POST", "/api/parallelism", token, &origin, r#"{"max_parallel":4}"#);
+                let (code, changed) = http(
+                    port,
+                    "POST",
+                    "/api/parallelism",
+                    token,
+                    &origin,
+                    r#"{"max_parallel":4}"#,
+                );
                 assert_eq!(code, 200, "{changed}");
                 let changed: Value = serde_json::from_str(&changed).unwrap();
                 assert_eq!(changed["max_parallel"], 4);
                 assert_eq!(changed["run_id"], state["run_id"]);
-                assert_eq!(changed["tasks"].as_array().unwrap().iter().map(|task| task["id"].clone()).collect::<Vec<_>>(), task_ids);
-                let (code, selected_output) = http(port, "GET", &format!("/api/activity?stream={selected}"), token, &origin, "");
+                assert_eq!(
+                    changed["tasks"]
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .map(|task| task["id"].clone())
+                        .collect::<Vec<_>>(),
+                    task_ids
+                );
+                let (code, selected_output) = http(
+                    port,
+                    "GET",
+                    &format!("/api/activity?stream={selected}"),
+                    token,
+                    &origin,
+                    "",
+                );
                 assert_eq!(code, 200, "{selected_output}");
-                assert_eq!(serde_json::from_str::<Value>(&selected_output).unwrap()["selected_stream"]["id"], selected);
-                let (code, resumed) = http(port, "POST", "/api/control", token, &origin, r#"{"action":"resume"}"#);
+                assert_eq!(
+                    serde_json::from_str::<Value>(&selected_output).unwrap()["selected_stream"]["id"],
+                    selected
+                );
+                let (code, resumed) = http(
+                    port,
+                    "POST",
+                    "/api/control",
+                    token,
+                    &origin,
+                    r#"{"action":"resume"}"#,
+                );
                 assert_eq!(code, 200, "{resumed}");
-                assert_eq!(serde_json::from_str::<Value>(&resumed).unwrap()["max_parallel"], 4);
+                assert_eq!(
+                    serde_json::from_str::<Value>(&resumed).unwrap()["max_parallel"],
+                    4
+                );
                 assert_eq!(
                     http(
                         port,

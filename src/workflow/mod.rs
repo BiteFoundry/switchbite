@@ -1228,14 +1228,13 @@ fn matching_catalog_candidate<'a>(catalog: &'a Value, candidate: &Value) -> Opti
     })
 }
 fn effective_capacity(s: &State, candidate: &Value) -> usize {
-    if candidate.get("resource_capacity").is_none() {
-        if let Some(current) = s
+    if candidate.get("resource_capacity").is_none()
+        && let Some(current) = s
             .catalog
             .as_ref()
             .and_then(|c| matching_catalog_candidate(c, candidate))
-        {
-            return resource_capacity(current);
-        }
+    {
+        return resource_capacity(current);
     }
     resource_capacity(candidate)
 }

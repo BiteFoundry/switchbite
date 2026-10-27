@@ -647,10 +647,17 @@ impl Workbench {
             self.spawn(run);
             return self.status();
         }
-        if action == "resume" && state["status"] == "paused"
-            && workflow.request(&run.id).map_err(|e| e.to_value())?.get("catalog").is_some()
+        if action == "resume"
+            && state["status"] == "paused"
+            && workflow
+                .request(&run.id)
+                .map_err(|e| e.to_value())?
+                .get("catalog")
+                .is_some()
         {
-            workflow.refresh_catalog(&run.id).map_err(|e| e.to_value())?;
+            workflow
+                .refresh_catalog(&run.id)
+                .map_err(|e| e.to_value())?;
         }
         workflow
             .control(&run.id, action)
