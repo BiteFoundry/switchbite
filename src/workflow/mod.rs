@@ -70,6 +70,10 @@ struct Task {
     execution_id: Option<String>,
     attempts: u64,
     context_gathered: bool,
+    #[serde(default)]
+    next_inspect_at_ms: u64,
+    #[serde(default)]
+    evidence: Vec<Value>,
 }
 #[derive(Serialize, Deserialize)]
 struct State {
@@ -149,7 +153,7 @@ impl Workflow {
     }
     fn response(s: &State) -> Value {
         let done = s.tasks.iter().filter(|t| t.state == "done").count();
-        json!({"run_id":s.run_id,"status":s.status,"summary":format!("{done}/{} tasks completed",s.tasks.len()),"tasks":s.tasks.iter().map(|t|json!({"task":t.node,"id":t.node["id"],"status":t.state,"candidate":t.candidate,"prepared":t.prepared,"execution_id":t.execution_id,"repair_rounds":t.attempts})).collect::<Vec<_>>(),"actions":s.actions,"events":s.events.values().collect::<Vec<_>>(),"revision":s.revision,"progress":{"done":done,"total":s.tasks.len(),"blocked":s.tasks.iter().filter(|t| ["held","blocked"].contains(&t.state.as_str())).count()}})
+        json!({"run_id":s.run_id,"status":s.status,"summary":format!("{done}/{} tasks completed",s.tasks.len()),"tasks":s.tasks.iter().map(|t|json!({"task":t.node,"id":t.node["id"],"status":t.state,"candidate":t.candidate,"prepared":t.prepared,"execution_id":t.execution_id,"repair_rounds":t.attempts,"evidence":t.evidence,"next_inspect_at_ms":t.next_inspect_at_ms})).collect::<Vec<_>>(),"actions":s.actions,"events":s.events.values().collect::<Vec<_>>(),"revision":s.revision,"progress":{"done":done,"total":s.tasks.len(),"blocked":s.tasks.iter().filter(|t| ["held","blocked"].contains(&t.state.as_str())).count()}})
     }
     pub fn start(&self, request: &Value) -> Result<Value, WorkflowError> {
         let _g = MUTATION.lock().map_err(|_| err("storage_error"))?;
@@ -302,9 +306,29 @@ impl Workflow {
         let _g = MUTATION.lock().map_err(|_| err("storage_error"))?;
         let _lock = self.lock()?;
         let mut s = self.load(run_id)?;
+        let before = serde_json::to_vec(&s).map_err(|_| err("storage_error"))?;
         self.schedule(&mut s);
-        self.save(&mut s)?;
+        if serde_json::to_vec(&s).map_err(|_| err("storage_error"))? != before {
+            self.save(&mut s)?;
+        }
         Ok(Self::response(&s))
+    }
+    /// Check dispatch authorization against the current durable lease and run state.
+    /// Hosts must still provide idempotent claims for the side effect itself.
+    pub fn claim(&self, run_id: &str, action_id: &str) -> Result<bool, WorkflowError> {
+        if !id(action_id) {
+            return Err(err("invalid_request"));
+        }
+        let _g = MUTATION.lock().map_err(|_| err("storage_error"))?;
+        let _lock = self.lock()?;
+        let state = self.load(run_id)?;
+        let Some(action) = state.actions.iter().find(|a| a["id"] == action_id) else {
+            return Ok(false);
+        };
+        Ok(state.status == "running"
+            || (state.status == "cancelled"
+                && action["kind"] == "inspect"
+                && action["payload"]["operation"] == "cancel"))
     }
     pub fn control(&self, run_id: &str, action: &str) -> Result<Value, WorkflowError> {
         let _g = MUTATION.lock().map_err(|_| err("storage_error"))?;
@@ -474,7 +498,9 @@ impl Workflow {
             }
             "prepare" => {
                 let i = index.ok_or(err("invalid_receipt"))?;
-                if result["status"] != "prepared"
+                if result["status"] == "failed" && host_error(result).is_some() {
+                    s.tasks[i].state = "failed".into();
+                } else if result["status"] != "prepared"
                     || [
                         "workspace",
                         "branch",
@@ -486,8 +512,10 @@ impl Workflow {
                 {
                     return Err(err("invalid_receipt"));
                 }
-                s.tasks[i].prepared = Some(result.clone());
-                s.tasks[i].state = "prepared".into();
+                if result["status"] == "prepared" {
+                    s.tasks[i].prepared = Some(result.clone());
+                    s.tasks[i].state = "prepared".into();
+                }
             }
             "launch" | "inspect" => {
                 let i = index.ok_or(err("invalid_receipt"))?;
@@ -509,6 +537,7 @@ impl Workflow {
                         }
                         s.tasks[i].execution_id = Some(ex);
                         s.tasks[i].state = result["status"].as_str().unwrap().into();
+                        s.tasks[i].next_inspect_at_ms = now_ms().saturating_add(1000);
                     }
                     Some("completed") if result["completion_verified"] == true => {
                         if let (Some(expected), Some(received)) = (
@@ -538,7 +567,9 @@ impl Workflow {
             }
             "verify" => {
                 let i = index.ok_or(err("invalid_receipt"))?;
-                if !result["evidence"].is_array() {
+                if !result["evidence"].is_array()
+                    && !(result["status"] == "failed" && host_error(result).is_some())
+                {
                     return Err(err("invalid_receipt"));
                 }
                 s.tasks[i].state = match result["status"].as_str() {
@@ -559,16 +590,27 @@ impl Workflow {
             }
             "gather_context" => {
                 let i = index.ok_or(err("invalid_receipt"))?;
-                if result["status"] != "gathered" {
+                if result["status"] == "failed" && host_error(result).is_some() {
+                    s.tasks[i].state = "failed".into();
+                } else if result["status"] != "gathered" {
                     return Err(err("invalid_receipt"));
                 }
-                let refs = strings(result.get("context_refs"), 1000)
-                    .map_err(|_| err("invalid_receipt"))?;
-                s.tasks[i].node["context_refs"] = json!(refs);
-                s.tasks[i].context_gathered = true;
-                s.tasks[i].state = "pending".into();
+                if result["status"] == "gathered" {
+                    let refs = strings(result.get("context_refs"), 1000)
+                        .map_err(|_| err("invalid_receipt"))?;
+                    s.tasks[i].node["context_refs"] = json!(refs);
+                    s.tasks[i].context_gathered = true;
+                    s.tasks[i].state = "pending".into();
+                }
             }
             _ => return Err(err("invalid_receipt")),
+        }
+        if let Some(i) = index {
+            let summary = evidence_summary(kind, result);
+            if s.tasks[i].evidence.len() >= 64 {
+                s.tasks[i].evidence.remove(0);
+            }
+            s.tasks[i].evidence.push(summary);
         }
         s.actions.remove(pos);
         s.events.insert(eid.to_string(), event.clone());
@@ -601,6 +643,7 @@ impl Workflow {
         if s.status == "cancelled" {
             for i in 0..s.tasks.len() {
                 if ["running", "unknown"].contains(&s.tasks[i].state.as_str())
+                    && s.tasks[i].next_inspect_at_ms <= now_ms()
                     && !s
                         .actions
                         .iter()
@@ -695,7 +738,7 @@ impl Workflow {
                     s.tasks[i].state = "launching".into();
                     self.action(s, "launch", Some(i), json!({}));
                 }
-                "running" | "unknown" => {
+                "running" | "unknown" if s.tasks[i].next_inspect_at_ms <= now_ms() => {
                     self.action(s, "inspect", Some(i), json!({}));
                 }
                 "verifying" => self.action(s, "verify", Some(i), json!({})),
@@ -708,7 +751,12 @@ impl Workflow {
                     if s.tasks[i].attempts < s.request["repair_rounds"].as_u64().unwrap_or(2) {
                         s.tasks[i].attempts += 1;
                         s.tasks[i].state = "repairing".into();
-                        self.action(s, "repair", Some(i), json!({"round":s.tasks[i].attempts}));
+                        self.action(
+                            s,
+                            "repair",
+                            Some(i),
+                            json!({"round":s.tasks[i].attempts, "evidence":s.tasks[i].evidence}),
+                        );
                     } else {
                         s.tasks[i].state = "blocked".into();
                     }
@@ -724,7 +772,11 @@ impl Workflow {
             .as_ref()
             .and_then(|v| v.get("resource_key").or_else(|| v.get("id")))
             .and_then(Value::as_str);
-        let outputs = strings(c.node.get("outputs"), 1000).unwrap_or_default();
+        let outputs = strings(
+            c.node.get("write_paths").or_else(|| c.node.get("outputs")),
+            1000,
+        )
+        .unwrap_or_default();
         s.tasks.iter().enumerate().any(|(j, t)| {
             if j == i
                 || ![
@@ -745,13 +797,86 @@ impl Workflow {
                 .as_ref()
                 .and_then(|v| v.get("resource_key").or_else(|| v.get("id")))
                 .and_then(Value::as_str);
-            let paths = strings(t.node.get("outputs"), 1000).unwrap_or_default();
+            let paths = strings(
+                t.node.get("write_paths").or_else(|| t.node.get("outputs")),
+                1000,
+            )
+            .unwrap_or_default();
             (key.is_some() && key == other)
                 || outputs
                     .iter()
                     .any(|a| paths.iter().any(|b| path_overlap(a, b)))
         })
     }
+}
+fn now_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis()
+        .min(u64::MAX as u128) as u64
+}
+fn host_error(result: &Value) -> Option<&str> {
+    result.get("error")?.get("code")?.as_str().filter(|s| {
+        !s.is_empty()
+            && s.len() <= 128
+            && s.bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b"_-".contains(&b))
+    })
+}
+fn evidence_summary(kind: &str, result: &Value) -> Value {
+    let status = result
+        .get("status")
+        .and_then(Value::as_str)
+        .filter(|s| {
+            [
+                "ready",
+                "hold",
+                "prepared",
+                "running",
+                "unknown",
+                "completed",
+                "failed",
+                "cancelled",
+                "passed",
+                "integrated",
+                "gathered",
+            ]
+            .contains(s)
+        })
+        .unwrap_or("accepted");
+    let mut summary = json!({"stage":kind, "status":status});
+    if let Some(code) = host_error(result) {
+        summary["error_code"] = json!(code);
+    }
+    if let Some(evidence) = result.get("evidence").and_then(Value::as_array) {
+        summary["checks_passed"] =
+            json!(evidence.iter().filter(|e| e["status"] == "passed").count());
+        summary["checks_failed"] =
+            json!(evidence.iter().filter(|e| e["status"] == "failed").count());
+        summary["evidence_count"] = json!(evidence.len());
+    }
+    if let Some(commit) = result
+        .get("commit")
+        .and_then(Value::as_str)
+        .filter(|s| (s.len() == 40 || s.len() == 64) && s.bytes().all(|b| b.is_ascii_hexdigit()))
+    {
+        summary["commit"] = json!(commit);
+    }
+    summary
+}
+// Reserve the containing directory of a glob conservatively.
+fn ownership_prefix(path: &str) -> String {
+    let path = path.replace('\\', "/");
+    if let Some(pos) = path.find('*') {
+        let prefix = &path[..pos];
+        return prefix
+            .rsplit_once('/')
+            .map(|(dir, _)| if dir.is_empty() { "." } else { dir })
+            .unwrap_or(".")
+            .to_owned();
+    }
+    path.trim_end_matches('/').to_owned()
 }
 fn path_overlap(a: &str, b: &str) -> bool {
     if a.contains("://")
@@ -761,9 +886,19 @@ fn path_overlap(a: &str, b: &str) -> bool {
     {
         return false;
     }
-    let a = a.replace('\\', "/");
-    let b = b.replace('\\', "/");
-    a == b || a.starts_with(&(b.clone() + "/")) || b.starts_with(&(a + "/"))
+    let a = ownership_prefix(a);
+    let b = ownership_prefix(b);
+    let a = if cfg!(windows) {
+        a.to_ascii_lowercase()
+    } else {
+        a
+    };
+    let b = if cfg!(windows) {
+        b.to_ascii_lowercase()
+    } else {
+        b
+    };
+    a == "." || b == "." || a == b || a.starts_with(&(b.clone() + "/")) || b.starts_with(&(a + "/"))
 }
 fn validate_plan(plan: &Value) -> Result<Vec<Task>, WorkflowError> {
     if plan
@@ -789,6 +924,7 @@ fn validate_plan(plan: &Value) -> Result<Vec<Task>, WorkflowError> {
                 "requirements",
                 "acceptance",
                 "outputs",
+                "write_paths",
                 "role",
                 "context_refs",
             ]
@@ -806,9 +942,31 @@ fn validate_plan(plan: &Value) -> Result<Vec<Task>, WorkflowError> {
             "requirements",
             "acceptance",
             "outputs",
+            "write_paths",
             "context_refs",
         ] {
             strings(n.get(field), 1000)?;
+        }
+        for output in strings(n.get("outputs"), 1000)?
+            .into_iter()
+            .chain(strings(n.get("write_paths"), 1000)?)
+        {
+            if output.starts_with("artifact:") || output.contains("://") {
+                continue;
+            }
+            let normalized = output.replace('\\', "/");
+            if normalized == "." {
+                continue;
+            }
+            let normalized = normalized.trim_end_matches('/');
+            if normalized.starts_with('/')
+                || normalized.contains(':')
+                || normalized
+                    .split('/')
+                    .any(|part| part.is_empty() || part == "." || part == "..")
+            {
+                return Err(err("invalid_request"));
+            }
         }
         if let Some(role) = n.get("role") {
             if ![
@@ -831,6 +989,8 @@ fn validate_plan(plan: &Value) -> Result<Vec<Task>, WorkflowError> {
             execution_id: None,
             attempts: 0,
             context_gathered: false,
+            next_inspect_at_ms: 0,
+            evidence: vec![],
         });
     }
     let mut done = BTreeSet::new();
