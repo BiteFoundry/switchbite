@@ -1,4 +1,5 @@
 use serde_json::{Value, json};
+use sha2::{Digest, Sha256};
 use std::{fs, path::Path, process::Command};
 use switchbite::adapters::LocalHost;
 
@@ -67,6 +68,14 @@ fn owned_workflow_and_idempotence() {
     let prepare = action("prepare-1", "prepare", json!({"task":task}));
     let prepared = host.perform(&prepare).unwrap();
     assert_eq!(prepared["status"], "prepared");
+    assert_eq!(prepared, host.perform(&prepare).unwrap());
+    let prepare_key = format!("{:x}", Sha256::digest(b"prepare-1"));
+    fs::remove_file(
+        state
+            .join("actions")
+            .join(format!("{}.json", &prepare_key[..24])),
+    )
+    .unwrap();
     assert_eq!(prepared, host.perform(&prepare).unwrap());
     let payload = json!({"task":task,"candidate":candidate,"prepared":prepared,"checks":[]});
     let launch = action("launch-1", "launch", payload.clone());
@@ -177,7 +186,16 @@ fn cancel_from_another_host_signals_only_owned_child() {
     let source = tmp.path().join("slow.rs");
     fs::write(
         &source,
-        "fn main() { std::thread::sleep(std::time::Duration::from_secs(30)); }",
+        r#"fn main() {
+            if std::env::args().any(|a| a == "descendant") {
+                std::thread::sleep(std::time::Duration::from_secs(2));
+                std::fs::write("descendant-wrote", "bad").unwrap();
+            } else {
+                std::process::Command::new(std::env::current_exe().unwrap()).arg("descendant").spawn().unwrap();
+                std::fs::write("child-started", "yes").unwrap();
+                std::thread::sleep(std::time::Duration::from_secs(30));
+            }
+        }"#,
     )
     .unwrap();
     let exe = tmp
@@ -198,6 +216,7 @@ fn cancel_from_another_host_signals_only_owned_child() {
     let prepared = host
         .perform(&action("p", "prepare", json!({"task":task})))
         .unwrap();
+    let worker_dir = std::path::PathBuf::from(prepared["workspace"].as_str().unwrap());
     let launch = action(
         "slow-launch",
         "launch",
@@ -211,6 +230,7 @@ fn cancel_from_another_host_signals_only_owned_child() {
             .unwrap()
             .filter_map(Result::ok)
             .any(|e| e.path().extension().is_some_and(|x| x == "json"))
+        || !worker_dir.join("child-started").exists()
     {
         assert!(std::time::Instant::now() < deadline);
         std::thread::sleep(std::time::Duration::from_millis(20));
@@ -225,8 +245,8 @@ fn cancel_from_another_host_signals_only_owned_child() {
         .unwrap();
     assert_eq!(cancel["status"], "unknown");
     let result = owner.join().unwrap();
-    assert_eq!(result["status"], "unknown");
-    assert_eq!(result["cancellation_requested"], true);
+    assert_eq!(result["status"], "failed");
+    assert_eq!(result["cancelled"], true);
     let recovered = observer
         .perform(&action(
             "inspect",
@@ -235,6 +255,8 @@ fn cancel_from_another_host_signals_only_owned_child() {
         ))
         .unwrap();
     assert_eq!(recovered, result);
+    std::thread::sleep(std::time::Duration::from_millis(2300));
+    assert!(!worker_dir.join("descendant-wrote").exists());
 }
 
 #[test]

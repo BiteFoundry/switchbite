@@ -1,4 +1,5 @@
 use serde_json::{Value, json};
+mod process;
 use sha2::{Digest, Sha256};
 use std::{
     fmt,
@@ -33,12 +34,15 @@ pub struct LocalHost {
     timeout: u64,
 }
 fn git_lock(root: &Path) -> Result<fs::File, HostError> {
+    lock_at(&root.join("git.lock"))
+}
+fn lock_at(path: &Path) -> Result<fs::File, HostError> {
     let file = OpenOptions::new()
         .read(true)
         .write(true)
         .create(true)
         .truncate(false)
-        .open(root.join("git.lock"))
+        .open(path)
         .map_err(|_| HostError("io_error"))?;
     lock_file(&file)?;
     Ok(file)
@@ -317,7 +321,7 @@ impl LocalHost {
         })
     }
     pub fn describe(&self) -> Value {
-        json!({"kind":"local","base":self.base,"providers":["claude","codex"],"timeout_seconds":self.timeout,"requires":["git","candidate.provider","candidate.executable","candidate.model","candidate.effort"]})
+        json!({"kind":"local","base":self.base,"providers":["claude","codex"],"process_tree":if cfg!(windows) {"windows_job"} else {"unsupported"},"timeout_seconds":self.timeout,"requires":["git","candidate.provider","candidate.executable","candidate.model","candidate.effort"]})
     }
     pub fn perform(&self, action: &Value) -> Result<Value, HostError> {
         let id = string(action, "id")?;
@@ -329,6 +333,7 @@ impl LocalHost {
         let dir = self.state.join("actions");
         fs::create_dir_all(&dir).map_err(|_| HostError("io_error"))?;
         let key = hash(id);
+        let _action_lock = lock_at(&dir.join(format!("{key}.lock")))?;
         let record = dir.join(format!("{key}.json"));
         let claim = dir.join(format!("{key}.claim"));
         let fingerprint =
@@ -350,9 +355,14 @@ impl LocalHost {
                 if fs::read_to_string(&claim).ok().as_deref() != Some(&fingerprint) {
                     return Err(HostError("action_conflict"));
                 }
-                return Ok(
-                    json!({"status":"unknown","execution_id":id,"completion_verified":false}),
-                );
+                if kind == "launch" {
+                    return Ok(
+                        json!({"status":"unknown","execution_id":id,"completion_verified":false}),
+                    );
+                }
+                if !["prepare", "inspect", "gather_context"].contains(&kind) {
+                    return Err(HostError("recovery_required"));
+                }
             }
             Err(_) => return Err(HostError("io_error")),
         }
@@ -371,7 +381,7 @@ impl LocalHost {
                 Ok(v)
             }
             Err(e) => {
-                if kind != "launch" {
+                if ["prepare", "inspect", "gather_context"].contains(&kind) {
                     let _ = fs::remove_file(&claim);
                 }
                 Err(e)
@@ -405,6 +415,9 @@ impl LocalHost {
                 ],
             )?;
         }
+        if run_git(&integration, &["branch", "--show-current"])? != ib {
+            return Err(HostError("recovery_required"));
+        }
         let taskpath = root.join(&taskid);
         let branch = format!("switchbite/{run}/{taskid}");
         if !taskpath.exists() {
@@ -420,6 +433,9 @@ impl LocalHost {
                     &head,
                 ],
             )?;
+        }
+        if run_git(&taskpath, &["branch", "--show-current"])? != branch {
+            return Err(HostError("recovery_required"));
         }
         Ok(
             json!({"status":"prepared","workspace":taskpath,"branch":branch,"integration_workspace":integration,"integration_branch":ib}),
@@ -453,24 +469,27 @@ impl LocalHost {
         let err = logs.join(format!("{}.err", hash(tag)));
         let stdout = fs::File::create(&out).map_err(|_| HostError("io_error"))?;
         let stderr = fs::File::create(&err).map_err(|_| HostError("io_error"))?;
-        let mut child = cmd
-            .current_dir(dir)
+        cmd.current_dir(dir)
             .stdin(Stdio::null())
             .stdout(Stdio::from(stdout))
-            .stderr(Stdio::from(stderr))
-            .spawn()
-            .map_err(|_| HostError("spawn_failed"))?;
+            .stderr(Stdio::from(stderr));
+        let mut tree = process::Tree::spawn(&mut cmd)
+            .map_err(|_| HostError("process_ownership_unavailable"))?;
         if launch {
             fs::create_dir_all(&execution_dir).map_err(|_| HostError("io_error"))?;
-            if write_atomic(&execution_dir.join(format!("{}.json", hash(tag))), &json!({"execution_id":tag,"token":hash(tag),"pid":child.id(),"owner_pid":std::process::id(),"started_unix_ms":SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_millis()})).is_err() {
-                let _ = child.kill();
-                let _ = child.wait();
+            if write_atomic(&execution_dir.join(format!("{}.json", hash(tag))), &json!({"execution_id":tag,"token":hash(tag),"pid":tree.child.id(),"owner_pid":std::process::id(),"started_unix_ms":SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_millis()})).is_err() {
+                tree.terminate().map_err(|_| HostError("process_ownership_unavailable"))?;
                 return Err(HostError("io_error"));
             }
         }
         let started = Instant::now();
         loop {
-            if let Some(status) = child.try_wait().map_err(|_| HostError("process_failed"))? {
+            if let Some(status) = tree
+                .child
+                .try_wait()
+                .map_err(|_| HostError("process_failed"))?
+                .filter(|_| tree.active().is_ok_and(|n| n == 0))
+            {
                 let bytes = read_bounded(&out)?;
                 if fs::metadata(&err)
                     .map(|m| m.len() > MAX_OUTPUT)
@@ -485,15 +504,15 @@ impl LocalHost {
                 return Ok((status.success(), bytes));
             }
             if launch && cancel.exists() {
-                let _ = child.kill();
-                let _ = child.wait();
+                tree.terminate()
+                    .map_err(|_| HostError("process_ownership_unavailable"))?;
                 let _ = fs::remove_file(&out);
                 let _ = fs::remove_file(&err);
                 return Err(HostError("cancelled"));
             }
             if started.elapsed() >= Duration::from_secs(self.timeout) {
-                let _ = child.kill();
-                let _ = child.wait();
+                tree.terminate()
+                    .map_err(|_| HostError("process_ownership_unavailable"))?;
                 let _ = fs::remove_file(&out);
                 let _ = fs::remove_file(&err);
                 return Err(HostError("timeout"));
@@ -505,8 +524,8 @@ impl LocalHost {
                     .map(|m| m.len() > MAX_OUTPUT)
                     .unwrap_or(false)
             {
-                let _ = child.kill();
-                let _ = child.wait();
+                tree.terminate()
+                    .map_err(|_| HostError("process_ownership_unavailable"))?;
                 let _ = fs::remove_file(&out);
                 let _ = fs::remove_file(&err);
                 return Err(HostError("output_limit"));
@@ -619,7 +638,7 @@ impl LocalHost {
             Ok(result) => result,
             Err(HostError("cancelled")) => {
                 return Ok(
-                    json!({"status":"unknown","execution_id":id,"completion_verified":false,"cancellation_requested":true}),
+                    json!({"status":"failed","execution_id":id,"completion_verified":false,"cancelled":true}),
                 );
             }
             Err(error) => return Err(error),
