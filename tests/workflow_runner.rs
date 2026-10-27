@@ -53,12 +53,14 @@ fn fixture() -> (tempfile::TempDir, PathBuf, PathBuf, PathBuf) {
         .path()
         .join(if cfg!(windows) { "fake.exe" } else { "fake" });
     let code = format!(
-        r#"use std::{{fs,fs::OpenOptions,thread,time::{{Duration,Instant}}}};
+        r#"use std::{{fs,fs::OpenOptions,io::Write,thread,time::{{Duration,Instant}}}};
 fn main() {{
  let args:Vec<String>=std::env::args().collect(); let prompt=args.last().unwrap();
- let id=["one","two","review","slow","solo","followup"].iter().find(|id|prompt.contains(&format!("\"id\":\"{{}}\"",id))).expect("task ID");
- let dir=std::path::Path::new({markers:?}); OpenOptions::new().write(true).create_new(true).open(dir.join(id)).expect("duplicate launch");
+ let id=["one","two","review","slow","solo","followup","p1","p2","p3","review3"].iter().find(|id|prompt.contains(&format!("\"id\":\"{{}}\"",id))).expect("task ID");
+ let dir=std::path::Path::new({markers:?}); let mut marker=OpenOptions::new().write(true).create_new(true).open(dir.join(id)).expect("duplicate launch"); writeln!(marker,"{{}}\n{{}}",std::process::id(),std::env::current_dir().unwrap().display()).unwrap();
  if *id=="one"||*id=="two" {{ let other=if *id=="one"{{"two"}}else{{"one"}}; let deadline=Instant::now()+Duration::from_secs(10); while !dir.join(other).exists() {{ assert!(Instant::now()<deadline,"parallel worker did not start");thread::sleep(Duration::from_millis(20)); }} }}
+ if ["p1","p2","p3"].contains(id) {{ let deadline=Instant::now()+Duration::from_secs(15); while !["p1","p2","p3"].iter().all(|name|dir.join(name).exists()) {{ assert!(Instant::now()<deadline,"three parallel workers did not start"); thread::sleep(Duration::from_millis(20)); }} }}
+ if *id=="review3" {{ assert!(["p1.txt","p2.txt","p3.txt"].iter().all(|name|std::path::Path::new(name).exists()),"review ran before integration"); }}
  if *id=="slow" {{ thread::sleep(Duration::from_millis(4000)); }}
  if *id=="review" {{ assert!(std::path::Path::new("one.txt").exists()&&std::path::Path::new("two.txt").exists(),"review ran before integration"); }}
  fs::write(format!("{{}}.txt",id),"done").unwrap();
@@ -87,7 +89,7 @@ fn candidate(id: &str, provider: &str, exe: &Path) -> Value {
     json!({"id":id,"description":"Test worker","capabilities":[id],"available":true,"provider":provider,"model":"fake-model","effort":"high","executable":exe.to_str().unwrap()})
 }
 fn node(id: &str, deps: &[&str]) -> Value {
-    json!({"id":id,"objective":format!("Implement {id}"),"role":if id=="review"{"review"}else{"implementation"},"depends_on":deps,"requirements":[id],"acceptance":["file created"],"write_paths":[format!("{id}.txt")]})
+    json!({"id":id,"objective":format!("Implement {id}"),"role":if id=="review" || id=="review3"{"review"}else{"implementation"},"depends_on":deps,"requirements":[id],"acceptance":["file created"],"write_paths":[format!("{id}.txt")]})
 }
 fn request(repo: &Path, exe: &Path, nodes: Value) -> Value {
     json!({"workspace":repo.to_str().unwrap(),"pool":[candidate("one","codex",exe),candidate("two","claude",exe),candidate("review","codex",exe),candidate("slow","codex",exe),candidate("solo","codex",exe),candidate("followup","codex",exe)],"plan":{"nodes":nodes},"max_parallel":2,"host":{"timeout_seconds":20}})
@@ -127,6 +129,46 @@ fn parallel_workers_integrate_before_dependent_review_without_changing_source_re
     for name in ["one.txt", "two.txt", "review.txt"] {
         assert!(Path::new(integration).join(name).exists());
     }
+}
+#[test]
+fn three_same_resource_workers_run_concurrently_and_release_review() {
+    let (tmp, repo, exe, root) = fixture();
+    let before = git(&repo, &["rev-parse", "HEAD"]);
+    let mut pool = Vec::new();
+    for id in ["p1", "p2", "p3", "review3"] {
+        let mut worker = candidate(id, "codex", &exe);
+        worker["resource_key"] = json!("shared-account");
+        worker["resource_capacity"] = json!(3);
+        pool.push(worker);
+    }
+    let req = json!({
+        "workspace": repo.to_str().unwrap(),
+        "pool": pool,
+        "plan": {"nodes": [node("p1", &[]), node("p2", &[]), node("p3", &[]),
+                           node("review3", &["p1", "p2", "p3"])]},
+        "max_parallel": 3,
+        "host": {"timeout_seconds": 20}
+    });
+    let result = timed(move || workflow_runner::run_to_completion(&req, &root, judge()).unwrap());
+    assert_eq!(result["status"], "completed", "{result}");
+    assert_eq!(result["progress"]["done"], 4);
+    let mut processes = std::collections::BTreeSet::new();
+    let mut directories = std::collections::BTreeSet::new();
+    for id in ["p1", "p2", "p3"] {
+        let receipt = fs::read_to_string(tmp.path().join("markers").join(id)).unwrap();
+        let mut lines = receipt.lines();
+        processes.insert(lines.next().unwrap().to_owned());
+        directories.insert(lines.next().unwrap().to_owned());
+    }
+    assert_eq!(processes.len(), 3, "workers must be separate processes");
+    assert_eq!(directories.len(), 3, "workers must have separate workspaces");
+    let integration = result["tasks"][3]["prepared"]["integration_workspace"]
+        .as_str().unwrap();
+    for name in ["p1.txt", "p2.txt", "p3.txt", "review3.txt"] {
+        assert!(Path::new(integration).join(name).exists(), "missing {name}");
+    }
+    assert_eq!(git(&repo, &["rev-parse", "HEAD"]), before);
+    assert_eq!(git(&repo, &["status", "--porcelain"]), "");
 }
 #[test]
 fn pause_keeps_active_launch_tracked_and_resume_finishes() {
