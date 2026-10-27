@@ -79,6 +79,10 @@ struct Task {
 }
 #[derive(Serialize, Deserialize)]
 struct State {
+    #[serde(default)]
+    schema_version: u32,
+    #[serde(default)]
+    catalog: Option<Value>,
     run_id: String,
     status: String,
     request: Value,
@@ -174,11 +178,13 @@ impl Workflow {
     }
     fn response(s: &State) -> Value {
         let done = s.tasks.iter().filter(|t| t.state == "done").count();
-        json!({"run_id":s.run_id,"status":s.status,"summary":format!("{done}/{} tasks completed",s.tasks.len()),"tasks":s.tasks.iter().map(|t|json!({"task":t.node,"id":t.node["id"],"status":t.state,"candidate":t.candidate,"prepared":t.prepared,"execution_id":t.execution_id,"repair_rounds":t.attempts,"evidence":t.evidence,"next_inspect_at_ms":t.next_inspect_at_ms})).collect::<Vec<_>>(),"actions":s.actions,"events":s.recent_events,"event_count":s.events.len(),"event_cursor":{"first":s.events.len().saturating_sub(s.recent_events.len())+if s.recent_events.is_empty(){0}else{1},"last":s.events.len()},"revision":s.revision,"progress":{"done":done,"total":s.tasks.len(),"blocked":s.tasks.iter().filter(|t| ["held","blocked"].contains(&t.state.as_str())).count()}})
+        let mut result = json!({"schema_version":s.schema_version,"run_id":s.run_id,"status":s.status,"summary":format!("{done}/{} tasks completed",s.tasks.len()),"tasks":s.tasks.iter().map(|t|json!({"task":t.node,"id":t.node["id"],"status":t.state,"candidate":t.candidate,"prepared":t.prepared,"execution_id":t.execution_id,"repair_rounds":t.attempts,"evidence":t.evidence,"next_inspect_at_ms":t.next_inspect_at_ms})).collect::<Vec<_>>(),"actions":s.actions,"events":s.recent_events,"event_count":s.events.len(),"event_cursor":{"first":s.events.len().saturating_sub(s.recent_events.len())+if s.recent_events.is_empty(){0}else{1},"last":s.events.len()},"revision":s.revision,"progress":{"done":done,"total":s.tasks.len(),"blocked":s.tasks.iter().filter(|t| ["held","blocked"].contains(&t.state.as_str())).count()}});
+        if let Some(catalog) = &s.catalog {
+            result["catalog"] = json!({"revision":catalog["revision"],"candidate_count":catalog["candidates"].as_array().map_or(0, Vec::len),"diagnostics":catalog["diagnostics"]});
+        }
+        result
     }
     pub fn start(&self, request: &Value) -> Result<Value, WorkflowError> {
-        let _g = MUTATION.lock().map_err(|_| err("storage_error"))?;
-        let _lock = self.lock()?;
         bounded(request)?;
         let obj = request.as_object().ok_or(err("invalid_request"))?;
         if obj.keys().any(|k| {
@@ -187,6 +193,7 @@ impl Workflow {
                 "goal",
                 "plan",
                 "pool",
+                "catalog",
                 "preferences",
                 "max_parallel",
                 "repair_rounds",
@@ -224,7 +231,23 @@ impl Workflow {
                 strings(check.get("args"), 4096)?;
             }
         }
-        validate_pool(&request["pool"])?;
+        let mut request = request.clone();
+        let catalog = if let Some(pool) = request.get("pool") {
+            validate_pool(pool)?;
+            request.as_object_mut().unwrap().remove("catalog");
+            None
+        } else {
+            let selection = request.get("catalog").cloned().unwrap_or(json!({}));
+            let workspace = PathBuf::from(text(&request, "workspace", 4096)?);
+            if !workspace.is_absolute() {
+                return Err(err("invalid_workspace"));
+            }
+            let catalog = crate::catalog::snapshot(&workspace, &selection)
+                .map_err(|_| err("catalog_unavailable"))?;
+            validate_catalog(&catalog)?;
+            request["catalog"] = selection;
+            Some(catalog)
+        };
         for (k, default, max) in [("max_parallel", 2, 16), ("repair_rounds", 2, 10)] {
             if let Some(v) = request.get(k)
                 && v.as_u64()
@@ -238,15 +261,19 @@ impl Workflow {
         let tasks = if let Some(plan) = request.get("plan") {
             validate_plan(plan)?
         } else {
-            text(request, "goal", 24000)?;
+            text(&request, "goal", 24000)?;
             vec![]
         };
+        let _g = MUTATION.lock().map_err(|_| err("storage_error"))?;
+        let _lock = self.lock()?;
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .map_err(|_| err("storage_error"))?
             .as_nanos();
         let run = format!("run-{now}-{}", std::process::id());
         let mut s = State {
+            schema_version: 2,
+            catalog,
             run_id: run,
             status: "running".into(),
             request: request.clone(),
@@ -267,6 +294,52 @@ impl Workflow {
         let _g = MUTATION.lock().map_err(|_| err("storage_error"))?;
         let _lock = self.lock()?;
         Ok(self.load(run_id)?.request)
+    }
+    /// Re-probe automatic targets on an explicit reconnect/refresh. Active
+    /// attempts retain their exact candidate; only outstanding routes change.
+    pub fn refresh_catalog(&self, run_id: &str) -> Result<Value, WorkflowError> {
+        let request = self.request(run_id)?;
+        let Some(mut selection) = request.get("catalog").cloned() else {
+            return self.status(run_id);
+        };
+        selection["refresh"] = json!(true);
+        let catalog = crate::catalog::snapshot(
+            &PathBuf::from(text(&request, "workspace", 4096)?),
+            &selection,
+        )
+        .map_err(|_| err("catalog_unavailable"))?;
+        validate_catalog(&catalog)?;
+        let _g = MUTATION.lock().map_err(|_| err("storage_error"))?;
+        let _lock = self.lock()?;
+        let mut s = self.load(run_id)?;
+        if s.status != "running" {
+            return Ok(Self::response(&s));
+        }
+        s.catalog = Some(catalog);
+        let abandoned: BTreeSet<String> = s
+            .actions
+            .iter()
+            .filter(|a| a["kind"] == "route" || a["kind"] == "refresh_pool")
+            .filter(|a| {
+                !a["id"]
+                    .as_str()
+                    .is_some_and(|id| s.claimed_actions.contains(id))
+            })
+            .filter_map(|a| a["id"].as_str().map(str::to_owned))
+            .collect();
+        s.actions
+            .retain(|a| !a["id"].as_str().is_some_and(|id| abandoned.contains(id)));
+        s.claimed_actions.retain(|id| !abandoned.contains(id));
+        for task in &mut s.tasks {
+            if ["routing", "needs_pool", "awaiting_pool", "held"].contains(&task.state.as_str())
+                && !s.actions.iter().any(|a| a["task_id"] == task.node["id"])
+            {
+                task.state = "pending".into();
+            }
+        }
+        self.schedule(&mut s);
+        self.save(&mut s)?;
+        Ok(Self::response(&s))
     }
     pub fn status(&self, run_id: &str) -> Result<Value, WorkflowError> {
         let _g = MUTATION.lock().map_err(|_| err("storage_error"))?;
@@ -461,7 +534,10 @@ impl Workflow {
                     Some("ready") => {
                         let cid = text(result, "candidate_id", 128)
                             .map_err(|_| err("invalid_receipt"))?;
-                        let c = s.request["pool"]
+                        let candidates = a["payload"]
+                            .get("candidate_snapshot")
+                            .unwrap_or(&s.request["pool"]);
+                        let c = candidates
                             .as_array()
                             .unwrap()
                             .iter()
@@ -479,7 +555,9 @@ impl Workflow {
                             })
                             .ok_or(err("invalid_receipt"))?
                             .clone();
-                        if review_exclusions(&s, i).contains(cid) {
+                        if review_exclusions(&s, i).contains(cid)
+                            || !crate::route_context::matches_pin(&c, &s.tasks[i].node)
+                        {
                             return Err(err("invalid_receipt"));
                         }
                         s.tasks[i].candidate = Some(c);
@@ -501,28 +579,37 @@ impl Workflow {
                 }
             }
             "refresh_pool" => {
-                let pool = result.get("pool").ok_or(err("invalid_receipt"))?;
-                validate_pool(pool).map_err(|_| err("invalid_receipt"))?;
-                let replacement = pool.as_array().unwrap();
-                for task in &s.tasks {
-                    if [
-                        "routed",
-                        "preparing",
-                        "prepared",
-                        "launching",
-                        "running",
-                        "unknown",
-                        "verifying",
-                        "integrating",
-                    ]
-                    .contains(&task.state.as_str())
-                        && let Some(candidate) = &task.candidate
-                        && !replacement.iter().any(|c| c == candidate)
-                    {
-                        return Err(err("invalid_receipt"));
+                if let Some(catalog) = result.get("catalog") {
+                    validate_catalog(catalog).map_err(|_| err("invalid_receipt"))?;
+                    s.catalog = Some(catalog.clone());
+                    s.request["catalog"] = s.request.get("catalog").cloned().unwrap_or(json!({}));
+                    s.request.as_object_mut().unwrap().remove("pool");
+                } else {
+                    let pool = result.get("pool").ok_or(err("invalid_receipt"))?;
+                    validate_pool(pool).map_err(|_| err("invalid_receipt"))?;
+                    let replacement = pool.as_array().unwrap();
+                    for task in &s.tasks {
+                        if [
+                            "routed",
+                            "preparing",
+                            "prepared",
+                            "launching",
+                            "running",
+                            "unknown",
+                            "verifying",
+                            "integrating",
+                        ]
+                        .contains(&task.state.as_str())
+                            && let Some(candidate) = &task.candidate
+                            && !replacement.iter().any(|c| c == candidate)
+                        {
+                            return Err(err("invalid_receipt"));
+                        }
                     }
+                    s.request["pool"] = pool.clone();
+                    s.request.as_object_mut().unwrap().remove("catalog");
+                    s.catalog = None;
                 }
-                s.request["pool"] = pool.clone();
                 for task in &mut s.tasks {
                     if ["needs_pool", "awaiting_pool", "held", "routing"]
                         .contains(&task.state.as_str())
@@ -779,21 +866,21 @@ impl Workflow {
                 .count();
             match state.as_str() {
                 "pending" if active < max => {
-                    s.tasks[i].state = "routing".into();
                     let node = &s.tasks[i].node;
-                    let mut objective = node["objective"].as_str().unwrap().to_owned();
-                    if let Some(summary) = s.tasks[i]
-                        .context_summary
-                        .as_deref()
-                        .filter(|v| !v.trim().is_empty())
-                    {
-                        objective = format!(
-                            "{}\nGathered context: {}",
-                            objective.chars().take(20000).collect::<String>(),
-                            summary.chars().take(2000).collect::<String>()
-                        );
-                    }
-                    let task = json!({"id":node["id"],"objective":objective,"requirements":node.get("requirements").cloned().unwrap_or(json!([])),"context_refs":node.get("context_refs").cloned().unwrap_or(json!([]))});
+                    let dependencies: Vec<Value> = s.tasks.iter().filter(|t| deps.iter().any(|d| t.node["id"] == *d))
+                        .map(|t| json!({"id":t.node["id"],"outputs":t.node["outputs"],"status":t.state,"integration":t.evidence.iter().rev().find(|e| e["stage"] == "integrate")})).collect();
+                    let task = match crate::route_context::task(
+                        node,
+                        s.tasks[i].context_summary.as_deref(),
+                        &dependencies,
+                    ) {
+                        Ok(task) => task,
+                        Err(code) => {
+                            s.tasks[i].state = "repairing".into();
+                            self.action(s, "repair", Some(i), json!({"reason":code,"summary":"Split this task so its acceptance contract fits the routing input."}));
+                            continue;
+                        }
+                    };
                     let profile = match node["role"].as_str() {
                         Some("review") => "review",
                         Some("implementation") | Some("integration") => "implementation",
@@ -801,30 +888,45 @@ impl Workflow {
                         _ => "balanced",
                     };
                     let exclusions = review_exclusions(s, i);
-                    let pool = s.request["pool"]
-                        .as_array()
-                        .unwrap()
+                    let preferences = if s.catalog.is_some() {
+                        crate::route_context::preferences(&s.request)
+                    } else {
+                        s.request["preferences"].as_str().unwrap_or("")
+                    };
+                    let candidates = if let Some(catalog) = &s.catalog {
+                        let mut eligible = catalog.clone();
+                        if let Some(candidates) = eligible["candidates"].as_array_mut() {
+                            candidates.retain(|c| {
+                                !c["id"].as_str().is_some_and(|id| exclusions.contains(id))
+                            });
+                        }
+                        crate::catalog::shortlist(&eligible, node, preferences, 16)
+                            .unwrap_or_default()
+                            .iter()
+                            .map(clean_candidate)
+                            .collect::<Vec<_>>()
+                    } else {
+                        s.request["pool"]
+                            .as_array()
+                            .unwrap()
+                            .iter()
+                            .filter(|c| crate::route_context::matches_pin(c, node))
+                            .cloned()
+                            .collect()
+                    };
+                    let revision = s.catalog.as_ref().map(|c| c["revision"].clone());
+                    let pool: Vec<Value> = candidates
                         .iter()
-                        .map(|c| {
-                            let mut c = c.clone();
-                            if let Some(o) = c.as_object_mut() {
-                                o.retain(|k, _| {
-                                    [
-                                        "id",
-                                        "description",
-                                        "capabilities",
-                                        "available",
-                                        "estimated_cost",
-                                        "estimated_latency_ms",
-                                        "has_context",
-                                    ]
-                                    .contains(&k.as_str())
-                                });
-                            }
-                            c
-                        })
-                        .collect::<Vec<_>>();
-                    self.action(s,"route",Some(i),json!({"route_input":{"version":2,"task":task,"pool":pool,"preferences":s.request.get("preferences").cloned().unwrap_or(json!("")),"policy":{"profile":profile,"tie_behavior":"stable_id","excluded_candidate_ids":exclusions}}}));
+                        .map(crate::route_context::candidate)
+                        .collect();
+                    let route_input = json!({"version":2,"task":task,"pool":pool,"preferences":preferences,"policy":{"profile":profile,"tie_behavior":"stable_id","excluded_candidate_ids":exclusions}});
+                    if crate::routing::normalize(&route_input).is_err() {
+                        s.tasks[i].state = "repairing".into();
+                        self.action(s, "repair", Some(i), json!({"reason":"routing_input_too_large","summary":"Reduce this task's routing context while preserving its acceptance contract."}));
+                        continue;
+                    }
+                    s.tasks[i].state = "routing".into();
+                    self.action(s,"route",Some(i),json!({"route_input":route_input,"candidate_snapshot":candidates,"catalog_revision":revision}));
                 }
                 "routed" => {
                     if self.conflicts(s, i) {
@@ -916,6 +1018,31 @@ impl Workflow {
                     .any(|a| paths.iter().any(|b| path_overlap(a, b)))
         })
     }
+}
+fn clean_candidate(candidate: &Value) -> Value {
+    let mut c = candidate.clone();
+    if let Some(object) = c.as_object_mut() {
+        object.remove("catalog_info");
+    }
+    c
+}
+fn validate_catalog(value: &Value) -> Result<(), WorkflowError> {
+    text(value, "revision", 128)?;
+    let candidates = value["candidates"]
+        .as_array()
+        .filter(|a| a.len() <= 1024)
+        .ok_or(err("invalid_catalog"))?;
+    let mut ids = BTreeSet::new();
+    for chunk in candidates.chunks(16) {
+        let clean: Vec<Value> = chunk.iter().map(clean_candidate).collect();
+        validate_pool(&json!(clean))?;
+        for c in chunk {
+            if !ids.insert(text(c, "id", 128)?.to_owned()) {
+                return Err(err("invalid_catalog"));
+            }
+        }
+    }
+    Ok(())
 }
 fn validate_pool(value: &Value) -> Result<(), WorkflowError> {
     let pool = value
@@ -1136,6 +1263,7 @@ fn validate_plan(plan: &Value) -> Result<Vec<Task>, WorkflowError> {
                 "write_paths",
                 "role",
                 "context_refs",
+                "routing",
             ]
             .contains(&k.as_str())
         }) {
@@ -1146,6 +1274,23 @@ fn validate_plan(plan: &Value) -> Result<Vec<Task>, WorkflowError> {
             return Err(err("invalid_request"));
         }
         text(n, "objective", 24000)?;
+        if let Some(pin) = n.get("routing") {
+            let pin = pin.as_object().ok_or(err("invalid_request"))?;
+            if pin.is_empty()
+                || pin
+                    .keys()
+                    .any(|k| !["candidate_id", "provider", "model", "effort"].contains(&k.as_str()))
+            {
+                return Err(err("invalid_request"));
+            }
+            for key in pin.keys() {
+                text(
+                    &n["routing"],
+                    key,
+                    if key == "candidate_id" { 128 } else { 256 },
+                )?;
+            }
+        }
         for field in [
             "depends_on",
             "requirements",

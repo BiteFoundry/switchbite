@@ -40,7 +40,8 @@ fn supervisor_key(root: &Path, run: &str) -> String {
 }
 
 pub fn local_execution(request: &Value) -> bool {
-    request.get("host").is_some_and(Value::is_object)
+    request.get("catalog").is_some_and(Value::is_object)
+        || request.get("host").is_some_and(Value::is_object)
         || request["pool"].as_array().is_some_and(|pool| {
             !pool.is_empty()
                 && pool.iter().all(|c| {
@@ -60,7 +61,7 @@ pub fn start_background(
     judge: Option<Arc<agent::ConfiguredJudge>>,
 ) -> Result<Value, RunnerError> {
     let engine = Workflow::new(root.to_path_buf());
-    let state = engine.status(run).map_err(map_core)?;
+    let state = refresh_on_continue(&engine, run)?;
     let key = supervisor_key(root, run);
     let mut map = supervisors().lock().map_err(|_| error("driver_busy"))?;
     let live = map.get(&key).is_some_and(|s| !s.handle.is_finished());
@@ -366,6 +367,7 @@ pub fn resume_to_completion(
     root: &Path,
     judge: Option<Arc<agent::ConfiguredJudge>>,
 ) -> Result<Value, RunnerError> {
+    refresh_on_continue(&Workflow::new(root.to_path_buf()), run)?;
     let started = Instant::now();
     let mut attention: Option<Value> = None;
     loop {
@@ -430,4 +432,17 @@ pub fn resume_to_completion(
         }
         thread::sleep(Duration::from_millis(200));
     }
+}
+
+fn refresh_on_continue(engine: &Workflow, run: &str) -> Result<Value, RunnerError> {
+    let state = engine.status(run).map_err(map_core)?;
+    if state["status"] == "running"
+        && state.get("catalog").is_some()
+        && state["actions"]
+            .as_array()
+            .is_some_and(|a| a.iter().any(|a| a["kind"] == "refresh_pool"))
+    {
+        return engine.refresh_catalog(run).map_err(map_core);
+    }
+    Ok(state)
 }
