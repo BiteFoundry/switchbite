@@ -1,0 +1,41 @@
+{
+  "date": "2026-10-27",
+  "version": "0.8.1-web.1",
+  "branch": "feature/automatic-model-pool",
+  "runtime_commit": "46cf67f6711e878a9a07d09293c96702e368c4dd",
+  "checks": {
+    "default_suite": { "passed": 190, "failed": 0, "ignored": 2 },
+    "final_focused_regression": { "passed": 4, "failed": 0 },
+    "clippy_all_targets_deny_warnings": "passed",
+    "format": "passed",
+    "release_build": "passed",
+    "package_payload_readback": "passed"
+  },
+  "http_end_to_end": {
+    "provider": "isolated fake Codex executable with structured terminal receipts",
+    "submission": "project path, goal and coordinator ID over authenticated browser API",
+    "completed": 2,
+    "total": 2,
+    "steps": ["native planner", "worker routing", "implementation", "dependent review", "verification", "integration"],
+    "original_head": "unchanged",
+    "original_tracked_file": "unchanged",
+    "result_files": ["result.txt", "review.md"],
+    "rejected_before_launch": ["foreign origin", "missing project", "project without Git base"],
+    "judge": "offline, explicit fixture pins; no live model calls"
+  },
+  "coordinator_regression": ["complete goal and state in prompt", "verified completion before artifact parse", "idempotent replay", "cancellation before launch", "fresh explicit retry", "separate coordinator and workflow integration branch namespaces"],
+  "browser": {
+    "application": "Aside",
+    "observed": "desktop composer, project and goal fields, enabled start button, idle graph and state polling",
+    "user_task_started": false,
+    "mobile_runtime_capture": false
+  },
+  "package": {
+    "filename": "switchbite-0.8.1-web.1-windows-x64.zip",
+    "payload_files": 22,
+    "sha256": "9874cfe37726bc1be851ebe4c71f4fb90f4954814e009e474bc0eabd9610357b",
+    "binary_sha256": "5f269c1364e8b17f6c690ed4bb2361b86034dc1c9bb9198d72a27ab56a1dec2b"
+  },
+  "prior_live_qualification": "model-pool-validation.json records separate Jev and real native-worker tests",
+  "scope": "SwitchBite plugin only; original StackBite and existing main-worktree changes preserved"
+}
