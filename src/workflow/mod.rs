@@ -662,6 +662,9 @@ impl Workflow {
             _ => return Err(err("invalid_receipt")),
         }
         if let Some(i) = index {
+            if s.status == "cancelled" && ["prepare", "verify", "gather_context"].contains(&kind) {
+                s.tasks[i].state = "cancelled".into();
+            }
             let summary = evidence_summary(kind, result);
             if s.tasks[i].evidence.len() >= 64 {
                 s.tasks[i].evidence.remove(0);
