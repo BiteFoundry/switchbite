@@ -56,10 +56,10 @@ fn fixture() -> (tempfile::TempDir, PathBuf, PathBuf, PathBuf) {
         r#"use std::{{fs,fs::OpenOptions,thread,time::{{Duration,Instant}}}};
 fn main() {{
  let args:Vec<String>=std::env::args().collect(); let prompt=args.last().unwrap();
- let id=["one","two","review","slow","solo"].iter().find(|id|prompt.contains(&format!("\"id\":\"{{}}\"",id))).expect("task ID");
+ let id=["one","two","review","slow","solo","followup"].iter().find(|id|prompt.contains(&format!("\"id\":\"{{}}\"",id))).expect("task ID");
  let dir=std::path::Path::new({markers:?}); OpenOptions::new().write(true).create_new(true).open(dir.join(id)).expect("duplicate launch");
  if *id=="one"||*id=="two" {{ let other=if *id=="one"{{"two"}}else{{"one"}}; let deadline=Instant::now()+Duration::from_secs(10); while !dir.join(other).exists() {{ assert!(Instant::now()<deadline,"parallel worker did not start");thread::sleep(Duration::from_millis(20)); }} }}
- if *id=="slow" {{ thread::sleep(Duration::from_millis(1500)); }}
+ if *id=="slow" {{ thread::sleep(Duration::from_millis(4000)); }}
  if *id=="review" {{ assert!(std::path::Path::new("one.txt").exists()&&std::path::Path::new("two.txt").exists(),"review ran before integration"); }}
  fs::write(format!("{{}}.txt",id),"done").unwrap();
  if args.iter().any(|a|a=="--session-id") {{ let session=&args[args.iter().position(|a|a=="--session-id").unwrap()+1]; println!("{{{{\"type\":\"system\",\"subtype\":\"init\",\"session_id\":\"{{}}\",\"model\":\"fake-model\"}}}}",session);println!("{{{{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":false,\"permission_denials\":[],\"session_id\":\"{{}}\"}}}}",session); }} else {{ println!("{{{{\"type\":\"thread.started\",\"thread_id\":\"test\"}}}}");println!("{{{{\"type\":\"turn.started\"}}}}");println!("{{{{\"type\":\"turn.completed\"}}}}"); }}
@@ -90,7 +90,7 @@ fn node(id: &str, deps: &[&str]) -> Value {
     json!({"id":id,"objective":format!("Implement {id}"),"role":if id=="review"{"review"}else{"implementation"},"depends_on":deps,"requirements":[id],"acceptance":["file created"],"write_paths":[format!("{id}.txt")]})
 }
 fn request(repo: &Path, exe: &Path, nodes: Value) -> Value {
-    json!({"workspace":repo.to_str().unwrap(),"pool":[candidate("one","codex",exe),candidate("two","claude",exe),candidate("review","codex",exe),candidate("slow","codex",exe),candidate("solo","codex",exe)],"plan":{"nodes":nodes},"max_parallel":2,"host":{"timeout_seconds":20}})
+    json!({"workspace":repo.to_str().unwrap(),"pool":[candidate("one","codex",exe),candidate("two","claude",exe),candidate("review","codex",exe),candidate("slow","codex",exe),candidate("solo","codex",exe),candidate("followup","codex",exe)],"plan":{"nodes":nodes},"max_parallel":2,"host":{"timeout_seconds":20}})
 }
 fn timed<F: FnOnce() -> Value + Send + 'static>(f: F) -> Value {
     let (tx, rx) = mpsc::channel();
@@ -237,4 +237,94 @@ fn one_interface_next_drives_workflow_while_status_only_is_polled() {
         git(&repo, &["status", "--porcelain", "--untracked-files=no"]),
         ""
     );
+}
+
+fn judge_fails_on_third_route(
+    calls: Arc<std::sync::atomic::AtomicUsize>,
+) -> Option<Arc<ConfiguredJudge>> {
+    let cb: Arc<AgentJudge> = Arc::new(move |body| {
+        let call = calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        if call >= 2 {
+            Err(switchbite::runtime::RuntimeError::from_code("judge_failed"))
+        } else {
+            Ok(common::judgment(body))
+        }
+    });
+    Some(Arc::new(ConfiguredJudge::legacy(cb)))
+}
+#[test]
+fn background_routing_failure_stops_after_active_host_job_settles() {
+    let (tmp, repo, exe, _) = fixture();
+    let req = request(
+        &repo,
+        &exe,
+        json!([
+            node("slow", &[]),
+            node("solo", &[]),
+            node("followup", &["solo"])
+        ]),
+    );
+    let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let interface = switchbite::workflow_interface::Interface::new(
+        repo,
+        judge_fails_on_third_route(calls.clone()),
+    );
+    let state = interface.start(&req).unwrap();
+    let run = state["run_id"].as_str().unwrap();
+    interface.next(run).unwrap();
+    let deadline = Instant::now() + Duration::from_secs(30);
+    loop {
+        let state = interface.status(run).unwrap();
+        if state["attention"].is_object() && state["driver"]["background"] == false {
+            assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 3);
+            assert!(tmp.path().join("markers/slow").exists());
+            let slow = state["tasks"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|t| t["id"] == "slow")
+                .unwrap();
+            assert_eq!(slow["status"], "verifying", "{state}");
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "supervisor did not settle: {state}"
+        );
+        thread::sleep(Duration::from_millis(100));
+    }
+    thread::sleep(Duration::from_millis(750));
+    assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 3);
+}
+#[test]
+fn synchronous_routing_failure_waits_for_active_job_without_retry() {
+    let (tmp, repo, exe, root) = fixture();
+    let req = request(
+        &repo,
+        &exe,
+        json!([
+            node("slow", &[]),
+            node("solo", &[]),
+            node("followup", &["solo"])
+        ]),
+    );
+    let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let failing_judge = judge_fails_on_third_route(calls.clone());
+    let resumed_root = root.clone();
+    let state =
+        timed(move || workflow_runner::run_to_completion(&req, &root, failing_judge).unwrap());
+    assert!(state["attention"].is_object());
+    assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 3);
+    assert!(tmp.path().join("markers/slow").exists());
+    let slow = state["tasks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|t| t["id"] == "slow")
+        .unwrap();
+    assert_eq!(slow["status"], "verifying", "{state}");
+    let run = state["run_id"].as_str().unwrap().to_owned();
+    let resumed =
+        timed(move || workflow_runner::resume_to_completion(&run, &resumed_root, judge()).unwrap());
+    assert_eq!(resumed["status"], "completed", "{resumed}");
 }

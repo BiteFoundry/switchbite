@@ -70,10 +70,24 @@ pub fn start_background(
         let latest = Arc::new(Mutex::new(None));
         let output = latest.clone();
         let handle = thread::spawn(move || {
+            let mut attention: Option<Value> = None;
             loop {
-                let result = advance(&path, &run, judge.clone());
+                let result = advance_inner(&path, &run, judge.clone(), attention.is_some()).map(
+                    |mut state| {
+                        if attention.is_none() {
+                            attention = state.get("attention").cloned();
+                        }
+                        if let Some(detail) = &attention {
+                            state["attention"] = detail.clone();
+                        }
+                        state
+                    },
+                );
                 let terminal = result.as_ref().is_ok_and(|s| {
-                    s["status"] == "completed"
+                    (attention.is_some()
+                        && s["status"] != "cancelled"
+                        && s["driver"]["active_actions"].as_u64().unwrap_or(0) == 0)
+                        || s["status"] == "completed"
                         || (s["status"] == "cancelled"
                             && s["driver"]["active_actions"].as_u64().unwrap_or(0) == 0
                             && !s["tasks"].as_array().is_some_and(|ts| {
@@ -141,6 +155,16 @@ pub fn advance(
     root: &Path,
     run_id: &str,
     judge: Option<Arc<agent::ConfiguredJudge>>,
+) -> Result<Value, RunnerError> {
+    advance_inner(root, run_id, judge, false)
+}
+
+// Once a routing error needs attention, only settle work already in flight.
+fn advance_inner(
+    root: &Path,
+    run_id: &str,
+    judge: Option<Arc<agent::ConfiguredJudge>>,
+    settle_only: bool,
 ) -> Result<Value, RunnerError> {
     let _guard = ADVANCE.lock().map_err(|_| error("driver_busy"))?;
     let engine = Workflow::new(root.to_path_buf());
@@ -225,13 +249,20 @@ pub fn advance(
         Ok(state)
     };
     let mut state = engine.next(run_id).map_err(map_core)?;
-    if state["status"] == "paused" || state["status"] == "completed" {
+    if (settle_only && state["status"] != "cancelled")
+        || state["status"] == "paused"
+        || state["status"] == "completed"
+    {
         return annotate(state);
     }
     let actions = state["actions"].as_array().cloned().unwrap_or_default();
     // One bounded provider request per advance keeps the compact MCP call inside
     // its client deadline while independent host work runs on owned threads.
-    for action in actions.iter().filter(|a| a["kind"] == "route").take(1) {
+    for action in actions
+        .iter()
+        .filter(|a| !settle_only && a["kind"] == "route")
+        .take(1)
+    {
         let id = action["id"]
             .as_str()
             .ok_or_else(|| error("invalid_action"))?;
@@ -258,7 +289,10 @@ pub fn advance(
         }
     }
     state = engine.next(run_id).map_err(map_core)?;
-    if state["status"] == "paused" || state["status"] == "completed" {
+    if (settle_only && state["status"] != "cancelled")
+        || state["status"] == "paused"
+        || state["status"] == "completed"
+    {
         return annotate(state);
     }
     let actions = state["actions"].as_array().cloned().unwrap_or_default();
@@ -268,6 +302,9 @@ pub fn advance(
     let host_state = root.join(run_id).join("host");
     for action in actions {
         let kind = action["kind"].as_str().unwrap_or("");
+        if settle_only && state["status"] != "cancelled" {
+            continue;
+        }
         if ![
             "prepare",
             "launch",
@@ -330,8 +367,15 @@ pub fn resume_to_completion(
     judge: Option<Arc<agent::ConfiguredJudge>>,
 ) -> Result<Value, RunnerError> {
     let started = Instant::now();
+    let mut attention: Option<Value> = None;
     loop {
-        let mut state = advance(root, run, judge.clone())?;
+        let mut state = advance_inner(root, run, judge.clone(), attention.is_some())?;
+        if attention.is_none() {
+            attention = state.get("attention").cloned();
+        }
+        if let Some(detail) = &attention {
+            state["attention"] = detail.clone();
+        }
         let active = state["driver"]["active_actions"].as_u64().unwrap_or(0);
         let actions = state["actions"].as_array().cloned().unwrap_or_default();
         if active == 0 {
@@ -363,7 +407,7 @@ pub fn resume_to_completion(
                 state["next_action"] = json!("continue_with_coordinator");
                 return Ok(state);
             }
-            if state.get("attention").is_some() {
+            if state.get("attention").is_some() && state["status"] != "cancelled" {
                 return Ok(state);
             }
             if actions.is_empty()
