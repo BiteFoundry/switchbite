@@ -282,10 +282,16 @@ impl Workbench {
             .ok_or_else(|| error("invalid_request", "프로젝트와 업무 내용을 입력하세요."))?;
         if object
             .keys()
-            .any(|k| !["workspace", "goal", "coordinator_id", "tools"].contains(&k.as_str()))
+            .any(|k| !["workspace", "goal", "coordinator_id", "tools", "max_parallel"].contains(&k.as_str()))
         {
             return Err(error("invalid_request", "지원하지 않는 입력입니다."));
         }
+        let max_parallel = match body.get("max_parallel") {
+            None => 3,
+            Some(value) => value.as_u64().filter(|n| (1..=16).contains(n)).ok_or_else(|| {
+                error("invalid_max_parallel", "동시 작업 수는 1부터 16까지 입력하세요.")
+            })?,
+        };
         let goal = body["goal"]
             .as_str()
             .filter(|s| !s.trim().is_empty() && s.len() <= 24000)
@@ -365,7 +371,7 @@ impl Workbench {
                 "커밋이 있는 Git 프로젝트 폴더를 선택하세요.",
             )
         })?;
-        let state = Workflow::new(root.clone()).start(&json!({"workspace":workspace,"goal":goal,"catalog":{"providers":selected},"max_parallel":2,"host":{"timeout_seconds":900}})).map_err(|e| e.to_value())?;
+        let state = Workflow::new(root.clone()).start(&json!({"workspace":workspace,"goal":goal,"catalog":{"providers":selected},"max_parallel":max_parallel,"host":{"timeout_seconds":900}})).map_err(|e| e.to_value())?;
         let run = Arc::new(Run {
             root,
             id: state["run_id"].as_str().unwrap().to_owned(),
@@ -401,6 +407,7 @@ impl Workbench {
         state["coordinator"] = coordinator.clone();
         state["workspace"] = request["workspace"].clone();
         state["goal"] = request["goal"].clone();
+        state["max_parallel"] = request["max_parallel"].clone();
         state["tools"] = json!(run.tools);
         state["connection"] = json!({"mode":"native_cli_new_session","label":"기존 CLI 로그인으로 새 작업 세션 실행"});
         if let Some(detail) = coordinator.get("error") {
@@ -586,6 +593,14 @@ impl Workbench {
             ));
         }
         self.spawn(run);
+        self.status()
+    }
+
+    pub fn set_parallelism(&self, limit: u64) -> Result<Value, Value> {
+        let run = self.current.lock().map_err(|_| lock_error())?.clone()
+            .ok_or_else(|| error("run_missing", "먼저 업무를 시작하세요."))?;
+        Workflow::new(run.root.clone()).set_parallelism(&run.id, limit)
+            .map_err(|e| e.to_value())?;
         self.status()
     }
 
