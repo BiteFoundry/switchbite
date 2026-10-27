@@ -312,21 +312,10 @@ fn unix_ms() -> u128 {
 }
 
 /// Query only the named job and the recorded process identity; never signal it.
-#[allow(dead_code)] // Used by the execution progress consumer.
 pub(crate) fn execution_alive(record: &Value) -> Option<bool> {
     let name = record["job_name"].as_str()?;
-    match process::job_drained(name)? {
-        true => Some(false),
-        false => {
-            let pid = u32::try_from(record["pid"].as_u64()?).ok()?;
-            let creation = record["worker_creation"].as_u64()?;
-            // A surviving job can contain descendants after its leader exits.
-            match process::stopped(pid, creation)? {
-                false => Some(true),
-                true => None,
-            }
-        }
-    }
+    // A surviving owned job can contain tools after its leader exits.
+    process::job_drained(name).map(|drained| !drained)
 }
 
 fn output_len(path: &Path) -> u64 {
@@ -517,7 +506,7 @@ impl LocalHost {
             "prepare" => self.prepare(action, payload),
             "launch" => self.launch(action, payload),
             "inspect" => self.inspect(payload),
-            "verify" => self.verify(payload),
+            "verify" => self.verify(payload, id),
             "integrate" => self.integrate(action, payload),
             "gather_context" => self.gather(action, payload),
             _ => Err(HostError("unsupported_action")),
@@ -902,7 +891,7 @@ impl LocalHost {
         }
         Ok(json!({"status":"unknown","execution_id":id,"completion_verified":false}))
     }
-    fn verify(&self, p: &Value) -> Result<Value, HostError> {
+    fn verify(&self, p: &Value, action_id: &str) -> Result<Value, HostError> {
         let dir = self.owned(p, "workspace")?;
         let checks = p
             .get("checks")
@@ -955,13 +944,7 @@ impl LocalHost {
                         .ok_or(HostError("invalid_action"))?,
                 );
             }
-            let outcome = self.execute(
-                cmd,
-                &dir,
-                &format!("check-{}-{i}", dir.display()),
-                false,
-                false,
-            );
+            let outcome = self.execute(cmd, &dir, &format!("check-{action_id}-{i}"), false, false);
             let ok = matches!(&outcome, Ok((true, _, _)));
             passed &= ok;
             let reason = match outcome {
@@ -1112,7 +1095,7 @@ impl LocalHost {
         let mut integration_payload = p.clone();
         integration_payload["prepared"]["workspace"] = json!(target);
         let checked = self
-            .verify(&integration_payload)
+            .verify(&integration_payload, string(action, "id")?)
             .unwrap_or_else(|_| json!({"status":"failed","evidence":[]}));
         if checked["status"] != "passed"
             || !run_git(&target, &["status", "--porcelain"])?.is_empty()

@@ -30,7 +30,7 @@ static ANSI: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\x1b\[[0-?]*[ -/]*[
 static BEARER: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"(?i)\b(bearer\s+)[a-z0-9._~+/-]{8,}").unwrap());
 static ASSIGNMENT: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r#"(?i)\b((?:api[_-]?key|token|password|secret)\s*[:=]\s*['\"]?)[^\s'\",;]{4,}"#)
+    Regex::new(r#"(?i)\b((?:api[_-]?key|access[_-]?token|refresh[_-]?token|auth(?:orization|[_-]?token)?|token|password|passwd|secret)['\"]?\s*[:=]\s*['\"]?)[^\s'\",;]{4,}"#)
         .unwrap()
 });
 static KEY: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\b(sk-[A-Za-z0-9_-]{12,})\b").unwrap());
@@ -38,7 +38,7 @@ fn clean(s: &str) -> String {
     let v: String = ANSI
         .replace_all(s, "")
         .chars()
-        .filter(|c| !c.is_control() || *c == '\t')
+        .filter(|c| !c.is_control() || *c == '\t' || *c == '\n')
         .collect();
     let v = BEARER.replace_all(&v, "${1}[REDACTED]");
     let v = ASSIGNMENT.replace_all(&v, "${1}[REDACTED]");
@@ -55,6 +55,18 @@ fn get<'a>(v: &'a Value, path: &[&str]) -> Option<&'a str> {
     p.as_str()
 }
 fn event(v: &Value) -> Vec<(&'static str, String)> {
+    if matches!(
+        v["type"].as_str(),
+        Some("permission_request" | "approval_required" | "input_required")
+    ) {
+        return vec![(
+            "error",
+            "Permission required: provider is waiting for input".into(),
+        )];
+    }
+    if matches!(v["type"].as_str(), Some("auth_required" | "login_required")) {
+        return vec![("error", "Please log in to continue".into())];
+    }
     let typ = v["type"]
         .as_str()
         .or_else(|| v["event"].as_str())
@@ -127,10 +139,10 @@ fn event(v: &Value) -> Vec<(&'static str, String)> {
             ),
         ));
     } else if typ == "step_update" {
-        if v["step_update"]["step_type"] == "agent_response" {
-            if let Some(s) = get(v, &["step_update", "text_delta"]) {
-                visible.push(("text", s.into()));
-            }
+        if v["step_update"]["step_type"] == "agent_response"
+            && let Some(s) = get(v, &["step_update", "text_delta"])
+        {
+            visible.push(("text", s.into()));
         }
     } else if typ == "result" {
         if let Some(s) = get(v, &["result", "response"]) {
@@ -225,6 +237,41 @@ struct Stream {
     hash: String,
     started: Option<u64>,
 }
+fn input_request(
+    out: &[Value],
+    out_time: Option<u64>,
+    err: &[Value],
+    err_time: Option<u64>,
+) -> bool {
+    let last_out = out
+        .iter()
+        .rev()
+        .find(|entry| entry["kind"] != "event")
+        .map(|entry| (out_time.unwrap_or(0), entry));
+    let last_err = err
+        .iter()
+        .rev()
+        .find(|entry| entry["kind"] != "event")
+        .map(|entry| (err_time.unwrap_or(0), entry));
+    let latest = match (last_out, last_err) {
+        (Some(a), Some(b)) => Some(if b.0 >= a.0 { b } else { a }),
+        (a, b) => a.or(b),
+    };
+    latest.is_some_and(|(_, entry)| {
+        let text = entry["text"].as_str().unwrap_or("").to_ascii_lowercase();
+        [
+            "permission required",
+            "permission to continue",
+            "approve this command",
+            "press enter to continue",
+            "please log in",
+            "please login",
+            "sign in to continue",
+        ]
+        .iter()
+        .any(|phrase| text.contains(phrase))
+    })
+}
 fn stdout_path(dir: &Path, hash: &str) -> PathBuf {
     let output = dir.join("output").join(format!("{hash}.out"));
     if file(&output).is_some() {
@@ -233,6 +280,7 @@ fn stdout_path(dir: &Path, hash: &str) -> PathBuf {
         dir.join("messages").join(format!("{hash}.jsonl"))
     }
 }
+#[allow(clippy::too_many_arguments)] // Assemble one owned stream at the filesystem boundary.
 fn add(
     streams: &mut Vec<Stream>,
     dir: PathBuf,
@@ -269,7 +317,8 @@ fn add(
         .iter()
         .filter_map(|p| {
             fs::metadata(p)
-                .ok()?
+                .ok()
+                .filter(|metadata| metadata.len() > 0)?
                 .modified()
                 .ok()?
                 .duration_since(UNIX_EPOCH)
@@ -279,32 +328,29 @@ fn add(
         .max();
     let start = record["started_unix_ms"].as_u64();
     let status = record["status"].as_str().unwrap_or(fallback);
+    let finished = record["finished_unix_ms"]
+        .as_u64()
+        .or_else(|| {
+            if alive != Some(true) && !["running", "launching"].contains(&status) {
+                modified
+            } else {
+                None
+            }
+        })
+        .unwrap_or(now);
     let silence = modified.or(start).map(|t| now.saturating_sub(t));
     let id = format!("{stage}-{hash}");
-    let needs_input = alive == Some(true)
-        && [("out", "stdout"), ("err", "stderr")]
-            .iter()
-            .any(|(suffix, source)| {
-                let (entries, _, _, _) = tail(
-                    &dir.join("output").join(format!("{hash}.{suffix}")),
-                    &id,
-                    source,
-                );
-                entries.iter().any(|e| {
-                    let text = e["text"].as_str().unwrap_or("").to_ascii_lowercase();
-                    [
-                        "permission required",
-                        "permission to continue",
-                        "approve this command",
-                        "press enter to continue",
-                        "please log in",
-                        "please login",
-                        "sign in to continue",
-                    ]
-                    .iter()
-                    .any(|p| text.contains(p))
-                })
-            });
+    let needs_input = if alive == Some(true) {
+        let (out, _, out_time, _) = tail(&stdout_path(&dir, &hash), &id, "stdout");
+        let (err, _, err_time, _) = tail(
+            &dir.join("output").join(format!("{hash}.err")),
+            &id,
+            "stderr",
+        );
+        input_request(&out, out_time, &err, err_time)
+    } else {
+        false
+    };
     let health = if needs_input {
         "needs_input"
     } else if status == "failed" || status == "timeout" || status == "output_limit" {
@@ -317,10 +363,12 @@ fn add(
         } else {
             "active"
         }
+    } else if alive == Some(false) && status == "running" {
+        "settling"
     } else {
         status
     };
-    let value = json!({"id":id,"task_id":task,"provider":provider,"stage":stage,"status":status,"health":health,"label":health,"elapsed_ms":start.map(|t| record["finished_unix_ms"].as_u64().unwrap_or(now).saturating_sub(t)),"silence_ms":silence,"last_output_at_ms":modified,"process_alive":alive,"stdout_bytes":record["stdout_bytes"].as_u64().unwrap_or_else(|| fs::metadata(stdout_path(&dir, &hash)).map(|m|m.len()).unwrap_or(0)),"stderr_bytes":record["stderr_bytes"].as_u64().unwrap_or_else(|| fs::metadata(dir.join("output").join(format!("{hash}.err"))).map(|m|m.len()).unwrap_or(0)),"can_retry":retry && alive == Some(true) && status == "running"});
+    let value = json!({"id":id,"task_id":task,"provider":provider,"stage":stage,"status":status,"health":health,"label":health,"elapsed_ms":start.map(|t| finished.saturating_sub(t)),"silence_ms":silence,"last_output_at_ms":modified,"process_alive":alive,"stdout_bytes":record["stdout_bytes"].as_u64().unwrap_or_else(|| fs::metadata(stdout_path(&dir, &hash)).map(|m|m.len()).unwrap_or(0)),"stderr_bytes":record["stderr_bytes"].as_u64().unwrap_or_else(|| fs::metadata(dir.join("output").join(format!("{hash}.err"))).map(|m|m.len()).unwrap_or(0)),"can_retry":retry && alive == Some(true) && status == "running"});
     streams.push(Stream {
         value,
         dir,
@@ -346,22 +394,22 @@ pub fn snapshot(
     let run_dir = root.join(run);
     let host = run_dir.join("host");
     let mut streams = Vec::new();
-    if let Some(c) = coordinator {
-        if let Some(id) = c["action"]["id"].as_str() {
-            let attempt = c["action"]["coordinator_attempt"].as_u64().unwrap_or(0);
-            let launch = crate::web_coordinator::key(id, attempt, "launch");
-            add(
-                &mut streams,
-                run_dir.join("coordinator"),
-                hash(&launch),
-                None,
-                c["candidate"]["provider"].as_str(),
-                "coordinator",
-                "unknown",
-                now_ms,
-                false,
-            );
-        }
+    if let Some(c) = coordinator
+        && let Some(id) = c["action"]["id"].as_str()
+    {
+        let attempt = c["action"]["coordinator_attempt"].as_u64().unwrap_or(0);
+        let launch = crate::web_coordinator::key(id, attempt, "launch");
+        add(
+            &mut streams,
+            run_dir.join("coordinator"),
+            hash(&launch),
+            None,
+            c["candidate"]["provider"].as_str(),
+            "coordinator",
+            "unknown",
+            now_ms,
+            false,
+        );
     }
     let mut tasks = state["tasks"].as_array().cloned().unwrap_or_default();
     tasks.sort_by_key(|task| {
@@ -509,16 +557,22 @@ pub fn snapshot(
     let selected_value = chosen.map(|s| {
         let id = s.value["id"].as_str().unwrap_or("");
         let (mut out, a, _, _) = tail(&stdout_path(&s.dir, &s.hash), id, "stdout");
-        let (err, b, _, _) = tail(
+        let (mut err, b, _, _) = tail(
             &s.dir.join("output").join(format!("{}.err", s.hash)),
             id,
             "stderr",
         );
+        let truncated = a || b || out.len() + err.len() > MAX_ENTRIES;
+        let out_keep = out.len().min(if err.is_empty() {
+            MAX_ENTRIES
+        } else {
+            MAX_ENTRIES / 2
+        });
+        let err_keep = err.len().min(MAX_ENTRIES - out_keep);
+        let out_keep = out.len().min(MAX_ENTRIES - err_keep);
+        out.drain(..out.len() - out_keep);
+        err.drain(..err.len() - err_keep);
         out.extend(err);
-        let truncated = a || b || out.len() > MAX_ENTRIES;
-        if out.len() > MAX_ENTRIES {
-            out.drain(..out.len() - MAX_ENTRIES);
-        }
         let mut value = s.value.clone();
         value["entries"] = json!(out);
         value["truncated"] = json!(truncated);
@@ -539,4 +593,38 @@ pub fn snapshot(
     Ok(
         json!({"run_id":run,"observed_at_ms":now_ms,"health":{"status":health,"label":health,"action":action},"streams":streams.iter().map(|s| &s.value).collect::<Vec<_>>(),"selected_stream":selected_value}),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn recent_progress_resolves_an_old_input_request() {
+        let prompt = json!({"kind":"error","text":"Permission required: approve this command"});
+        let progress = json!({"kind":"text","text":"Build completed"});
+        assert!(input_request(
+            &[],
+            None,
+            std::slice::from_ref(&prompt),
+            Some(20)
+        ));
+        assert!(!input_request(
+            std::slice::from_ref(&progress),
+            Some(30),
+            std::slice::from_ref(&prompt),
+            Some(20)
+        ));
+        assert!(!input_request(
+            &[prompt.clone(), progress],
+            Some(30),
+            &[],
+            None
+        ));
+        assert!(input_request(
+            &[json!({"kind":"event","text":"heartbeat"})],
+            Some(30),
+            &[prompt],
+            Some(20)
+        ));
+    }
 }

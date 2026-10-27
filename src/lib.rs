@@ -11,6 +11,7 @@ pub mod package;
 pub use contracts::{ContractError, MODEL, describe, parse_request};
 pub use core::{Judge, Plugin, candidate_key, judgment_body};
 
+pub mod activity;
 pub mod adapters;
 pub mod agent;
 pub mod catalog;

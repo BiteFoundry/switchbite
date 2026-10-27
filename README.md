@@ -8,7 +8,7 @@ can run configured local Codex and Claude workers through verification and
 integration. The coordinator supplies plans and handles actions that need its
 judgment or context.
 
-**v0.8.2-tools.1 preview · Windows x64 · MIT · No Python runtime.**
+**v0.8.3-live.1 preview · Windows x64 · MIT · No Python runtime.**
 
 Run `switchbite workflow app` to enter a Git project path and goal in the local web
 app. Select which detected CLI tools may participate; the saved selection limits
@@ -17,6 +17,10 @@ coordinator supplies the plan and bounded repairs;
 the existing judge and workflow engine route, execute, verify and integrate the
 tasks. The completed run shows its result worktree, branch and final commit.
 See [the web workflow guide](docs/workflow-ui.ko.md).
+
+The live output panel follows coordinator, worker and verification output. It
+shows elapsed time, last output and owned-process status, with explicit controls
+to resume a paused run or interrupt one worker for a bounded repair attempt.
 
 Connect a Stackbite coordinator to the project-scoped workflow server:
 

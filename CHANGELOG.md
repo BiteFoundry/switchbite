@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.8.3-live.1 — 2026-10-27 (branch preview)
+
+- Live output for coordinator, worker and check processes, with last activity,
+  elapsed time, owned-process liveness and quiet/input-needed indicators.
+- Native execution checkpoints and retained bounded output on completion,
+  failure, cancellation and timeout. Check streams use unique action IDs.
+- Authenticated activity API, provider-event extraction and secret masking.
+- Automatic active-stream following, manual selection, scroll retention and
+  explicit worker interruption followed by the existing repair workflow.
+
 ## 0.8.2-tools.1 — 2026-10-27 (branch preview)
 
 - Six-tool inventory and checkbox selection in the web composer, with automatic

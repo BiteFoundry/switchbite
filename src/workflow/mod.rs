@@ -101,6 +101,9 @@ pub struct Workflow {
     root: PathBuf,
 }
 impl Workflow {
+    pub(crate) fn root(&self) -> &std::path::Path {
+        &self.root
+    }
     pub fn new(root: PathBuf) -> Self {
         Self { root }
     }
@@ -824,7 +827,8 @@ impl Workflow {
             if s.status == "cancelled" && ["prepare", "verify", "gather_context"].contains(&kind) {
                 s.tasks[i].state = "cancelled".into();
             }
-            let summary = evidence_summary(kind, result);
+            let mut summary = evidence_summary(kind, result);
+            summary["action_id"] = json!(aid);
             if s.tasks[i].evidence.len() >= 64 {
                 s.tasks[i].evidence.remove(0);
             }

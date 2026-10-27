@@ -21,6 +21,7 @@ struct Run {
     candidate: Value,
     coordinator: Mutex<Value>,
     active_action: Mutex<Option<Value>>,
+    latest_coordinator_action: Mutex<Option<Value>>,
     alive: AtomicBool,
     attempt: AtomicU64,
     tools: Vec<String>,
@@ -329,6 +330,7 @@ impl Workbench {
             candidate,
             coordinator: Mutex::new(json!({"status":"planning"})),
             active_action: Mutex::new(None),
+            latest_coordinator_action: Mutex::new(None),
             alive: AtomicBool::new(false),
             attempt: AtomicU64::new(0),
             tools: selected,
@@ -390,6 +392,87 @@ impl Workbench {
             state["result"] = json!({"workspace":task["prepared"]["integration_workspace"],"branch":task["prepared"]["integration_branch"],"commit":commit});
         }
         Ok(state)
+    }
+
+    pub fn activity(&self, selected: Option<&str>) -> Result<Value, Value> {
+        let current = self.current.lock().map_err(|_| lock_error())?.clone();
+        let Some(run) = current else {
+            return Ok(
+                json!({"run_id":null,"observed_at_ms":crate::agent::now_ms(),"health":{"status":"idle","label":"새 작업 대기"},"streams":[],"selected_stream":null}),
+            );
+        };
+        let state = self.status()?;
+        let coordinator = run.latest_coordinator_action.lock().map_err(|_|lock_error())?.clone().map(|action|json!({"action":action,"candidate":run.candidate,"active":run.active_action.lock().is_ok_and(|value|value.is_some())}));
+        crate::activity::snapshot(
+            &run.root,
+            &run.id,
+            &state,
+            coordinator.as_ref(),
+            selected,
+            crate::agent::now_ms(),
+        )
+    }
+
+    /// Interrupt only this run's current native worker; normal receipts drive repair.
+    pub fn retry_task(&self, task_id: &str) -> Result<Value, Value> {
+        let run = self
+            .current
+            .lock()
+            .map_err(|_| lock_error())?
+            .clone()
+            .ok_or_else(|| error("run_missing", "먼저 업무를 시작하세요."))?;
+        let workflow = Workflow::new(run.root.clone());
+        let state = workflow.status(&run.id).map_err(|e| e.to_value())?;
+        if state["status"] != "running" {
+            return Err(error(
+                "run_not_running",
+                "진행 중인 작업에서 사용할 수 있습니다. 일시정지 상태라면 먼저 재개하세요.",
+            ));
+        }
+        let task = state["tasks"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .find(|task| task["id"] == task_id)
+            .ok_or_else(|| error("task_missing", "작업을 다시 선택하세요."))?;
+        let request = workflow.request(&run.id).map_err(|e| e.to_value())?;
+        if task["repair_rounds"].as_u64().unwrap_or(0)
+            >= request["repair_rounds"].as_u64().unwrap_or(2)
+        {
+            return Err(error(
+                "repair_limit",
+                "이 작업의 복구 횟수에 도달했습니다. 결과를 확인하고 새 업무로 이어가세요.",
+            ));
+        }
+        let launch = state["actions"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .find(|action| action["kind"] == "launch" && action["task_id"] == task_id);
+        let execution = launch
+            .and_then(|action| action["id"].as_str())
+            .or_else(|| task["execution_id"].as_str())
+            .filter(|_| {
+                ["launching", "prepared", "running", "unknown"]
+                    .contains(&task["status"].as_str().unwrap_or(""))
+            })
+            .ok_or_else(|| error("task_not_running", "현재 실행 중인 작업자를 선택하세요."))?;
+        let workspace = request["workspace"].as_str().ok_or_else(lock_error)?;
+        let host = LocalHost::new(
+            Path::new(workspace),
+            &run.root.join(&run.id).join("host"),
+            &request.get("host").cloned().unwrap_or(json!({})),
+        )
+        .map_err(|e| e.to_value())?;
+        let result=host.perform(&json!({"id":format!("web-retry-{execution}"),"kind":"inspect","run_id":run.id,"payload":{"execution_id":execution,"operation":"cancel"}})).map_err(|e|e.to_value())?;
+        if result["status"] == "completed" {
+            return Err(error(
+                "task_already_finished",
+                "이 작업자는 이미 완료됐습니다. 최신 상태를 확인하세요.",
+            ));
+        }
+        self.spawn(run);
+        self.status()
     }
 
     pub fn control(&self, action: &str) -> Result<Value, Value> {
@@ -473,6 +556,9 @@ fn drive(run: &Run, judge: Option<Arc<ConfiguredJudge>>) -> Result<(), Value> {
                 let id = action["id"].as_str().ok_or_else(lock_error)?;
                 if workflow.claim(&run.id, id).map_err(|e| e.to_value())? {
                     *run.active_action.lock().map_err(|_| lock_error())? = Some(action.clone());
+                    *run.latest_coordinator_action
+                        .lock()
+                        .map_err(|_| lock_error())? = Some(action.clone());
                     *run.coordinator.lock().map_err(|_| lock_error())? =
                         json!({"status":if action["kind"] == "plan" {"planning"}else{"repairing"}});
                     // Recheck after publishing the cancellation target.

@@ -58,13 +58,24 @@ fn main() {
  assert!(env::var_os("CODEX_HOME").is_some(),"native CLI auth directory was not preserved");
  let prompt=args.last().unwrap();
  let log=env::var("FAKE_LOG").unwrap();
- writeln!(fs::OpenOptions::new().create(true).append(true).open(log).unwrap(),"launch").unwrap();
+ writeln!(fs::OpenOptions::new().create(true).append(true).open(&log).unwrap(),"launch").unwrap();
+ println!("{{\"type\":\"thread.started\",\"thread_id\":\"fixture\"}}"); println!("{{\"type\":\"turn.started\"}}");
  if prompt.contains("switchbite-observation.json") {
   fs::write("switchbite-observation.json",r#"{"plan":{"nodes":[{"id":"build","objective":"Create result","role":"implementation","outputs":["result.txt"],"write_paths":["result.txt"],"acceptance":["result exists"],"routing":{"provider":"codex","model":"fake-build","effort":"high"}},{"id":"review","objective":"Review result and write report","role":"review","depends_on":["build"],"outputs":["review.md"],"write_paths":["review.md"],"acceptance":["report exists"],"routing":{"provider":"codex","model":"fake-review","effort":"high"}}]}}"#).unwrap();
- } else if args.iter().any(|s|s=="fake-build") { fs::write("result.txt","built").unwrap(); }
+ } else if args.iter().any(|s|s=="fake-build") {
+  let counter=std::path::Path::new(&log).with_extension("attempts");
+  let first=!counter.exists();fs::write(counter,"started").unwrap();
+  if first {
+   println!(r#"{{"type":"item.completed","item":{{"type":"agent_message","text":"Compiling workspace password=hunter22"}}}}"#);
+   eprintln!("Permission required: approve this command");std::io::stdout().flush().unwrap();
+   std::thread::sleep(std::time::Duration::from_secs(10));
+  }
+  fs::write("result.txt","built").unwrap();
+ }
  else if args.iter().any(|s|s=="fake-review") { assert_eq!(fs::read_to_string("result.txt").unwrap(),"built"); fs::write("review.md","reviewed").unwrap(); }
  else { panic!("unexpected model"); }
- println!("{{\"type\":\"thread.started\",\"thread_id\":\"fixture\"}}"); println!("{{\"type\":\"turn.started\"}}"); println!("{{\"type\":\"turn.completed\"}}");
+ println!(r#"{{"type":"item.completed","item":{{"type":"agent_message","text":"Worker finished"}}}}"#);
+ println!("{{\"type\":\"turn.completed\"}}");
 }"###).unwrap();
     let exe = dir.join("codex.exe");
     assert!(
@@ -154,6 +165,7 @@ fn web_submission_runs_real_workflow_with_isolated_fake_provider() {
         .unwrap();
     let (_, info) = http(port, "GET", "/api/app", "", "", "");
     let info: Value = serde_json::from_str(&info).unwrap();
+    assert_eq!(http(port, "GET", "/api/activity", "", "", "").0, 403);
     assert_eq!(info["tools"].as_array().unwrap().len(), 6);
     assert_eq!(info["connection"]["mode"], "native_cli_new_session");
     let coordinator = info["coordinators"]
@@ -271,10 +283,26 @@ fn web_submission_runs_real_workflow_with_isolated_fake_provider() {
         202
     );
     let deadline = Instant::now() + Duration::from_secs(120);
+    let mut retried = false;
     loop {
         let (_, body) = http(port, "GET", "/api/state", "", "", "");
         let state: Value = serde_json::from_str(&body).unwrap();
         if state["status"] == "completed" {
+            assert!(
+                retried,
+                "expected live output intervention before completion"
+            );
+            assert_eq!(state["tasks"][0]["repair_rounds"], 1);
+            let (code, body) = http(port, "GET", "/api/activity", token, &origin, "");
+            assert_eq!(code, 200);
+            let activity: Value = serde_json::from_str(&body).unwrap();
+            assert!(
+                activity["streams"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .any(|stream| stream["stage"] == "worker" && stream["task_id"] == "review")
+            );
             assert_eq!(state["tools"], json!(["codex"]));
             let stored = switchbite::workflow::Workflow::new(repo.join(".switchbite/workflow"))
                 .request(state["run_id"].as_str().unwrap())
@@ -296,6 +324,41 @@ fn web_submission_runs_real_workflow_with_isolated_fake_provider() {
                 "reviewed"
             );
             break;
+        }
+        if !retried {
+            let (code, body) = http(port, "GET", "/api/activity", token, &origin, "");
+            assert_eq!(code, 200, "{body}");
+            let activity: Value = serde_json::from_str(&body).unwrap();
+            if activity["selected_stream"]["task_id"] == "build"
+                && activity["selected_stream"]["health"] == "needs_input"
+            {
+                assert_eq!(activity["selected_stream"]["process_alive"], true);
+                assert_eq!(activity["selected_stream"]["can_retry"], true);
+                assert!(body.contains("Compiling workspace"));
+                assert!(body.contains("REDACTED") && !body.contains("hunter22"));
+                assert_eq!(
+                    http(
+                        port,
+                        "POST",
+                        "/api/task/retry",
+                        token,
+                        "http://evil.invalid",
+                        r#"{"task_id":"build"}"#
+                    )
+                    .0,
+                    403
+                );
+                let (code, body) = http(
+                    port,
+                    "POST",
+                    "/api/task/retry",
+                    token,
+                    &origin,
+                    r#"{"task_id":"build"}"#,
+                );
+                assert_eq!(code, 200, "{body}");
+                retried = true;
+            }
         }
         assert!(
             Instant::now() < deadline && state.get("attention").is_none(),

@@ -78,6 +78,31 @@ fn limits_tail_and_entries_without_exposing_invalid_json() {
 }
 
 #[test]
+fn busy_stderr_does_not_hide_stdout() {
+    let (root, run, state, hash) = setup();
+    let output = root.path().join(&run).join("host/output");
+    fs::write(
+        output.join(format!("{hash}.out")),
+        "Latest stdout progress\n",
+    )
+    .unwrap();
+    fs::write(
+        output.join(format!("{hash}.err")),
+        "Diagnostic line\n".repeat(300),
+    )
+    .unwrap();
+    let value = snapshot(root.path(), &run, &state, None, None, 10_000).unwrap();
+    let entries = value["selected_stream"]["entries"].as_array().unwrap();
+    assert!(entries.len() <= 128);
+    assert!(
+        entries
+            .iter()
+            .any(|entry| entry["source"] == "stdout" && entry["text"] == "Latest stdout progress")
+    );
+    assert!(entries.iter().any(|entry| entry["source"] == "stderr"));
+}
+
+#[test]
 fn parses_actual_antigravity_and_multiple_provider_content_items() {
     let (root, run, state, hash) = setup();
     let output = root.path().join(&run).join("host/output");

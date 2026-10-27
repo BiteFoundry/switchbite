@@ -217,6 +217,77 @@ fn handle(
         return response(&mut stream, "403 Forbidden", "text/plain", "Forbidden");
     }
     match line {
+        line if line.starts_with("GET /api/activity") => {
+            if header("x-switchbite-session") != Some(token)
+                || header("origin").is_some_and(|origin| origin != format!("http://{host}"))
+                || header("sec-fetch-site").is_some_and(|site| site != "same-origin")
+            {
+                return response(
+                    &mut stream,
+                    "403 Forbidden",
+                    "application/json",
+                    "{\"error\":{\"code\":\"forbidden\"}}",
+                );
+            }
+            let target = line
+                .strip_prefix("GET ")
+                .and_then(|s| s.strip_suffix(" HTTP/1.1"))
+                .unwrap_or("");
+            let url = reqwest::Url::parse(&format!("http://{host}{target}"));
+            let selected = match url {
+                Ok(url) if url.path() == "/api/activity" => {
+                    let pairs: Vec<_> = url
+                        .query_pairs()
+                        .map(|(key, value)| (key.into_owned(), value.into_owned()))
+                        .collect();
+                    if pairs.len() > 1
+                        || pairs.iter().any(|(key, value)| {
+                            key != "stream" || value.len() > 256 || value.is_empty()
+                        })
+                    {
+                        return response(
+                            &mut stream,
+                            "400 Bad Request",
+                            "application/json",
+                            "{\"error\":{\"code\":\"invalid_stream\"}}",
+                        );
+                    }
+                    pairs.first().map(|(_, value)| value.clone())
+                }
+                _ => return response(&mut stream, "404 Not Found", "text/plain", "Not found"),
+            };
+            let result = if let Some(app) = app {
+                app.activity(selected.as_deref())
+            } else {
+                workflow
+                    .status(run_id)
+                    .map_err(|e| e.to_value())
+                    .and_then(|state| {
+                        crate::activity::snapshot(
+                            workflow.root(),
+                            run_id,
+                            &state,
+                            None,
+                            selected.as_deref(),
+                            crate::agent::now_ms(),
+                        )
+                    })
+            };
+            match result {
+                Ok(value) => response(
+                    &mut stream,
+                    "200 OK",
+                    "application/json",
+                    &value.to_string(),
+                ),
+                Err(error) => response(
+                    &mut stream,
+                    "400 Bad Request",
+                    "application/json",
+                    &json!({"error":error}).to_string(),
+                ),
+            }
+        }
         "GET / HTTP/1.1" => response(
             &mut stream,
             "200 OK",
@@ -260,6 +331,35 @@ fn handle(
                 Err(error) => response(
                     &mut stream,
                     "400 Bad Request",
+                    "application/json",
+                    &json!({"error":error}).to_string(),
+                ),
+            }
+        }
+        "POST /api/task/retry HTTP/1.1" if app.is_some() => {
+            let body: Value =
+                serde_json::from_slice(&data[head_end..head_end + length]).unwrap_or(Value::Null);
+            let task = body["task_id"]
+                .as_str()
+                .filter(|id| !id.is_empty() && id.len() <= 128);
+            if body.as_object().is_none_or(|object| object.len() != 1) || task.is_none() {
+                return response(
+                    &mut stream,
+                    "400 Bad Request",
+                    "application/json",
+                    "{\"error\":{\"code\":\"invalid_request\",\"message\":\"작업을 선택하세요.\"}}",
+                );
+            }
+            match app.unwrap().retry_task(task.unwrap()) {
+                Ok(state) => response(
+                    &mut stream,
+                    "200 OK",
+                    "application/json",
+                    &view(&state).to_string(),
+                ),
+                Err(error) => response(
+                    &mut stream,
+                    "409 Conflict",
                     "application/json",
                     &json!({"error":error}).to_string(),
                 ),

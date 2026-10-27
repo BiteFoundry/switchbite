@@ -11,7 +11,7 @@ const INSTRUCTIONS: &str = "Return JSON only in switchbite-observation.json. For
 fn error(code: &str) -> Value {
     json!({"code":code})
 }
-fn key(action_id: &str, attempt: u64, suffix: &str) -> String {
+pub(crate) fn key(action_id: &str, attempt: u64, suffix: &str) -> String {
     let digest = format!(
         "{:x}",
         Sha256::digest(format!("{action_id}:{attempt}").as_bytes())
