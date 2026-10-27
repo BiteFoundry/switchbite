@@ -102,7 +102,7 @@ fn view(state: &Value) -> Value {
         let runtime = &state["runtime"];
         result["runtime"] = json!({
             "switchbite":{"version":safe_string(&runtime["switchbite"]["version"],128),"commit":safe_string(&runtime["switchbite"]["commit"],64)},
-            "backend":{"kind":safe_string(&runtime["backend"]["kind"],128),"version":safe_string(&runtime["backend"]["version"],128),"protocol_version":safe_string(&runtime["backend"]["protocol_version"],128)},
+            "backend":{"kind":safe_string(&runtime["backend"]["kind"],128),"version":safe_string(&runtime["backend"]["version"],128),"protocol_version":runtime["backend"]["protocol_version"].as_u64().map(|n| n.to_string()).unwrap_or_else(|| safe_string(&runtime["backend"]["protocol_version"],128))},
             "project":{"workspace":safe_string(&runtime["project"]["workspace"],1024),"base_commit":safe_string(&runtime["project"]["base_commit"],64)}
         });
     }
@@ -590,7 +590,7 @@ mod summary_tests {
     use super::*;
     #[test]
     fn runtime_and_observed_identity_are_explicit_and_bounded() {
-        let state = json!({"runtime":{"switchbite":{"version":"1.2","commit":"abc","secret":"hidden"},"backend":{"kind":"codex","version":"3","protocol_version":"1"},"project":{"workspace":"project","base_commit":"def"}},"tasks":[{"id":"a","candidate":{"model":"requested","effort":"high"},"observed":{"model":"actual"}}]});
+        let state = json!({"runtime":{"switchbite":{"version":"1.2","commit":"abc","secret":"hidden"},"backend":{"kind":"codex","version":"3","protocol_version":1},"project":{"workspace":"project","base_commit":"def"}},"tasks":[{"id":"a","candidate":{"model":"requested","effort":"high"},"observed":{"model":"actual"}}]});
         let result = view(&state);
         assert_eq!(result["tasks"][0]["model"], "requested");
         assert_eq!(result["tasks"][0]["observed"]["model"], "actual");
