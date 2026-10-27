@@ -407,7 +407,7 @@ pub fn resume_to_completion(
                 }
             }
             if actions.iter().any(|a| {
-                ["plan", "repair", "review", "refresh_pool"]
+                ["plan", "repair", "review", "review_route", "refresh_pool"]
                     .iter()
                     .any(|k| a["kind"] == *k)
             }) {

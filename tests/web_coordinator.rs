@@ -47,9 +47,15 @@ fn fake_worker(tmp: &Path) -> Value {
         let args: Vec<String> = std::env::args().collect();
         let prompt = args.join(" ");
         assert!(prompt.contains("Keep the complete user goal"));
-        assert!(prompt.contains("independent review node"));
-        assert!(prompt.contains("arrays of strings"));
-        std::fs::write("switchbite-observation.json", r#"{"plan":{"nodes":[{"id":"build","objective":"Build","acceptance":"Build works"}]}}"#).unwrap();
+        if prompt.contains("Review the proposed worker assignment") {
+            assert!(prompt.contains("candidate_snapshot"));
+            assert!(prompt.contains("review independence"));
+            std::fs::write("switchbite-observation.json", r#"{"status":"ready","candidate_id":"worker","reason_codes":["coordinator_review"],"summary":"Eligible worker"}"#).unwrap();
+        } else {
+            assert!(prompt.contains("independent review node"));
+            assert!(prompt.contains("arrays of strings"));
+            std::fs::write("switchbite-observation.json", r#"{"plan":{"nodes":[{"id":"build","objective":"Build","acceptance":"Build works"}]}}"#).unwrap();
+        }
         println!("{{\"type\":\"thread.started\",\"thread_id\":\"t\"}}");
         println!("{{\"type\":\"turn.started\"}}");
         println!("{{\"type\":\"turn.completed\"}}");
@@ -113,4 +119,19 @@ fn cancellation_before_launch_is_bound_to_attempt() {
     let mut retry = action.clone();
     retry["coordinator_attempt"] = json!(1);
     assert!(web_coordinator::fulfill(&root, &run, &retry, &candidate).is_ok());
+}
+
+#[test]
+fn coordinator_reviews_low_confidence_route_and_core_accepts_the_choice() {
+    let (tmp, run, plan) = setup();
+    let root = tmp.path().join("state");
+    let workflow = Workflow::new(root.clone());
+    let state = workflow.observe(&run, &json!({"action_id":plan["id"],"event_id":"plan","result":{"plan":{"nodes":[{"id":"build","objective":"Build","acceptance":["Build works"]}]}}})).unwrap();
+    let route = state["actions"].as_array().unwrap().iter().find(|a| a["kind"] == "route").unwrap();
+    let state = workflow.observe(&run, &json!({"action_id":route["id"],"event_id":"held","result":{"status":"hold","reason_codes":["low_confidence"],"next_action":"request_review"}})).unwrap();
+    let review = state["actions"].as_array().unwrap().iter().find(|a| a["kind"] == "review_route").unwrap();
+    let result = web_coordinator::fulfill(&root, &run, review, &fake_worker(tmp.path())).unwrap();
+    assert_eq!(result["candidate_id"], "worker");
+    let state = workflow.observe(&run, &json!({"action_id":review["id"],"event_id":"reviewed","result":result})).unwrap();
+    assert_eq!(state["tasks"][0]["candidate"]["id"], "worker");
 }

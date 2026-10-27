@@ -127,6 +127,7 @@ fn friendly(value: &Value) -> Value {
     };
     let message = value["message"].as_str().unwrap_or(match code {
         "coordinator_artifact_invalid" | "coordinator_artifact_missing" | "invalid_receipt" => "조율자가 실행 가능한 작업 계획을 반환하지 못했습니다. 다시 시도해 계획을 새로 만드세요.",
+        "coordinator_review_invalid" | "coordinator_review_candidate_invalid" | "coordinator_review_snapshot_invalid" => "조율자가 유효한 모델 배정을 반환하지 못했습니다. 다시 시도하세요.",
         "coordinator_execution_failed" => "조율자 CLI가 완료되지 않았습니다. 해당 CLI의 로그인과 사용 한도를 확인한 뒤 다시 시도하세요.",
         "coordinator_context_too_large" => "이 작업의 문맥이 조율자 입력 한도를 넘었습니다. 더 작은 업무로 나눠 시작하세요.",
         "provider_key_missing" | "judge_unavailable" => "판단기 연결을 확인한 뒤 다시 시도하세요.",
@@ -496,6 +497,11 @@ impl Workbench {
         if current.is_some() {
             return Err(error("run_active", "현재 실행을 먼저 확인하세요."));
         }
+        if state["status"] == "running"
+            && state["actions"].as_array().is_some_and(|actions| actions.iter().any(|a| a["kind"] == "refresh_pool"))
+        {
+            workflow.refresh_catalog(id).map_err(|e| e.to_value())?;
+        }
         let run = Arc::new(Run {
             root,
             id: id.to_owned(),
@@ -708,7 +714,7 @@ fn drive(run: &Run, judge: Option<Arc<ConfiguredJudge>>) -> Result<(), Value> {
                 .as_array()
                 .into_iter()
                 .flatten()
-                .find(|a| a["kind"] == "plan" || a["kind"] == "repair")
+                .find(|a| ["plan", "repair", "review_route"].iter().any(|kind| a["kind"] == *kind))
                 .cloned()
             {
                 action["coordinator_attempt"] = json!(run.attempt.load(Ordering::Acquire));
@@ -719,7 +725,7 @@ fn drive(run: &Run, judge: Option<Arc<ConfiguredJudge>>) -> Result<(), Value> {
                         .lock()
                         .map_err(|_| lock_error())? = Some(action.clone());
                     *run.coordinator.lock().map_err(|_| lock_error())? =
-                        json!({"status":if action["kind"] == "plan" {"planning"}else{"repairing"}});
+                        json!({"status":if action["kind"] == "plan" {"planning"} else if action["kind"] == "review_route" {"routing"} else {"repairing"}});
                     run.checkpoint()?;
                     // Recheck after publishing the cancellation target.
                     let result = if workflow.status(&run.id).map_err(|e| e.to_value())?["status"]
