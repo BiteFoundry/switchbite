@@ -55,7 +55,7 @@ fn fixture() -> (tempfile::TempDir, PathBuf, PathBuf, PathBuf) {
     let code = format!(
         r#"use std::{{fs,fs::OpenOptions,io::Write,thread,time::{{Duration,Instant}}}};
 fn main() {{
- let args:Vec<String>=std::env::args().collect(); let prompt=args.last().unwrap();
+ let args:Vec<String>=std::env::args().collect(); let mut input=String::new(); let prompt=if args.last().map(String::as_str)==Some("-") {{ use std::io::Read; std::io::stdin().read_to_string(&mut input).unwrap(); &input }} else {{ args.last().unwrap() }};
  let id=["one","two","review","slow","solo","followup","p1","p2","p3","review3"].iter().find(|id|prompt.contains(&format!("\"id\":\"{{}}\"",id))).expect("task ID");
  let dir=std::path::Path::new({markers:?}); let mut marker=OpenOptions::new().write(true).create_new(true).open(dir.join(id)).expect("duplicate launch"); writeln!(marker,"{{}}\n{{}}",std::process::id(),std::env::current_dir().unwrap().display()).unwrap();
  if *id=="one"||*id=="two" {{ let other=if *id=="one"{{"two"}}else{{"one"}}; let deadline=Instant::now()+Duration::from_secs(10); while !dir.join(other).exists() {{ assert!(Instant::now()<deadline,"parallel worker did not start");thread::sleep(Duration::from_millis(20)); }} }}

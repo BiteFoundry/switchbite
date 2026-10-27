@@ -56,7 +56,8 @@ fn main() {
  let args:Vec<String>=env::args().collect();
  if args.iter().any(|s|s=="--version") { println!("codex fixture 1.0"); return; }
  assert!(env::var_os("CODEX_HOME").is_some(),"native CLI auth directory was not preserved");
- let prompt=args.last().unwrap();
+ let mut input=String::new();
+ let prompt=if args.last().map(String::as_str)==Some("-") { use std::io::Read; std::io::stdin().read_to_string(&mut input).unwrap(); &input } else { args.last().unwrap() };
  let log=env::var("FAKE_LOG").unwrap();
  writeln!(fs::OpenOptions::new().create(true).append(true).open(&log).unwrap(),"launch").unwrap();
  println!("{{\"type\":\"thread.started\",\"thread_id\":\"fixture\"}}"); println!("{{\"type\":\"turn.started\"}}");
@@ -491,7 +492,8 @@ fn main() {
  let args:Vec<String>=env::args().collect();
  if args.iter().any(|s|s=="--version") { println!("codex fixture 1.0"); return; }
  assert!(env::var_os("CODEX_HOME").is_some());
- let prompt=args.last().unwrap();
+ let mut input=String::new();
+ let prompt=if args.last().map(String::as_str)==Some("-") { use std::io::Read; std::io::stdin().read_to_string(&mut input).unwrap(); &input } else { args.last().unwrap() };
  let log=env::var("FAKE_LOG").unwrap();
  let mut out=fs::OpenOptions::new().create(true).append(true).open(log).unwrap();
  println!("{{\"type\":\"thread.started\",\"thread_id\":\"fixture\"}}");

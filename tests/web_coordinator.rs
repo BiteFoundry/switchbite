@@ -45,7 +45,19 @@ fn fake_worker(tmp: &Path) -> Value {
     let source = tmp.join("worker.rs");
     fs::write(&source, r##"fn main() {
         let args: Vec<String> = std::env::args().collect();
-        let prompt = args.join(" ");
+        let mut input = String::new();
+        let prompt = if args.last().map(String::as_str) == Some("-") {
+            use std::io::Read;
+            std::io::stdin().read_to_string(&mut input).unwrap();
+            input
+        } else {
+            args.join(" ")
+        };
+        if prompt.contains("LONG_CONTEXT_BEGIN") {
+            assert_eq!(args.last().map(String::as_str), Some("-"));
+            assert!(prompt.len() > 32767);
+            assert!(prompt.contains(&format!("LONG_CONTEXT_BEGIN{}LONG_CONTEXT_END", "x".repeat(40000))));
+        }
         assert!(prompt.contains("Keep the complete user goal"));
         if prompt.contains("Review the proposed worker assignment") {
             assert!(prompt.contains("candidate_snapshot"));
@@ -133,13 +145,15 @@ fn coordinator_reviews_low_confidence_route_and_core_accepts_the_choice() {
         .find(|a| a["kind"] == "route")
         .unwrap();
     let state = workflow.observe(&run, &json!({"action_id":route["id"],"event_id":"held","result":{"status":"hold","reason_codes":["low_confidence"],"next_action":"request_review"}})).unwrap();
-    let review = state["actions"]
+    let mut review = state["actions"]
         .as_array()
         .unwrap()
         .iter()
         .find(|a| a["kind"] == "review_route")
-        .unwrap();
-    let result = web_coordinator::fulfill(&root, &run, review, &fake_worker(tmp.path())).unwrap();
+        .unwrap()
+        .clone();
+    review["payload"]["long_context"] = json!(format!("LONG_CONTEXT_BEGIN{}LONG_CONTEXT_END", "x".repeat(40000)));
+    let result = web_coordinator::fulfill(&root, &run, &review, &fake_worker(tmp.path())).unwrap();
     assert_eq!(result["candidate_id"], "worker");
     let state = workflow
         .observe(
