@@ -560,8 +560,38 @@ impl Workflow {
                         {
                             return Err(err("invalid_receipt"));
                         }
-                        s.tasks[i].candidate = Some(c);
-                        s.tasks[i].state = "routed".into();
+                        let current_pool = s
+                            .catalog
+                            .as_ref()
+                            .map(|v| &v["candidates"])
+                            .unwrap_or(&s.request["pool"]);
+                        let still_available = current_pool.as_array().is_some_and(|pool| {
+                            pool.iter().any(|now| {
+                                now["id"] == c["id"]
+                                    && now["available"] == true
+                                    && [
+                                        "provider",
+                                        "model",
+                                        "effort",
+                                        "executable",
+                                        "resource_key",
+                                        "args",
+                                    ]
+                                    .iter()
+                                    .all(|key| now.get(*key) == c.get(*key))
+                                    && strings(s.tasks[i].node.get("requirements"), 128)
+                                        .unwrap_or_default()
+                                        .iter()
+                                        .all(|r| {
+                                            now["capabilities"]
+                                                .as_array()
+                                                .is_some_and(|a| a.iter().any(|v| v == r))
+                                        })
+                            })
+                        });
+                        s.tasks[i].candidate = still_available.then_some(c);
+                        s.tasks[i].state =
+                            if still_available { "routed" } else { "pending" }.into();
                     }
                     Some("hold") => {
                         s.tasks[i].state = if result["reason_codes"]
@@ -613,6 +643,12 @@ impl Workflow {
                 for task in &mut s.tasks {
                     if ["needs_pool", "awaiting_pool", "held", "routing"]
                         .contains(&task.state.as_str())
+                        && !s.actions.iter().any(|a| {
+                            a["task_id"] == task.node["id"]
+                                && a["id"]
+                                    .as_str()
+                                    .is_some_and(|id| s.claimed_actions.contains(id))
+                        })
                     {
                         task.state = "pending".into();
                     }
@@ -765,8 +801,12 @@ impl Workflow {
         s.recent_events.push(summary);
         s.actions.remove(pos);
         if kind == "refresh_pool" {
-            s.actions
-                .retain(|a| a["kind"] != "refresh_pool" && a["kind"] != "route");
+            s.actions.retain(|a| {
+                (a["kind"] != "refresh_pool" && a["kind"] != "route")
+                    || a["id"]
+                        .as_str()
+                        .is_some_and(|id| s.claimed_actions.contains(id))
+            });
         }
         s.claimed_actions
             .retain(|id| s.actions.iter().any(|a| a["id"] == *id));
@@ -919,7 +959,11 @@ impl Workflow {
                         .iter()
                         .map(crate::route_context::candidate)
                         .collect();
-                    let route_input = json!({"version":2,"task":task,"pool":pool,"preferences":preferences,"policy":{"profile":profile,"tie_behavior":"stable_id","excluded_candidate_ids":exclusions}});
+                    let policy_exclusions: Vec<_> = exclusions
+                        .iter()
+                        .filter(|id| pool.iter().any(|c| c["id"].as_str() == Some(id.as_str())))
+                        .collect();
+                    let route_input = json!({"version":2,"task":task,"pool":pool,"preferences":preferences,"policy":{"profile":profile,"tie_behavior":"stable_id","excluded_candidate_ids":policy_exclusions}});
                     if crate::routing::normalize(&route_input).is_err() {
                         s.tasks[i].state = "repairing".into();
                         self.action(s, "repair", Some(i), json!({"reason":"routing_input_too_large","summary":"Reduce this task's routing context while preserving its acceptance contract."}));
