@@ -362,17 +362,30 @@ fn add(
         .unwrap_or(now);
     let silence = modified.or(start).map(|t| now.saturating_sub(t));
     let id = format!("{stage}-{hash}");
-    let needs_input = if alive == Some(true) {
-        let (out, _, out_time, _) = tail(&stdout_path(&dir, &hash), &id, "stdout");
-        let (err, _, err_time, _) = tail(
-            &dir.join("output").join(format!("{hash}.err")),
-            &id,
-            "stderr",
-        );
-        input_request(&out, out_time, &err, err_time)
-    } else {
-        false
+    let (out, _, out_time, _) = tail(&stdout_path(&dir, &hash), &id, "stdout");
+    let (err, _, err_time, _) = tail(
+        &dir.join("output").join(format!("{hash}.err")),
+        &id,
+        "stderr",
+    );
+    let needs_input = alive == Some(true) && input_request(&out, out_time, &err, err_time);
+    let last_visible = |entries: &[Value]| {
+        entries
+            .iter()
+            .rev()
+            .find(|entry| entry["kind"] != "event")
+            .and_then(|entry| entry["text"].as_str())
+            .map(str::to_owned)
     };
+    let recent = match (last_visible(&out), last_visible(&err)) {
+        (Some(a), Some(b)) => Some(if err_time.unwrap_or(0) >= out_time.unwrap_or(0) {
+            b
+        } else {
+            a
+        }),
+        (a, b) => a.or(b),
+    }
+    .map(|text| text.chars().take(300).collect::<String>());
     let health = if needs_input {
         "needs_input"
     } else if status == "failed" || status == "timeout" || status == "output_limit" {
@@ -390,7 +403,7 @@ fn add(
     } else {
         status
     };
-    let value = json!({"id":id,"task_id":task,"provider":provider,"stage":stage,"status":status,"health":health,"label":health,"elapsed_ms":start.map(|t| finished.saturating_sub(t)),"silence_ms":silence,"last_output_at_ms":modified,"process_alive":alive,"stdout_bytes":record["stdout_bytes"].as_u64().unwrap_or_else(|| fs::metadata(stdout_path(&dir, &hash)).map(|m|m.len()).unwrap_or(0)),"stderr_bytes":record["stderr_bytes"].as_u64().unwrap_or_else(|| fs::metadata(dir.join("output").join(format!("{hash}.err"))).map(|m|m.len()).unwrap_or(0)),"can_retry":retry && alive == Some(true) && status == "running"});
+    let value = json!({"id":id,"task_id":task,"provider":provider,"stage":stage,"status":status,"health":health,"label":health,"elapsed_ms":start.map(|t| finished.saturating_sub(t)),"silence_ms":silence,"last_output_at_ms":modified,"process_alive":alive,"stdout_bytes":record["stdout_bytes"].as_u64().unwrap_or_else(|| fs::metadata(stdout_path(&dir, &hash)).map(|m|m.len()).unwrap_or(0)),"stderr_bytes":record["stderr_bytes"].as_u64().unwrap_or_else(|| fs::metadata(dir.join("output").join(format!("{hash}.err"))).map(|m|m.len()).unwrap_or(0)),"recent_output":recent,"can_retry":retry && alive == Some(true) && status == "running"});
     streams.push(Stream {
         value,
         dir,

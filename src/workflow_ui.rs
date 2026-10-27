@@ -81,7 +81,7 @@ fn view(state: &Value) -> Value {
         let id = safe_string(&t["id"], 128);
         let action = actions.iter().find(|a| a["task_id"].as_str() == Some(id.as_str()));
         let candidate = &t["candidate"];
-        json!({"id":id,"objective":safe_string(&t["task"]["objective"], 500),"role":safe_string(&t["task"]["role"],64),"status":safe_string(&t["status"],64),"model":safe_string(&candidate["model"],128),"effort":safe_string(&candidate["effort"],32),"provider":safe_string(&candidate["provider"],128),"candidate_id":safe_string(&candidate["id"],128),"depends_on":t["task"]["depends_on"].as_array().into_iter().flatten().map(|v| safe_string(v,128)).collect::<Vec<_>>(),"wait_reason":safe_wait_reason(&t["wait_reason"]),"next_action":action.map(|a| safe_string(&a["kind"],64)).unwrap_or_default(),"repair_rounds":t["repair_rounds"].as_u64().unwrap_or(0),"acceptance_count":t["task"]["acceptance"].as_array().map_or(0,Vec::len),"evidence":t["evidence"].as_array().into_iter().flatten().take(64).map(|e| { let stage=e["stage"].as_str().filter(|s| ["route","review_route","prepare","launch","inspect","verify","integrate","gather_context","repair"].contains(s)).unwrap_or("other"); let status=e["status"].as_str().filter(|s| ["ready","hold","prepared","running","unknown","completed","failed","cancelled","passed","integrated","gathered","accepted"].contains(s)).unwrap_or("accepted"); let code=safe_string(&e["error_code"],128); let commit=safe_string(&e["commit"],64); json!({"stage":stage,"status":status,"error_code":if code.bytes().all(|b|b.is_ascii_alphanumeric()||b"_-".contains(&b)){code}else{String::new()},"checks_passed":e["checks_passed"].as_u64(),"checks_failed":e["checks_failed"].as_u64(),"evidence_count":e["evidence_count"].as_u64(),"permission_denial_count":e["permission_denial_count"].as_u64(),"commit":if (commit.len()==40||commit.len()==64)&&commit.bytes().all(|b|b.is_ascii_hexdigit()){commit}else{String::new()}}) }).collect::<Vec<_>>()})
+        json!({"id":id,"objective":safe_string(&t["task"]["objective"], 500),"role":safe_string(&t["task"]["role"],64),"status":safe_string(&t["status"],64),"model":safe_string(&candidate["model"],128),"effort":safe_string(&candidate["effort"],32),"provider":safe_string(&candidate["provider"],128),"candidate_id":safe_string(&candidate["id"],128),"observed":{"model":safe_string(&t["observed"]["model"],128),"effort":safe_string(&t["observed"]["effort"],32)},"depends_on":t["task"]["depends_on"].as_array().into_iter().flatten().map(|v| safe_string(v,128)).collect::<Vec<_>>(),"wait_reason":safe_wait_reason(&t["wait_reason"]),"next_action":action.map(|a| safe_string(&a["kind"],64)).unwrap_or_default(),"repair_rounds":t["repair_rounds"].as_u64().unwrap_or(0),"acceptance_count":t["task"]["acceptance"].as_array().map_or(0,Vec::len),"evidence":t["evidence"].as_array().into_iter().flatten().take(64).map(|e| { let stage=e["stage"].as_str().filter(|s| ["route","review_route","prepare","launch","inspect","verify","integrate","gather_context","repair"].contains(s)).unwrap_or("other"); let status=e["status"].as_str().filter(|s| ["ready","hold","prepared","running","unknown","completed","failed","cancelled","passed","integrated","gathered","accepted"].contains(s)).unwrap_or("accepted"); let code=safe_string(&e["error_code"],128); let commit=safe_string(&e["commit"],64); json!({"stage":stage,"status":status,"error_code":if code.bytes().all(|b|b.is_ascii_alphanumeric()||b"_-".contains(&b)){code}else{String::new()},"checks_passed":e["checks_passed"].as_u64(),"checks_failed":e["checks_failed"].as_u64(),"evidence_count":e["evidence_count"].as_u64(),"permission_denial_count":e["permission_denial_count"].as_u64(),"commit":if (commit.len()==40||commit.len()==64)&&commit.bytes().all(|b|b.is_ascii_hexdigit()){commit}else{String::new()}}) }).collect::<Vec<_>>()})
     }).collect();
     let mut result = json!({"run_id":safe_string(&state["run_id"],128),"status":safe_string(&state["status"],64),"summary":safe_string(&state["summary"],200),"progress":{"done":state["progress"]["done"].as_u64().unwrap_or(0),"total":state["progress"]["total"].as_u64().unwrap_or(0)},"tasks":tasks,"actions":actions.iter().map(|a|json!({"kind":safe_string(&a["kind"],64),"task_id":safe_string(&a["task_id"],128)})).collect::<Vec<_>>(),"event_count":state["event_count"].as_u64().unwrap_or_else(|| state["events"].as_array().map_or(0, Vec::len) as u64)});
     for field in [
@@ -97,6 +97,14 @@ fn view(state: &Value) -> Value {
         if let Some(value) = state.get(field) {
             result[field] = value.clone();
         }
+    }
+    if state["runtime"].is_object() {
+        let runtime = &state["runtime"];
+        result["runtime"] = json!({
+            "switchbite":{"version":safe_string(&runtime["switchbite"]["version"],128),"commit":safe_string(&runtime["switchbite"]["commit"],64)},
+            "backend":{"kind":safe_string(&runtime["backend"]["kind"],128),"version":safe_string(&runtime["backend"]["version"],128),"protocol_version":safe_string(&runtime["backend"]["protocol_version"],128)},
+            "project":{"workspace":safe_string(&runtime["project"]["workspace"],1024),"base_commit":safe_string(&runtime["project"]["base_commit"],64)}
+        });
     }
     result
 }
@@ -580,6 +588,16 @@ pub fn serve_app_resume(
 #[cfg(test)]
 mod summary_tests {
     use super::*;
+    #[test]
+    fn runtime_and_observed_identity_are_explicit_and_bounded() {
+        let state = json!({"runtime":{"switchbite":{"version":"1.2","commit":"abc","secret":"hidden"},"backend":{"kind":"codex","version":"3","protocol_version":"1"},"project":{"workspace":"project","base_commit":"def"}},"tasks":[{"id":"a","candidate":{"model":"requested","effort":"high"},"observed":{"model":"actual"}}]});
+        let result = view(&state);
+        assert_eq!(result["tasks"][0]["model"], "requested");
+        assert_eq!(result["tasks"][0]["observed"]["model"], "actual");
+        assert_eq!(result["tasks"][0]["observed"]["effort"], "");
+        assert_eq!(result["runtime"]["backend"]["protocol_version"], "1");
+        assert!(result["runtime"]["switchbite"].get("secret").is_none());
+    }
     #[test]
     fn wait_reason_is_bounded_in_summary() {
         let state = json!({"max_parallel":3,"tasks":[{"id":"a","wait_reason":{"code":"resource_capacity","resource_key":"codex","limit":3,"secret":"hidden"}},{"id":"b","wait_reason":{"code":"unexpected"}}]});

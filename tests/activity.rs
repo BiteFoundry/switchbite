@@ -28,6 +28,12 @@ fn reads_only_owned_stream_and_sanitizes_provider_events() {
     )).unwrap();
     let value = snapshot(root.path(), &run, &state, None, None, 10_000).unwrap();
     let entries = value["selected_stream"]["entries"].as_array().unwrap();
+    assert!(
+        value["streams"][0]["recent_output"]
+            .as_str()
+            .unwrap()
+            .contains("[REDACTED]")
+    );
     assert_eq!(entries.len(), 2);
     assert!(entries[0]["text"].as_str().unwrap().contains("[REDACTED]"));
     let serialized = value.to_string();
