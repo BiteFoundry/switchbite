@@ -1,1 +1,747 @@
-//! Persistent task workflow engine. Implementation owned by workflow-core worker.
+//! Durable, lease-based workflow coordination. Hosts execute actions, never this module.
+use serde::{Deserialize, Serialize};
+use serde_json::{Value, json};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    fmt, fs,
+    path::PathBuf,
+    sync::Mutex,
+    time::{SystemTime, UNIX_EPOCH},
+};
+
+static MUTATION: Mutex<()> = Mutex::new(());
+const LIMIT: usize = 1_048_576;
+#[derive(Debug, Clone, Copy)]
+pub struct WorkflowError {
+    pub code: &'static str,
+}
+impl WorkflowError {
+    pub fn to_value(&self) -> Value {
+        json!({"code":self.code})
+    }
+}
+impl fmt::Display for WorkflowError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.code)
+    }
+}
+impl std::error::Error for WorkflowError {}
+fn err(code: &'static str) -> WorkflowError {
+    WorkflowError { code }
+}
+fn bounded(v: &Value) -> Result<(), WorkflowError> {
+    if serde_json::to_vec(v)
+        .map_err(|_| err("invalid_request"))?
+        .len()
+        > LIMIT
+    {
+        return Err(err("invalid_request"));
+    }
+    Ok(())
+}
+fn text<'a>(v: &'a Value, key: &str, max: usize) -> Result<&'a str, WorkflowError> {
+    v.get(key)
+        .and_then(Value::as_str)
+        .filter(|s| !s.trim().is_empty() && s.len() <= max)
+        .ok_or(err("invalid_request"))
+}
+fn id(s: &str) -> bool {
+    !s.is_empty()
+        && s.len() <= 128
+        && s.bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b"-_.:".contains(&b))
+        && s != "."
+        && s != ".."
+}
+fn strings(v: Option<&Value>, max: usize) -> Result<Vec<String>, WorkflowError> {
+    match v {
+        None => Ok(vec![]),
+        Some(Value::Array(a)) if a.len() <= 64 => a
+            .iter()
+            .map(|v| {
+                v.as_str()
+                    .filter(|s| !s.is_empty() && s.len() <= max)
+                    .map(str::to_owned)
+                    .ok_or(err("invalid_request"))
+            })
+            .collect(),
+        _ => Err(err("invalid_request")),
+    }
+}
+#[derive(Clone, Serialize, Deserialize)]
+struct Task {
+    node: Value,
+    state: String,
+    candidate: Option<Value>,
+    prepared: Option<Value>,
+    execution_id: Option<String>,
+    attempts: u64,
+    context_gathered: bool,
+}
+#[derive(Serialize, Deserialize)]
+struct State {
+    run_id: String,
+    status: String,
+    request: Value,
+    tasks: Vec<Task>,
+    actions: Vec<Value>,
+    events: BTreeMap<String, Value>,
+    sequence: u64,
+    revision: u64,
+}
+#[derive(Clone)]
+pub struct Workflow {
+    root: PathBuf,
+}
+impl Workflow {
+    pub fn new(root: PathBuf) -> Self {
+        Self { root }
+    }
+    fn lock(&self) -> Result<fs::File, WorkflowError> {
+        fs::create_dir_all(&self.root).map_err(|_| err("storage_error"))?;
+        let file = fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .open(self.root.join(".lock"))
+            .map_err(|_| err("storage_error"))?;
+        lock_file(&file)?;
+        Ok(file)
+    }
+    fn dir(&self, run: &str) -> Result<PathBuf, WorkflowError> {
+        if !id(run) {
+            return Err(err("invalid_request"));
+        }
+        Ok(self.root.join(run))
+    }
+    fn load(&self, run: &str) -> Result<State, WorkflowError> {
+        let dir = self.dir(run)?;
+        let mut files: Vec<_> = fs::read_dir(dir)
+            .map_err(|_| err("not_found"))?
+            .filter_map(Result::ok)
+            .filter_map(|e| {
+                let name = e.file_name().to_string_lossy().into_owned();
+                name.strip_suffix(".json")
+                    .and_then(|n| n.parse::<u64>().ok())
+                    .map(|n| (n, e.path()))
+            })
+            .collect();
+        files.sort_by_key(|x| x.0);
+        let path = files.last().ok_or(err("not_found"))?.1.clone();
+        let data = fs::read(path).map_err(|_| err("storage_error"))?;
+        serde_json::from_slice(&data).map_err(|_| err("storage_error"))
+    }
+    fn save(&self, s: &mut State) -> Result<(), WorkflowError> {
+        s.revision += 1;
+        let dir = self.dir(&s.run_id)?;
+        fs::create_dir_all(&dir).map_err(|_| err("storage_error"))?;
+        let tmp = dir.join(format!("{}.tmp", s.revision));
+        let dest = dir.join(format!("{}.json", s.revision));
+        if tmp.exists() {
+            fs::remove_file(&tmp).map_err(|_| err("storage_error"))?;
+        }
+        let bytes = serde_json::to_vec(s).map_err(|_| err("storage_error"))?;
+        {
+            use std::io::Write;
+            let mut file = fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&tmp)
+                .map_err(|_| err("storage_error"))?;
+            file.write_all(&bytes)
+                .and_then(|_| file.sync_all())
+                .map_err(|_| err("storage_error"))?;
+        }
+        fs::rename(tmp, dest).map_err(|_| err("storage_error"))
+    }
+    fn response(s: &State) -> Value {
+        let done = s.tasks.iter().filter(|t| t.state == "done").count();
+        json!({"run_id":s.run_id,"status":s.status,"summary":format!("{done}/{} tasks completed",s.tasks.len()),"tasks":s.tasks.iter().map(|t|json!({"task":t.node,"id":t.node["id"],"status":t.state,"candidate":t.candidate,"prepared":t.prepared,"execution_id":t.execution_id,"repair_rounds":t.attempts})).collect::<Vec<_>>(),"actions":s.actions,"events":s.events.values().collect::<Vec<_>>(),"progress":{"done":done,"total":s.tasks.len()}})
+    }
+    pub fn start(&self, request: &Value) -> Result<Value, WorkflowError> {
+        let _g = MUTATION.lock().map_err(|_| err("storage_error"))?;
+        let _lock = self.lock()?;
+        bounded(request)?;
+        let obj = request.as_object().ok_or(err("invalid_request"))?;
+        if obj.keys().any(|k| {
+            ![
+                "workspace",
+                "goal",
+                "plan",
+                "pool",
+                "preferences",
+                "max_parallel",
+                "repair_rounds",
+                "checks",
+                "host",
+            ]
+            .contains(&k.as_str())
+        }) {
+            return Err(err("invalid_request"));
+        }
+        text(request, "workspace", 4096)?;
+        let pool = request["pool"]
+            .as_array()
+            .filter(|p| p.len() <= 16)
+            .ok_or(err("invalid_request"))?;
+        let mut ids = BTreeSet::new();
+        for c in pool {
+            let cid = text(c, "id", 128)?;
+            if !id(cid) || !ids.insert(cid.to_owned()) {
+                return Err(err("invalid_request"));
+            }
+        }
+        for (k, default, max) in [("max_parallel", 2, 16), ("repair_rounds", 2, 10)] {
+            if let Some(v) = request.get(k) {
+                if v.as_u64()
+                    .filter(|n| *n <= max && (k != "max_parallel" || *n > 0))
+                    .is_none()
+                {
+                    return Err(err("invalid_request"));
+                }
+            }
+            let _ = default;
+        }
+        let tasks = if let Some(plan) = request.get("plan") {
+            validate_plan(plan)?
+        } else {
+            text(request, "goal", 24000)?;
+            vec![]
+        };
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_err(|_| err("storage_error"))?
+            .as_nanos();
+        let run = format!("run-{now}-{}", std::process::id());
+        let mut s = State {
+            run_id: run,
+            status: "running".into(),
+            request: request.clone(),
+            tasks,
+            actions: vec![],
+            events: BTreeMap::new(),
+            sequence: 0,
+            revision: 0,
+        };
+        self.schedule(&mut s);
+        self.save(&mut s)?;
+        Ok(Self::response(&s))
+    }
+    pub fn status(&self, run_id: &str) -> Result<Value, WorkflowError> {
+        let _g = MUTATION.lock().map_err(|_| err("storage_error"))?;
+        let _lock = self.lock()?;
+        Ok(Self::response(&self.load(run_id)?))
+    }
+    pub fn next(&self, run_id: &str) -> Result<Value, WorkflowError> {
+        let _g = MUTATION.lock().map_err(|_| err("storage_error"))?;
+        let _lock = self.lock()?;
+        let mut s = self.load(run_id)?;
+        self.schedule(&mut s);
+        self.save(&mut s)?;
+        Ok(Self::response(&s))
+    }
+    pub fn control(&self, run_id: &str, action: &str) -> Result<Value, WorkflowError> {
+        let _g = MUTATION.lock().map_err(|_| err("storage_error"))?;
+        let _lock = self.lock()?;
+        let mut s = self.load(run_id)?;
+        match action {
+            "pause" if s.status == "running" => s.status = "paused".into(),
+            "resume" if s.status == "paused" => {
+                s.status = "running".into();
+                self.schedule(&mut s)
+            }
+            "cancel" if s.status == "running" || s.status == "paused" => {
+                s.status = "cancelled".into();
+                s.actions.clear();
+                for i in 0..s.tasks.len() {
+                    if s.tasks[i].execution_id.is_some()
+                        && ["running", "unknown"].contains(&s.tasks[i].state.as_str())
+                    {
+                        let execution_id = s.tasks[i].execution_id.clone();
+                        self.action(
+                            &mut s,
+                            "inspect",
+                            Some(i),
+                            json!({"operation":"cancel","execution_id":execution_id}),
+                        );
+                    }
+                }
+            }
+            "pause" | "resume" | "cancel" => return Err(err("invalid_state")),
+            _ => return Err(err("invalid_request")),
+        };
+        self.save(&mut s)?;
+        Ok(Self::response(&s))
+    }
+    pub fn observe(&self, run_id: &str, event: &Value) -> Result<Value, WorkflowError> {
+        let _g = MUTATION.lock().map_err(|_| err("storage_error"))?;
+        let _lock = self.lock()?;
+        bounded(event)?;
+        let eid = text(event, "event_id", 128)?;
+        let aid = text(event, "action_id", 128)?;
+        if !id(eid)
+            || !id(aid)
+            || !event.get("result").is_some_and(Value::is_object)
+            || event
+                .as_object()
+                .unwrap()
+                .keys()
+                .any(|k| !["event_id", "action_id", "result"].contains(&k.as_str()))
+        {
+            return Err(err("invalid_request"));
+        }
+        let mut s = self.load(run_id)?;
+        if let Some(old) = s.events.get(eid) {
+            return if old == event {
+                Ok(Self::response(&s))
+            } else {
+                Err(err("event_conflict"))
+            };
+        }
+        let pos = s
+            .actions
+            .iter()
+            .position(|a| a["id"] == aid)
+            .ok_or(err("action_not_found"))?;
+        let a = s.actions[pos].clone();
+        let result = &event["result"];
+        let kind = a["kind"].as_str().unwrap();
+        let index = a
+            .get("task_id")
+            .and_then(Value::as_str)
+            .and_then(|id| s.tasks.iter().position(|t| t.node["id"] == id));
+        match kind {
+            "plan" => {
+                s.tasks = validate_plan(result.get("plan").ok_or(err("invalid_receipt"))?)
+                    .map_err(|_| err("invalid_receipt"))?;
+            }
+            "repair" => {
+                let i = index.ok_or(err("invalid_receipt"))?;
+                if let Some(plan) = result.get("plan") {
+                    let replacements = validate_plan(plan).map_err(|_| err("invalid_receipt"))?;
+                    if replacements.len() != 1
+                        || replacements[0].node["id"] != s.tasks[i].node["id"]
+                    {
+                        return Err(err("invalid_receipt"));
+                    }
+                    s.tasks[i].node = replacements[0].node.clone();
+                } else {
+                    let node = result.get("task").ok_or(err("invalid_receipt"))?;
+                    let replacement = validate_plan(&json!({"nodes":[node]}))
+                        .map_err(|_| err("invalid_receipt"))?;
+                    if replacement[0].node["id"] != s.tasks[i].node["id"] {
+                        return Err(err("invalid_receipt"));
+                    }
+                    s.tasks[i].node = replacement[0].node.clone();
+                }
+                s.tasks[i].state = "pending".into();
+                s.tasks[i].candidate = None;
+                s.tasks[i].prepared = None;
+                s.tasks[i].execution_id = None;
+            }
+            "route" => {
+                let i = index.ok_or(err("invalid_receipt"))?;
+                match result["status"].as_str() {
+                    Some("ready") => {
+                        let cid = text(result, "candidate_id", 128)
+                            .map_err(|_| err("invalid_receipt"))?;
+                        let c = s.request["pool"]
+                            .as_array()
+                            .unwrap()
+                            .iter()
+                            .find(|c| c["id"] == cid && c["available"] == true)
+                            .ok_or(err("invalid_receipt"))?
+                            .clone();
+                        s.tasks[i].candidate = Some(c);
+                        s.tasks[i].state = "routed".into();
+                    }
+                    Some("hold") => {
+                        s.tasks[i].state = if result["reason_codes"]
+                            .as_array()
+                            .is_some_and(|r| r.iter().any(|v| v == "context_insufficient"))
+                            && !s.tasks[i].context_gathered
+                        {
+                            "needs_context"
+                        } else {
+                            "held"
+                        }
+                        .into();
+                    }
+                    _ => return Err(err("invalid_receipt")),
+                }
+            }
+            "prepare" => {
+                let i = index.ok_or(err("invalid_receipt"))?;
+                if result["status"] != "prepared"
+                    || [
+                        "workspace",
+                        "branch",
+                        "integration_workspace",
+                        "integration_branch",
+                    ]
+                    .iter()
+                    .any(|k| text(result, k, 4096).is_err())
+                {
+                    return Err(err("invalid_receipt"));
+                }
+                s.tasks[i].prepared = Some(result.clone());
+                s.tasks[i].state = "prepared".into();
+            }
+            "launch" | "inspect" => {
+                let i = index.ok_or(err("invalid_receipt"))?;
+                match result["status"].as_str() {
+                    Some("running") | Some("unknown") => {
+                        let ex = result
+                            .get("execution_id")
+                            .and_then(Value::as_str)
+                            .or(s.tasks[i].execution_id.as_deref())
+                            .filter(|x| !x.is_empty() && x.len() <= 1024)
+                            .ok_or(err("invalid_receipt"))?
+                            .to_string();
+                        s.tasks[i].execution_id = Some(ex);
+                        s.tasks[i].state = result["status"].as_str().unwrap().into();
+                    }
+                    Some("completed") if result["completion_verified"] == true => {
+                        s.tasks[i].state = "verifying".into();
+                    }
+                    Some("failed") => {
+                        s.tasks[i].state = "failed".into();
+                    }
+                    Some("cancelled") if s.status == "cancelled" => {
+                        s.tasks[i].state = "cancelled".into();
+                    }
+                    _ => return Err(err("invalid_receipt")),
+                }
+            }
+            "verify" => {
+                let i = index.ok_or(err("invalid_receipt"))?;
+                if !result["evidence"].is_array() {
+                    return Err(err("invalid_receipt"));
+                }
+                s.tasks[i].state = match result["status"].as_str() {
+                    Some("passed") => "integrating",
+                    Some("failed") => "failed",
+                    _ => return Err(err("invalid_receipt")),
+                }
+                .into();
+            }
+            "integrate" => {
+                let i = index.ok_or(err("invalid_receipt"))?;
+                s.tasks[i].state = match result["status"].as_str() {
+                    Some("integrated") => "done",
+                    Some("failed") => "failed",
+                    _ => return Err(err("invalid_receipt")),
+                }
+                .into();
+            }
+            "gather_context" => {
+                let i = index.ok_or(err("invalid_receipt"))?;
+                if result["status"] != "gathered" {
+                    return Err(err("invalid_receipt"));
+                }
+                let refs = strings(result.get("context_refs"), 1000)
+                    .map_err(|_| err("invalid_receipt"))?;
+                s.tasks[i].node["context_refs"] = json!(refs);
+                s.tasks[i].context_gathered = true;
+                s.tasks[i].state = "pending".into();
+            }
+            _ => return Err(err("invalid_receipt")),
+        }
+        s.actions.remove(pos);
+        s.events.insert(eid.to_string(), event.clone());
+        self.schedule(&mut s);
+        self.save(&mut s)?;
+        Ok(Self::response(&s))
+    }
+    fn action(&self, s: &mut State, kind: &str, index: Option<usize>, extra: Value) {
+        s.sequence += 1;
+        let mut payload = json!({"workspace":s.request["workspace"],"checks":s.request.get("checks").cloned().unwrap_or(json!([])),"host":s.request.get("host").cloned().unwrap_or(json!({}))});
+        let mut tid = Value::Null;
+        if let Some(i) = index {
+            let t = &s.tasks[i];
+            tid = t.node["id"].clone();
+            payload["task"] = t.node.clone();
+            payload["candidate"] = t.candidate.clone().unwrap_or(Value::Null);
+            payload["prepared"] = t.prepared.clone().unwrap_or(Value::Null);
+            if let Some(ex) = &t.execution_id {
+                payload["execution_id"] = json!(ex);
+            }
+        }
+        if let Some(m) = extra.as_object() {
+            for (k, v) in m {
+                payload[k] = v.clone();
+            }
+        }
+        s.actions.push(json!({"id":format!("action-{}",s.sequence),"kind":kind,"run_id":s.run_id,"task_id":tid,"payload":payload}));
+    }
+    fn schedule(&self, s: &mut State) {
+        if s.status != "running" {
+            return;
+        }
+        if s.tasks.is_empty() {
+            if s.actions.is_empty() {
+                self.action(s, "plan", None, json!({"goal":s.request["goal"]}));
+            }
+            return;
+        }
+        if s.tasks.iter().all(|t| t.state == "done") {
+            s.status = "completed".into();
+            return;
+        }
+        let max = s.request["max_parallel"].as_u64().unwrap_or(2) as usize;
+        for i in 0..s.tasks.len() {
+            let tid = s.tasks[i].node["id"].clone();
+            if s.actions.iter().any(|a| a["task_id"] == tid) {
+                continue;
+            }
+            let state = s.tasks[i].state.clone();
+            let deps = strings(s.tasks[i].node.get("depends_on"), 128).unwrap_or_default();
+            if state == "pending"
+                && !deps.iter().all(|d| {
+                    s.tasks
+                        .iter()
+                        .any(|t| t.node["id"] == *d && t.state == "done")
+                })
+            {
+                continue;
+            }
+            let active = s
+                .tasks
+                .iter()
+                .filter(|t| !["pending", "done", "held", "failed"].contains(&t.state.as_str()))
+                .count();
+            match state.as_str() {
+                "pending" if active < max => {
+                    s.tasks[i].state = "routing".into();
+                    let node = &s.tasks[i].node;
+                    let task = json!({"id":node["id"],"objective":node["objective"],"requirements":node.get("requirements").cloned().unwrap_or(json!([])),"context_refs":node.get("context_refs").cloned().unwrap_or(json!([]))});
+                    let pool = s.request["pool"]
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .map(|c| {
+                            let mut c = c.clone();
+                            if let Some(o) = c.as_object_mut() {
+                                o.retain(|k, _| {
+                                    [
+                                        "id",
+                                        "description",
+                                        "capabilities",
+                                        "available",
+                                        "estimated_cost",
+                                        "estimated_latency_ms",
+                                        "has_context",
+                                    ]
+                                    .contains(&k.as_str())
+                                });
+                            }
+                            c
+                        })
+                        .collect::<Vec<_>>();
+                    self.action(s,"route",Some(i),json!({"route_input":{"version":2,"task":task,"pool":pool,"preferences":s.request.get("preferences").cloned().unwrap_or(json!(""))}}));
+                }
+                "routed" => {
+                    if self.conflicts(s, i) {
+                        continue;
+                    }
+                    s.tasks[i].state = "preparing".into();
+                    self.action(s, "prepare", Some(i), json!({}));
+                }
+                "prepared" => {
+                    s.tasks[i].state = "launching".into();
+                    self.action(s, "launch", Some(i), json!({}));
+                }
+                "running" | "unknown" => {
+                    self.action(s, "inspect", Some(i), json!({}));
+                }
+                "verifying" => self.action(s, "verify", Some(i), json!({})),
+                "integrating" => self.action(s, "integrate", Some(i), json!({})),
+                "needs_context" => {
+                    s.tasks[i].state = "gathering".into();
+                    self.action(s, "gather_context", Some(i), json!({}));
+                }
+                "failed" => {
+                    if s.tasks[i].attempts < s.request["repair_rounds"].as_u64().unwrap_or(2) {
+                        s.tasks[i].attempts += 1;
+                        s.tasks[i].state = "repairing".into();
+                        self.action(s, "repair", Some(i), json!({"round":s.tasks[i].attempts}));
+                    } else {
+                        s.tasks[i].state = "blocked".into();
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    fn conflicts(&self, s: &State, i: usize) -> bool {
+        let c = &s.tasks[i];
+        let key = c
+            .candidate
+            .as_ref()
+            .and_then(|v| v.get("resource_key").or_else(|| v.get("id")))
+            .and_then(Value::as_str);
+        let outputs = strings(c.node.get("outputs"), 1000).unwrap_or_default();
+        s.tasks.iter().enumerate().any(|(j, t)| {
+            if j == i
+                || ![
+                    "preparing",
+                    "prepared",
+                    "launching",
+                    "running",
+                    "unknown",
+                    "verifying",
+                    "integrating",
+                ]
+                .contains(&t.state.as_str())
+            {
+                return false;
+            }
+            let other = t
+                .candidate
+                .as_ref()
+                .and_then(|v| v.get("resource_key").or_else(|| v.get("id")))
+                .and_then(Value::as_str);
+            let paths = strings(t.node.get("outputs"), 1000).unwrap_or_default();
+            (key.is_some() && key == other)
+                || outputs
+                    .iter()
+                    .any(|a| paths.iter().any(|b| path_overlap(a, b)))
+        })
+    }
+}
+fn path_overlap(a: &str, b: &str) -> bool {
+    let a = a.replace('\\', "/");
+    let b = b.replace('\\', "/");
+    a == b || a.starts_with(&(b.clone() + "/")) || b.starts_with(&(a + "/"))
+}
+fn validate_plan(plan: &Value) -> Result<Vec<Task>, WorkflowError> {
+    let nodes = plan
+        .get("nodes")
+        .and_then(Value::as_array)
+        .filter(|v| !v.is_empty() && v.len() <= 128)
+        .ok_or(err("invalid_request"))?;
+    let mut ids = BTreeSet::new();
+    let mut tasks = Vec::new();
+    for n in nodes {
+        let obj = n.as_object().ok_or(err("invalid_request"))?;
+        if obj.keys().any(|k| {
+            ![
+                "id",
+                "objective",
+                "depends_on",
+                "requirements",
+                "acceptance",
+                "outputs",
+                "role",
+                "context_refs",
+            ]
+            .contains(&k.as_str())
+        }) {
+            return Err(err("invalid_request"));
+        }
+        let name = text(n, "id", 128)?;
+        if !id(name) || !ids.insert(name.to_owned()) {
+            return Err(err("invalid_request"));
+        }
+        text(n, "objective", 24000)?;
+        for field in [
+            "depends_on",
+            "requirements",
+            "acceptance",
+            "outputs",
+            "context_refs",
+        ] {
+            strings(n.get(field), 1000)?;
+        }
+        if let Some(role) = n.get("role") {
+            if ![
+                "exploration",
+                "implementation",
+                "mockup",
+                "integration",
+                "review",
+            ]
+            .contains(&role.as_str().unwrap_or(""))
+            {
+                return Err(err("invalid_request"));
+            }
+        }
+        tasks.push(Task {
+            node: n.clone(),
+            state: "pending".into(),
+            candidate: None,
+            prepared: None,
+            execution_id: None,
+            attempts: 0,
+            context_gathered: false,
+        });
+    }
+    let mut done = BTreeSet::new();
+    loop {
+        let before = done.len();
+        for t in &tasks {
+            let deps = strings(t.node.get("depends_on"), 128)?;
+            if deps.iter().any(|d| !ids.contains(d)) {
+                return Err(err("invalid_request"));
+            }
+            if deps.iter().all(|d| done.contains(d)) {
+                done.insert(t.node["id"].as_str().unwrap().to_string());
+            }
+        }
+        if done.len() == tasks.len() {
+            break;
+        }
+        if done.len() == before {
+            return Err(err("invalid_request"));
+        }
+    }
+    Ok(tasks)
+}
+
+#[cfg(unix)]
+fn lock_file(file: &fs::File) -> Result<(), WorkflowError> {
+    use std::os::fd::AsRawFd;
+    unsafe extern "C" {
+        fn flock(fd: i32, operation: i32) -> i32;
+    }
+    if unsafe { flock(file.as_raw_fd(), 2) } == 0 {
+        Ok(())
+    } else {
+        Err(err("storage_error"))
+    }
+}
+#[cfg(windows)]
+fn lock_file(file: &fs::File) -> Result<(), WorkflowError> {
+    use std::os::windows::io::AsRawHandle;
+    #[repr(C)]
+    struct Overlapped {
+        internal: usize,
+        internal_high: usize,
+        offset: u32,
+        offset_high: u32,
+        event: *mut std::ffi::c_void,
+    }
+    #[link(name = "kernel32")]
+    unsafe extern "system" {
+        fn LockFileEx(
+            file: *mut std::ffi::c_void,
+            flags: u32,
+            reserved: u32,
+            low: u32,
+            high: u32,
+            overlapped: *mut Overlapped,
+        ) -> i32;
+    }
+    let mut o = Overlapped {
+        internal: 0,
+        internal_high: 0,
+        offset: 0,
+        offset_high: 0,
+        event: std::ptr::null_mut(),
+    };
+    if unsafe { LockFileEx(file.as_raw_handle(), 2, 0, 1, 0, &mut o) } != 0 {
+        Ok(())
+    } else {
+        Err(err("storage_error"))
+    }
+}
