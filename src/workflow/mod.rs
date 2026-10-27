@@ -393,6 +393,10 @@ impl Workflow {
         let _g = MUTATION.lock().map_err(|_| err("storage_error"))?;
         let _lock = self.lock()?;
         let mut state = self.load(run_id)?;
+        if reconcile_candidates(&mut state) {
+            self.schedule(&mut state);
+            self.save(&mut state)?;
+        }
         let Some(action) = state.actions.iter().find(|a| a["id"] == action_id) else {
             return Ok(false);
         };
@@ -938,6 +942,7 @@ impl Workflow {
         if s.status != "running" {
             return;
         }
+        reconcile_candidates(s);
         if s.tasks.is_empty() {
             if s.actions.is_empty() {
                 self.action(s, "plan", None, json!({"goal":s.request["goal"]}));
@@ -1085,7 +1090,7 @@ impl Workflow {
         }
         let candidate = task.candidate.as_ref()?;
         let key = resource_key(candidate)?;
-        let active: Vec<&Task> = s.tasks.iter().filter(|t| reserves(t)).collect();
+        let active: Vec<&Task> = s.tasks.iter().filter(|t| reserves_worker(t)).collect();
         let outputs = strings(
             task.node
                 .get("write_paths")
@@ -1093,7 +1098,7 @@ impl Workflow {
             1000,
         )
         .unwrap_or_default();
-        for other in &active {
+        for other in s.tasks.iter().filter(|t| reserves_paths(t)) {
             let paths = strings(
                 other
                     .node
@@ -1139,6 +1144,69 @@ impl Workflow {
         None
     }
 }
+fn candidate_available(s: &State, task: &Task) -> bool {
+    let Some(candidate) = task.candidate.as_ref() else {
+        return false;
+    };
+    let pool = s
+        .catalog
+        .as_ref()
+        .map(|c| &c["candidates"])
+        .unwrap_or(&s.request["pool"]);
+    pool.as_array().is_some_and(|pool| {
+        pool.iter().any(|current| {
+            current["available"] == true
+                && [
+                    "id",
+                    "provider",
+                    "model",
+                    "effort",
+                    "executable",
+                    "resource_key",
+                    "args",
+                ]
+                .iter()
+                .all(|key| current.get(*key) == candidate.get(*key))
+                && strings(task.node.get("requirements"), 128)
+                    .unwrap_or_default()
+                    .iter()
+                    .all(|r| {
+                        current["capabilities"]
+                            .as_array()
+                            .is_some_and(|caps| caps.iter().any(|c| c == r))
+                    })
+        })
+    })
+}
+fn reconcile_candidates(s: &mut State) -> bool {
+    let invalid: Vec<Value> = s
+        .tasks
+        .iter()
+        .filter(|task| {
+            ["routed", "preparing", "prepared", "launching"].contains(&task.state.as_str())
+                && !candidate_available(s, task)
+                && !s.actions.iter().any(|a| {
+                    a["task_id"] == task.node["id"]
+                        && a["id"]
+                            .as_str()
+                            .is_some_and(|id| s.claimed_actions.contains(id))
+                })
+        })
+        .map(|task| task.node["id"].clone())
+        .collect();
+    if invalid.is_empty() {
+        return false;
+    }
+    s.actions.retain(|a| !invalid.contains(&a["task_id"]));
+    for task in &mut s.tasks {
+        if invalid.contains(&task.node["id"]) {
+            task.candidate = None;
+            task.prepared = None;
+            task.state = "needs_pool".into();
+        }
+    }
+    true
+}
 fn matching_catalog_candidate<'a>(catalog: &'a Value, candidate: &Value) -> Option<&'a Value> {
     catalog["candidates"].as_array()?.iter().find(|current| {
         [
@@ -1179,17 +1247,11 @@ fn resource_capacity(candidate: &Value) -> usize {
         .filter(|n| (1..=16).contains(n))
         .unwrap_or(1) as usize
 }
-fn reserves(task: &Task) -> bool {
-    [
-        "preparing",
-        "prepared",
-        "launching",
-        "running",
-        "unknown",
-        "verifying",
-        "integrating",
-    ]
-    .contains(&task.state.as_str())
+fn reserves_worker(task: &Task) -> bool {
+    ["preparing", "prepared", "launching", "running", "unknown"].contains(&task.state.as_str())
+}
+fn reserves_paths(task: &Task) -> bool {
+    reserves_worker(task) || ["verifying", "integrating"].contains(&task.state.as_str())
 }
 fn clean_candidate(candidate: &Value) -> Value {
     let mut c = candidate.clone();

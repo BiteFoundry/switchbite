@@ -864,3 +864,77 @@ fn parallelism_changes_preserve_claims_and_resume_queued_work() {
     assert_eq!(action(&s, "prepare", "one")["id"], first);
     assert_eq!(action(&s, "prepare", "two")["kind"], "prepare");
 }
+#[test]
+fn quota_quarantine_invalidates_unclaimed_launch_but_keeps_claimed_launch() {
+    let dir = tempfile::tempdir().unwrap();
+    let w = Workflow::new(dir.path().to_path_buf());
+    let mut s = w.start(&parallel_request(Some(3))).unwrap();
+    let run = s["run_id"].as_str().unwrap().to_owned();
+    for id in ["one", "two", "three"] {
+        s = send(
+            &w,
+            &run,
+            action(&s, "route", id),
+            json!({"status":"ready","candidate_id":"a"}),
+        );
+    }
+    for id in ["one", "two", "three"] {
+        s = send(&w, &run, action(&s, "prepare", id), prepared());
+    }
+    let unclaimed = action(&s, "launch", "two")["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let claimed = action(&s, "launch", "three")["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    assert!(w.claim(&run, &claimed).unwrap());
+    s = send(
+        &w,
+        &run,
+        action(&s, "launch", "one"),
+        json!({"status":"failed","error":{"code":"rate_limited"}}),
+    );
+    assert!(!w.claim(&run, &unclaimed).unwrap());
+    assert_eq!(action(&s, "refresh_pool", "two")["kind"], "refresh_pool");
+    assert_eq!(action(&s, "launch", "three")["id"], claimed);
+    s = send(
+        &w,
+        &run,
+        action(&s, "launch", "three"),
+        json!({"status":"running","execution_id":claimed}),
+    );
+    assert_eq!(task(&s, "three")["status"], "running");
+}
+#[test]
+fn completed_execution_releases_worker_slot_but_retains_path_reservation() {
+    let dir = tempfile::tempdir().unwrap();
+    let w = Workflow::new(dir.path().to_path_buf());
+    let mut req = parallel_request(Some(3));
+    req["max_parallel"] = json!(1);
+    req["plan"]["nodes"][2]["outputs"] = json!(["src/one/child"]);
+    let mut s = w.start(&req).unwrap();
+    let run = s["run_id"].as_str().unwrap().to_owned();
+    for id in ["one", "two", "three"] {
+        s = send(
+            &w,
+            &run,
+            action(&s, "route", id),
+            json!({"status":"ready","candidate_id":"a"}),
+        );
+    }
+    s = send(&w, &run, action(&s, "prepare", "one"), prepared());
+    s = send(
+        &w,
+        &run,
+        action(&s, "launch", "one"),
+        json!({"status":"completed","completion_verified":true}),
+    );
+    assert_eq!(action(&s, "verify", "one")["kind"], "verify");
+    assert_eq!(action(&s, "prepare", "two")["kind"], "prepare");
+    assert_eq!(
+        task(&s, "three")["wait_reason"],
+        json!({"code":"write_conflict","task_id":"one"})
+    );
+}
