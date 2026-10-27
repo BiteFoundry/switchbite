@@ -440,3 +440,124 @@ fn concurrent_integrations_are_serialized_through_receipts() {
     assert_eq!(first.join().unwrap()["status"], "integrated");
     assert_eq!(second.join().unwrap()["status"], "integrated");
 }
+#[cfg(windows)]
+#[test]
+fn restart_detects_stopped_owned_job_without_relaunch() {
+    if let Some(root) = std::env::var_os("HOST_RESTART_DRIVER") {
+        let root = std::path::PathBuf::from(root);
+        let launch: Value =
+            serde_json::from_slice(&fs::read(root.join("launch.json")).unwrap()).unwrap();
+        let host = LocalHost::new(
+            &root.join("repo"),
+            &root.join("state"),
+            &json!({"timeout_seconds":30}),
+        )
+        .unwrap();
+        let _ = host.perform(&launch);
+        return;
+    }
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path();
+    let repo = root.join("repo");
+    fs::create_dir(&repo).unwrap();
+    git(&repo, &["init"]);
+    git(
+        &repo,
+        &[
+            "-c",
+            "user.name=Test",
+            "-c",
+            "user.email=test@localhost",
+            "commit",
+            "--allow-empty",
+            "-m",
+            "base",
+        ],
+    );
+    let source = root.join("restart_worker.rs");
+    fs::write(&source, r#"fn main() {
+        if std::env::args().any(|a| a == "descendant") {
+            std::thread::sleep(std::time::Duration::from_secs(3));
+            std::fs::write("restart-descendant-wrote", "bad").unwrap();
+        } else {
+            std::process::Command::new(std::env::current_exe().unwrap()).arg("descendant").spawn().unwrap();
+            std::fs::write("restart-started", "yes").unwrap();
+            std::thread::sleep(std::time::Duration::from_secs(30));
+        }
+    }"#).unwrap();
+    let exe = root.join("restart_worker.exe");
+    assert!(
+        Command::new("rustc")
+            .arg(&source)
+            .arg("-o")
+            .arg(&exe)
+            .status()
+            .unwrap()
+            .success()
+    );
+    let state = root.join("state");
+    let host = LocalHost::new(&repo, &state, &json!({})).unwrap();
+    let task = json!({"id":"restart-task","objective":"work"});
+    let prepared = host
+        .perform(&action("restart-prepare", "prepare", json!({"task":task})))
+        .unwrap();
+    let worker_dir = std::path::PathBuf::from(prepared["workspace"].as_str().unwrap());
+    let launch = action(
+        "restart-launch",
+        "launch",
+        json!({"task":task,"prepared":prepared,"candidate":{"provider":"codex","executable":exe,"model":"m","effort":"high"}}),
+    );
+    fs::write(
+        root.join("launch.json"),
+        serde_json::to_vec(&launch).unwrap(),
+    )
+    .unwrap();
+    let mut driver = Command::new(std::env::current_exe().unwrap())
+        .arg("--exact")
+        .arg("restart_detects_stopped_owned_job_without_relaunch")
+        .arg("--nocapture")
+        .env("HOST_RESTART_DRIVER", root)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .unwrap();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while !worker_dir.join("restart-started").exists() {
+        assert!(std::time::Instant::now() < deadline);
+        std::thread::sleep(std::time::Duration::from_millis(25));
+    }
+    let executions = state.join("executions");
+    while !executions.exists()
+        || !fs::read_dir(&executions)
+            .unwrap()
+            .filter_map(Result::ok)
+            .any(|x| x.path().extension().is_some_and(|e| e == "json"))
+    {
+        assert!(std::time::Instant::now() < deadline);
+        std::thread::sleep(std::time::Duration::from_millis(25));
+    }
+    driver.kill().unwrap();
+    driver.wait().unwrap();
+    let recovered = LocalHost::new(&repo, &state, &json!({})).unwrap();
+    let mut sequence = 0;
+    loop {
+        sequence += 1;
+        let result = recovered
+            .perform(&action(
+                &format!("restart-inspect-{sequence}"),
+                "inspect",
+                json!({"execution_id":"restart-launch"}),
+            ))
+            .unwrap();
+        if result["status"] == "failed" {
+            assert_eq!(result["reason"], "owner_stopped");
+            assert_eq!(result["completion_verified"], false);
+            break;
+        }
+        assert!(std::time::Instant::now() < deadline);
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    assert_eq!(recovered.perform(&launch).unwrap()["status"], "unknown");
+    std::thread::sleep(std::time::Duration::from_millis(3200));
+    assert!(!worker_dir.join("restart-descendant-wrote").exists());
+}

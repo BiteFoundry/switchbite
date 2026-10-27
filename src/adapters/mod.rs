@@ -554,11 +554,23 @@ impl LocalHost {
             .stdin(Stdio::null())
             .stdout(Stdio::from(stdout))
             .stderr(Stdio::from(stderr));
-        let mut tree = process::Tree::spawn(&mut cmd)
+        let job_name = format!(
+            "Local\\Switchbite-{}",
+            hash(&format!("{}:{tag}", self.state.display()))
+        );
+        let mut tree = process::Tree::spawn(&mut cmd, &job_name)
             .map_err(|_| HostError("process_ownership_unavailable"))?;
         if launch {
             fs::create_dir_all(&execution_dir).map_err(|_| HostError("io_error"))?;
-            if write_atomic(&execution_dir.join(format!("{}.json", hash(tag))), &json!({"execution_id":tag,"token":hash(tag),"pid":tree.child.id(),"owner_pid":std::process::id(),"started_unix_ms":SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_millis()})).is_err() {
+            let identity = match (process::owner_creation_time(), tree.creation_time()) {
+                (Ok(owner), Ok(worker)) => (owner, worker),
+                _ => {
+                    tree.terminate()
+                        .map_err(|_| HostError("process_ownership_unavailable"))?;
+                    return Err(HostError("process_ownership_unavailable"));
+                }
+            };
+            if write_atomic(&execution_dir.join(format!("{}.json", hash(tag))), &json!({"execution_id":tag,"token":hash(tag),"pid":tree.child.id(),"owner_pid":std::process::id(),"owner_creation":identity.0,"worker_creation":identity.1,"job_name":job_name,"started_unix_ms":SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_millis()})).is_err() {
                 tree.terminate().map_err(|_| HostError("process_ownership_unavailable"))?;
                 return Err(HostError("io_error"));
             }
@@ -743,6 +755,38 @@ impl LocalHost {
             .join(format!("{}.json", hash(id)));
         if record.exists() {
             return Ok(value_file(&record)?["result"].clone());
+        }
+        let execution = self
+            .state
+            .join("executions")
+            .join(format!("{}.json", hash(id)));
+        if execution.exists() {
+            let saved = value_file(&execution)?;
+            let expected_job = format!(
+                "Local\\Switchbite-{}",
+                hash(&format!("{}:{id}", self.state.display()))
+            );
+            if saved["execution_id"] == id
+                && saved["token"] == hash(id)
+                && saved["job_name"] == expected_job
+            {
+                let pid = saved["pid"].as_u64().and_then(|v| u32::try_from(v).ok());
+                let owner = saved["owner_pid"]
+                    .as_u64()
+                    .and_then(|v| u32::try_from(v).ok());
+                let worker_time = saved["worker_creation"].as_u64();
+                let owner_time = saved["owner_creation"].as_u64();
+                if let (Some(pid), Some(owner), Some(worker_time), Some(owner_time)) =
+                    (pid, owner, worker_time, owner_time)
+                    && process::stopped(owner, owner_time) == Some(true)
+                    && process::stopped(pid, worker_time) == Some(true)
+                    && process::job_drained(&expected_job) == Some(true)
+                {
+                    return Ok(
+                        json!({"status":"failed","execution_id":id,"completion_verified":false,"reason":"owner_stopped"}),
+                    );
+                }
+            }
         }
         if p.get("operation").and_then(Value::as_str) == Some("cancel") {
             let executions = self.state.join("executions");
