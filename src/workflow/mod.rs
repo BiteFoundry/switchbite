@@ -566,8 +566,15 @@ impl Workflow {
                 s.tasks[i].prepared = None;
                 s.tasks[i].execution_id = None;
             }
-            "route" => {
+            "route" | "review_route" => {
                 let i = index.ok_or(err("invalid_receipt"))?;
+                if kind == "review_route"
+                    && (result["status"] != "ready"
+                        || result["reason_codes"] != json!(["coordinator_review"])
+                        || text(result, "summary", 4000).is_err())
+                {
+                    return Err(err("invalid_receipt"));
+                }
                 match result["status"].as_str() {
                     Some("ready") => {
                         let cid = text(result, "candidate_id", 128)
@@ -628,21 +635,39 @@ impl Workflow {
                                         })
                             })
                         });
+                        if kind == "review_route" && !still_available {
+                            return Err(err("invalid_receipt"));
+                        }
                         s.tasks[i].candidate = still_available.then_some(c);
                         s.tasks[i].state =
                             if still_available { "routed" } else { "pending" }.into();
                     }
-                    Some("hold") => {
-                        s.tasks[i].state = if result["reason_codes"]
-                            .as_array()
-                            .is_some_and(|r| r.iter().any(|v| v == "context_insufficient"))
+                    Some("hold") if kind == "route" => {
+                        let reasons = result["reason_codes"].as_array();
+                        if reasons.is_some_and(|r| r.iter().any(|v| v == "context_insufficient"))
                             && !s.tasks[i].context_gathered
                         {
-                            "needs_context"
+                            s.tasks[i].state = "needs_context".into();
+                        } else if result["next_action"] == "request_review"
+                            && reasons.is_some_and(|r| {
+                                r.iter().any(|v| v == "low_confidence" || v == "tie")
+                            })
+                        {
+                            s.tasks[i].state = "needs_route_review".into();
+                            self.action(
+                                &mut s,
+                                "review_route",
+                                Some(i),
+                                json!({
+                                    "route_input":a["payload"]["route_input"],
+                                    "candidate_snapshot":a["payload"]["candidate_snapshot"],
+                                    "catalog_revision":a["payload"]["catalog_revision"],
+                                    "route_result":result
+                                }),
+                            );
                         } else {
-                            "needs_pool"
+                            s.tasks[i].state = "needs_pool".into();
                         }
-                        .into();
                     }
                     _ => return Err(err("invalid_receipt")),
                 }

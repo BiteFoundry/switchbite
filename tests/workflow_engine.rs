@@ -529,7 +529,21 @@ fn role_policies_exclude_dependency_producers_from_review() {
     switchbite::routing::normalize(input).unwrap();
     let event = json!({"action_id":a["id"],"event_id":"bad-reviewer","result":{"status":"ready","candidate_id":"a"}});
     assert_eq!(w.observe(run, &event).unwrap_err().code, "invalid_receipt");
-    let s = send(&w, run, a, json!({"status":"ready","candidate_id":"b"}));
+    let s = send(
+        &w,
+        run,
+        a,
+        json!({"status":"hold","reason_codes":["tie"],"next_action":"request_review"}),
+    );
+    let a = action(&s, "review_route", "review");
+    let event = json!({"action_id":a["id"],"event_id":"bad-review-choice","result":{"status":"ready","candidate_id":"a","reason_codes":["coordinator_review"],"summary":"Choice"}});
+    assert_eq!(w.observe(run, &event).unwrap_err().code, "invalid_receipt");
+    let s = send(
+        &w,
+        run,
+        a,
+        json!({"status":"ready","candidate_id":"b","reason_codes":["coordinator_review"],"summary":"Independent reviewer"}),
+    );
     assert_eq!(action(&s, "prepare", "review")["kind"], "prepare");
 }
 #[test]
@@ -957,5 +971,64 @@ fn completed_execution_releases_worker_slot_but_retains_path_reservation() {
     assert_eq!(
         task(&s, "three")["wait_reason"],
         json!({"code":"write_conflict","task_id":"one"})
+    );
+}
+#[test]
+fn low_confidence_requests_review_and_rejects_foreign_or_stale_choices() {
+    let dir = tempfile::tempdir().unwrap();
+    let w = Workflow::new(dir.path().to_path_buf());
+    let req = request();
+    let mut s = w.start(&req).unwrap();
+    let run = s["run_id"].as_str().unwrap().to_owned();
+    let route = action(&s, "route", "one").clone();
+    s = send(
+        &w,
+        &run,
+        &route,
+        json!({"status":"hold","reason_codes":["low_confidence"],"next_action":"request_review"}),
+    );
+    let review = action(&s, "review_route", "one").clone();
+    assert_eq!(
+        review["payload"]["route_input"],
+        route["payload"]["route_input"]
+    );
+    assert_eq!(
+        review["payload"]["candidate_snapshot"],
+        route["payload"]["candidate_snapshot"]
+    );
+    let invalid = |id: &str, event: &str| json!({"action_id":review["id"],"event_id":event,"result":{"status":"ready","candidate_id":id,"reason_codes":["coordinator_review"],"summary":"Choice"}});
+    assert_eq!(
+        w.observe(&run, &invalid("foreign", "foreign"))
+            .unwrap_err()
+            .code,
+        "invalid_receipt"
+    );
+    s = send(
+        &w,
+        &run,
+        action(&s, "route", "two"),
+        json!({"status":"hold","reason_codes":["no_eligible_candidates"],"next_action":"refresh_pool"}),
+    );
+    let mut pool = req["pool"].clone();
+    pool[0]["available"] = json!(false);
+    s = send(
+        &w,
+        &run,
+        action(&s, "refresh_pool", "two"),
+        json!({"pool":pool}),
+    );
+    assert_eq!(
+        w.observe(&run, &invalid("a", "stale")).unwrap_err().code,
+        "invalid_receipt"
+    );
+    s = send(
+        &w,
+        &run,
+        action(&s, "review_route", "one"),
+        json!({"status":"ready","candidate_id":"b","reason_codes":["coordinator_review"],"summary":"Eligible candidate"}),
+    );
+    assert_eq!(
+        action(&s, "prepare", "one")["payload"]["candidate"]["id"],
+        "b"
     );
 }
