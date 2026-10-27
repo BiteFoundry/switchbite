@@ -140,6 +140,7 @@ fn same_resource_waits_and_cancellation_reconciles_unobserved_launch() {
     );
     let s = send(&w, run, action(&s, "prepare", "one"), prepared());
     let launch_id = action(&s, "launch", "one")["id"].clone();
+    assert!(w.claim(run, launch_id.as_str().unwrap()).unwrap());
     let s = w.control(run, "cancel").unwrap();
     assert_eq!(
         action(&s, "inspect", "one")["payload"]["execution_id"],
@@ -216,7 +217,10 @@ fn runs_have_unique_action_ids_and_cancel_unknown_is_reconciled() {
         json!({"status":"ready","candidate_id":"a"}),
     );
     let a = send(&w, run, action(&a, "prepare", "one"), prepared());
-    assert_eq!(action(&a, "launch", "one")["kind"], "launch");
+    assert!(
+        w.claim(run, action(&a, "launch", "one")["id"].as_str().unwrap())
+            .unwrap()
+    );
     let a = w.control(run, "cancel").unwrap();
     let inspection = action(&a, "inspect", "one").clone();
     let a = send(&w, run, &inspection, json!({"status":"unknown"}));
@@ -535,4 +539,85 @@ fn rejects_wrong_and_missing_execution_ids() {
         json!({"status":"completed","completion_verified":true}),
     );
     assert_eq!(action(&s, "verify", "one")["kind"], "verify");
+}
+
+#[test]
+fn cancellation_retains_claimed_integration_and_records_receipt() {
+    let dir = tempfile::tempdir().unwrap();
+    let w = Workflow::new(dir.path().to_path_buf());
+    let s = w.start(&request()).unwrap();
+    let run = s["run_id"].as_str().unwrap();
+    let s = send(
+        &w,
+        run,
+        action(&s, "route", "one"),
+        json!({"status":"ready","candidate_id":"a"}),
+    );
+    let s = send(&w, run, action(&s, "prepare", "one"), prepared());
+    let s = send(
+        &w,
+        run,
+        action(&s, "launch", "one"),
+        json!({"status":"completed","completion_verified":true}),
+    );
+    let s = send(
+        &w,
+        run,
+        action(&s, "verify", "one"),
+        json!({"status":"passed","evidence":[]}),
+    );
+    let integration = action(&s, "integrate", "one").clone();
+    let id = integration["id"].as_str().unwrap();
+    assert!(w.claim(run, id).unwrap());
+    let restarted = Workflow::new(dir.path().to_path_buf());
+    let s = restarted.control(run, "cancel").unwrap();
+    assert_eq!(action(&s, "integrate", "one")["id"], id);
+    assert!(restarted.claim(run, id).unwrap());
+    let s = send(
+        &restarted,
+        run,
+        &integration,
+        json!({"status":"integrated","commit":"0123456789012345678901234567890123456789"}),
+    );
+    assert_eq!(s["status"], "cancelled");
+    assert_eq!(s["tasks"][0]["status"], "done");
+    assert!(
+        s["events"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|e| e["kind"] == "integrate" && e["status"] == "integrated")
+    );
+    assert!(
+        !s["actions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|a| a["task_id"] == "three")
+    );
+}
+#[test]
+fn cancelled_unclaimed_launch_does_not_create_phantom_execution() {
+    let dir = tempfile::tempdir().unwrap();
+    let w = Workflow::new(dir.path().to_path_buf());
+    let s = w.start(&request()).unwrap();
+    let run = s["run_id"].as_str().unwrap();
+    let s = send(
+        &w,
+        run,
+        action(&s, "route", "one"),
+        json!({"status":"ready","candidate_id":"a"}),
+    );
+    let s = send(&w, run, action(&s, "prepare", "one"), prepared());
+    let launch = action(&s, "launch", "one")["id"].as_str().unwrap();
+    let cancelled = w.control(run, "cancel").unwrap();
+    assert!(!w.claim(run, launch).unwrap());
+    assert_eq!(cancelled["tasks"][0]["status"], "cancelled");
+    assert!(
+        !cancelled["actions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|a| a["task_id"] == "one")
+    );
 }

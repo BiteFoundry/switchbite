@@ -84,6 +84,8 @@ struct State {
     request: Value,
     tasks: Vec<Task>,
     actions: Vec<Value>,
+    #[serde(default)]
+    claimed_actions: BTreeSet<String>,
     events: BTreeMap<String, Value>,
     #[serde(default)]
     recent_events: Vec<Value>,
@@ -251,6 +253,7 @@ impl Workflow {
             request: request.clone(),
             tasks,
             actions: vec![],
+            claimed_actions: BTreeSet::new(),
             events: BTreeMap::new(),
             recent_events: vec![],
             sequence: 0,
@@ -290,14 +293,20 @@ impl Workflow {
         }
         let _g = MUTATION.lock().map_err(|_| err("storage_error"))?;
         let _lock = self.lock()?;
-        let state = self.load(run_id)?;
+        let mut state = self.load(run_id)?;
         let Some(action) = state.actions.iter().find(|a| a["id"] == action_id) else {
             return Ok(false);
         };
-        Ok(state.status == "running"
+        let allowed = state.status == "running"
             || (state.status == "cancelled"
-                && action["kind"] == "inspect"
-                && action["payload"]["operation"] == "cancel"))
+                && ((action["kind"] == "inspect" && action["payload"]["operation"] == "cancel")
+                    || (state.claimed_actions.contains(action_id)
+                        && ["prepare", "verify", "integrate", "gather_context"]
+                            .contains(&action["kind"].as_str().unwrap_or("")))));
+        if allowed && state.claimed_actions.insert(action_id.to_owned()) {
+            self.save(&mut state)?;
+        }
+        Ok(allowed)
     }
     pub fn control(&self, run_id: &str, action: &str) -> Result<Value, WorkflowError> {
         let _g = MUTATION.lock().map_err(|_| err("storage_error"))?;
@@ -313,14 +322,34 @@ impl Workflow {
                 s.status = "cancelled".into();
                 // A launch lease may already be executing even if no receipt was observed.
                 for a in &s.actions {
-                    if a["kind"] == "launch" {
+                    if a["kind"] == "launch"
+                        && a["id"]
+                            .as_str()
+                            .is_some_and(|id| s.claimed_actions.contains(id))
+                    {
                         if let Some(i) = s.tasks.iter().position(|t| t.node["id"] == a["task_id"]) {
                             s.tasks[i].execution_id = a["id"].as_str().map(str::to_owned);
                             s.tasks[i].state = "unknown".into();
                         }
                     }
                 }
-                s.actions.clear();
+                s.actions.retain(|a| {
+                    a["id"]
+                        .as_str()
+                        .is_some_and(|id| s.claimed_actions.contains(id))
+                        && ["prepare", "verify", "integrate", "gather_context"]
+                            .contains(&a["kind"].as_str().unwrap_or(""))
+                });
+                s.claimed_actions
+                    .retain(|id| s.actions.iter().any(|a| a["id"] == *id));
+                for task in &mut s.tasks {
+                    if task.state != "done"
+                        && !["running", "unknown"].contains(&task.state.as_str())
+                        && !s.actions.iter().any(|a| a["task_id"] == task.node["id"])
+                    {
+                        task.state = "cancelled".into();
+                    }
+                }
                 for i in 0..s.tasks.len() {
                     if s.tasks[i].execution_id.is_some()
                         && ["running", "unknown"].contains(&s.tasks[i].state.as_str())
@@ -654,6 +683,8 @@ impl Workflow {
             s.actions
                 .retain(|a| a["kind"] != "refresh_pool" && a["kind"] != "route");
         }
+        s.claimed_actions
+            .retain(|id| s.actions.iter().any(|a| a["id"] == *id));
         s.events.insert(eid.to_string(), json!(digest));
         self.schedule(&mut s);
         self.save(&mut s)?;
