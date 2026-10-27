@@ -2,7 +2,7 @@
 //!
 //! Stackbite has no native plugin registry. This installs the coordinator CLI's
 //! project MCP settings without modifying Stackbite, global settings or prompts.
-use crate::{agent, connect, contracts, local_laya::LayaConfig};
+use crate::{connect, contracts, local_laya::LayaConfig};
 use serde::Serialize;
 use serde_json::{Value, json};
 use std::{
@@ -10,7 +10,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
-const NEXT_ACTION: &str = "Start a new coordinator CLI session in this workspace, approve project trust/MCP when prompted, and check switchbite-stackbite's switchbite_status. The coordinator decomposes work, validates dependencies, routes each newly ready task, then dispatches through its authorized host tools. Jev needs TYPESAFE_API_KEY in the coordinator environment; Laya needs its configured local server.";
+const NEXT_ACTION: &str = "Start a new coordinator CLI session in this workspace, approve project trust/MCP when prompted, and use switchbite-stackbite's switchbite_start and switchbite_next. The coordinator decomposes work, validates dependencies, routes each newly ready task, then dispatches through its authorized host tools. Jev needs TYPESAFE_API_KEY in the coordinator environment; Laya needs its configured local server.";
 const PLUGIN_KIND: &str = "switchbite.stackbite-coordinator-mcp";
 pub const SERVER_NAME: &str = "switchbite-stackbite";
 
@@ -24,7 +24,7 @@ impl JudgeConfig {
     fn launch(&self) -> Result<(Vec<String>, Value), InstallError> {
         match self {
             Self::Jev => Ok((
-                ["serve", "--profile", "agent", "--judge", "jev"]
+                ["serve", "--profile", "workflow", "--judge", "jev"]
                     .map(String::from)
                     .to_vec(),
                 json!({"kind":"jev", "model":contracts::MODEL, "required_env":["TYPESAFE_API_KEY"], "fallback":"hold"}),
@@ -35,7 +35,7 @@ impl JudgeConfig {
                     [
                         "serve",
                         "--profile",
-                        "agent",
+                        "workflow",
                         "--judge",
                         "laya",
                         "--endpoint",
@@ -157,7 +157,7 @@ pub fn install(
     managed_root: &Path,
 ) -> Result<InstallReport, InstallError> {
     // Validate before touching files, including for direct library callers.
-    let (launch_args, judge) = options.judge.launch()?;
+    let (mut launch_args, judge) = options.judge.launch()?;
     let forward_typesafe = matches!(options.judge, JudgeConfig::Jev);
     if !options.workspace.is_absolute()
         || !source_executable.is_absolute()
@@ -177,6 +177,14 @@ pub fn install(
             "Workspace is archived. Restore it using ARCHIVED.json before installing.",
         ));
     }
+    launch_args.push("--workspace".into());
+    launch_args.push(
+        options
+            .workspace
+            .to_str()
+            .ok_or_else(|| failure("Workspace path must be valid Unicode."))?
+            .to_owned(),
+    );
     let clients: &[&str] = match options.client.as_str() {
         "codex" => &["codex"],
         "claude" => &["claude"],
@@ -221,7 +229,7 @@ pub fn install(
         "executable": executable,
         "args": args,
         "judge": judge,
-        "coordinator_guidance": agent::INSTRUCTIONS,
+        "coordinator_guidance": crate::workflow_interface::INSTRUCTIONS,
         "next_action": NEXT_ACTION
     });
     let text = format!(

@@ -233,7 +233,15 @@ fn jev_project_docking_preserves_generic_server_and_only_stores_key_references()
     );
     assert_eq!(
         claude["mcpServers"][SERVER_NAME]["args"],
-        serde_json::json!(["serve", "--profile", "agent", "--judge", "jev"])
+        serde_json::json!([
+            "serve",
+            "--profile",
+            "workflow",
+            "--judge",
+            "jev",
+            "--workspace",
+            workspace.to_str().unwrap()
+        ])
     );
     assert_eq!(
         claude["mcpServers"][SERVER_NAME]["env"]["TYPESAFE_API_KEY"],

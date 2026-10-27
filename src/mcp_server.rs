@@ -17,6 +17,7 @@ pub enum Profile {
     Docking,
     Cli,
     Agent,
+    Workflow,
 }
 #[derive(Clone)]
 pub struct McpServer {
@@ -26,6 +27,7 @@ pub struct McpServer {
     profile: Profile,
     runtime: Arc<crate::runtime::DecisionRuntime>,
     agent_judge: Option<Arc<crate::agent::ConfiguredJudge>>,
+    workflow_workspace: Option<std::path::PathBuf>,
 }
 impl McpServer {
     pub fn new(plugin: Plugin) -> Self {
@@ -46,6 +48,7 @@ impl McpServer {
                     .expect("default runtime"),
             ),
             agent_judge: None,
+            workflow_workspace: None,
         }
     }
     pub fn agent(
@@ -65,6 +68,79 @@ impl McpServer {
         server.runtime = Arc::new(crate::runtime::DecisionRuntime::new(config)?);
         server.agent_judge = judge;
         Ok(server)
+    }
+    pub fn workflow(
+        workspace: std::path::PathBuf,
+        judge: Option<Arc<crate::agent::ConfiguredJudge>>,
+        config: crate::runtime::RuntimeConfig,
+    ) -> Result<Self, crate::runtime::RuntimeError> {
+        let mut server = Self::with_profile(Plugin::default(), Profile::Workflow);
+        server.runtime = Arc::new(crate::runtime::DecisionRuntime::new(config)?);
+        server.workflow_workspace = Some(workspace);
+        server.agent_judge = judge;
+        Ok(server)
+    }
+    async fn workflow_call(&self, name: &str, args: Value) -> CallToolResponse {
+        let object = args.as_object().unwrap();
+        let valid = match name {
+            "switchbite_start" => object.len() == 1 && args["request"].is_object(),
+            "switchbite_observe" => {
+                object.len() == 2 && args["run_id"].is_string() && args["event"].is_object()
+            }
+            "switchbite_next" => {
+                object
+                    .keys()
+                    .all(|key| ["run_id", "operation"].contains(&key.as_str()))
+                    && args["run_id"].is_string()
+                    && (args.get("operation").is_none()
+                        || matches!(
+                            args["operation"].as_str(),
+                            Some("next" | "status" | "pause" | "resume" | "cancel")
+                        ))
+            }
+            _ => false,
+        };
+        if !valid || crate::contracts::bounded(&args, crate::contracts::MAX_JSON_BYTES).is_err() {
+            return CallToolResult::structured_error(crate::workflow_interface::invalid()).into();
+        }
+        let Ok(permit) = self.permits.clone().try_acquire_owned() else {
+            return CallToolResult::structured_error(
+                crate::runtime::RuntimeError::from_code("runtime_busy").to_value(),
+            )
+            .into();
+        };
+        let interface = crate::workflow_interface::Interface::new(
+            self.workflow_workspace.clone().expect("workflow workspace"),
+            self.agent_judge.clone(),
+        );
+        let operation = name.to_owned();
+        let outcome = tokio::task::spawn_blocking(move || {
+            let _permit = permit;
+            let run = args["run_id"].as_str().unwrap_or("");
+            match operation.as_str() {
+                "switchbite_start" => interface.start(&args["request"]),
+                "switchbite_observe" => interface.observe(run, &args["event"]),
+                _ => match args["operation"].as_str().unwrap_or("next") {
+                    "next" => interface.next(run),
+                    "status" => interface.status(run),
+                    action => interface.control(run, action),
+                },
+            }
+        })
+        .await;
+        match outcome {
+            Ok(Ok(value)) => {
+                let summary = value["summary"]
+                    .as_str()
+                    .unwrap_or("Workflow updated.")
+                    .to_owned();
+                let mut result = CallToolResult::structured(value);
+                result.content = vec![ContentBlock::text(summary)];
+                result.into()
+            }
+            Ok(Err(error)) => CallToolResult::structured_error(error).into(),
+            Err(_) => CallToolResult::structured_error(crate::workflow_interface::invalid()).into(),
+        }
     }
     async fn route(&self, args: Value) -> CallToolResponse {
         if crate::agent::validate_arguments(&args).is_err() {
@@ -135,7 +211,9 @@ impl ServerHandler for McpServer {
         let mut info = ServerConfig::default();
         info.capabilities = ServerCapabilities::builder().enable_tools().build();
         info.server_info = Implementation::new("Switchbite", env!("CARGO_PKG_VERSION"));
-        info.instructions = Some(if self.profile == Profile::Agent {
+        info.instructions = Some(if self.profile == Profile::Workflow {
+            crate::workflow_interface::INSTRUCTIONS
+        } else if self.profile == Profile::Agent {
             crate::agent::INSTRUCTIONS
         } else if self.profile == Profile::Cli {
             "Use switchbite_decide to propose worker assignments, switchbite_validate_plan for supplied DAGs, switchbite_feedback for outcome proposals, and switchbite_status for configuration presence. Never execute or claim completion based only on a proposal."
@@ -148,7 +226,9 @@ impl ServerHandler for McpServer {
         _: RequestContext<RoleServer>,
     ) -> Result<ListToolsResult, ErrorData> {
         Ok(ListToolsResult {
-            tools: if self.profile == Profile::Agent {
+            tools: if self.profile == Profile::Workflow {
+                crate::workflow_interface::tools()
+            } else if self.profile == Profile::Agent {
                 crate::agent::tools()
             } else if self.profile == Profile::Cli {
                 crate::cli_tools::tools()
@@ -164,6 +244,9 @@ impl ServerHandler for McpServer {
         context: RequestContext<RoleServer>,
     ) -> Result<CallToolResponse, ErrorData> {
         let args = Value::Object(call.arguments.unwrap_or_default());
+        if self.profile == Profile::Workflow {
+            return Ok(self.workflow_call(call.name.as_ref(), args).await);
+        }
         if self.profile == Profile::Agent {
             if context.ct.is_cancelled() {
                 return Ok(CallToolResult::structured_error(
@@ -320,6 +403,24 @@ where
     serve_server(McpServer::agent_with_judge(judge, config)?, reader, writer).await
 }
 
+pub async fn serve_workflow<R, W>(
+    workspace: std::path::PathBuf,
+    judge: Option<Arc<crate::agent::ConfiguredJudge>>,
+    config: crate::runtime::RuntimeConfig,
+    reader: R,
+    writer: W,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>>
+where
+    R: AsyncRead + Send + Unpin + 'static,
+    W: AsyncWrite + Send + Unpin + 'static,
+{
+    serve_server(
+        McpServer::workflow(workspace, judge, config)?,
+        reader,
+        writer,
+    )
+    .await
+}
 async fn serve_server<R, W>(
     server: McpServer,
     reader: R,

@@ -1,48 +1,9 @@
 # Coordinate with Switchbite
 
-You decompose the user's authorized project; the configured judge (Jev or local
-Laya) evaluates each task against the supplied model pool. Before delegating:
+The `switchbite-stackbite` project server exposes `switchbite_start`, `switchbite_next`, and `switchbite_observe`. Start with the user's authorized goal, a factual worker pool, and optionally a plan. Decompose work into bounded tasks with objectives, dependencies, owned outputs, acceptance checks, and relevant context. Supply the plan when the workflow requests it.
 
-1. Create bounded tasks with an objective, acceptance checks, owned outputs and
-   `depends_on` IDs. Validate the DAG with `switchbite_validate_plan`.
-2. Call **this server's** `switchbite_status`. With the Stackbite installer its
-   name is `switchbite-stackbite`, separate from a user's generic `switchbite`.
-3. Route only tasks with no dependencies or with verified successful receipts
-   for all dependencies. Parallel tasks need separate worker reservations and
-   non-conflicting outputs. Keep that state in the host, not in Jev.
+Call next and carry out its actions using your available host tools. Record each result with its action ID, a stable event ID, and evidence. Route decisions use the configured Jev or Laya judge and preserve its exact candidate identity. Execute independent tasks concurrently only within the workflow's reservations. Inspect unknown executions rather than launching duplicates. Verify worker completion and integrate the result before dependent work begins. Gather missing context and follow bounded repair actions when checks or execution fail. Continue this execution, verification, and integration loop until the workflow reports completion or needs user input.
 
-For every **newly ready** assignment:
+Use next with `operation` set to `status`, `pause`, `resume`, or `cancel` to inspect or control a run. Cancellation can return actions for running work; carry them out and report the outcomes. Do not invent worker capabilities or completion evidence. A failed judge does not switch providers automatically.
 
-1. Snapshot the host's permitted targets. A target is one harness/model/settings/
-   worker-instance combination. Supply its actual ID, capabilities and availability.
-2. Call `switchbite_route` once with `task` and `pool`. Put acceptance checks and
-   relevant evidence into `objective`/`context_refs`; use defaults initially.
-3. Read `status`, `next_action`, `summary` and `candidate_id` first.
-4. On `recheck_and_dispatch`, resolve the exact ID in that snapshot, recheck
-   authorization and capacity, reserve it atomically, and dispatch through the host.
-5. For every other action, honor the hold and perform the requested next step.
-   A diagnostic alternative is never permission to dispatch.
-6. Observe completion using host receipts; use `switchbite_feedback` to normalize
-   settled outcomes. Store those events in the host if desired.
-
-Do not invent capabilities, availability, costs, model access or receipts. Do not
-dispatch, retry or migrate a running assignment based on a routing recommendation.
-At a task boundary, pass continuity to account for existing context. For review,
-identify the producer so the same worker can be excluded. Budget/latency limits
-are hard constraints; unknown estimates cannot prove a candidate meets them.
-Use `policy.producer_candidate_id` for independent review. Update the factual
-pool after every reservation/completion. Never route a blocked descendant early.
-Replan only unfinished tasks within the user's authorization, retain evidence
-for completed/running work, and validate the changed DAG again.
-
-The normal agent interface requires no digest calculations or replay envelopes.
-Advanced native snapshot/replay tooling binds stored judgments to their inputs;
-it does not provide execution authority. Independent model accounts and quotas,
-workspace claims and reservations remain the host's responsibility.
-
-If routing fails, follow the static error's retry guidance. Never treat an unknown
-worker outcome as a failed execution that can safely be repeated. Provider retry
-guidance concerns the **routing judge**, not replaying a worker's side effects.
-
-Switchbite validates supplied DAGs; it does not decompose a project, discover
-installed models, execute a workflow, or certify that a worker's task succeeded.
+The legacy agent profile remains available for direct routing, plan validation, feedback, and status.

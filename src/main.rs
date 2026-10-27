@@ -298,6 +298,34 @@ fn cli(
         );
         return Ok(());
     }
+    if args.first().is_some_and(|s| s == "workflow") {
+        let interface = switchbite::workflow_interface::Interface::new(
+            std::env::current_dir()?,
+            agent_judge(selection, false),
+        );
+        let result = match args {
+            [_, command, flag, path] if command == "start" && flag == "--request-file" => {
+                interface.start(&request_file(path)?)
+            }
+            [_, command, run, flag, path] if command == "observe" && flag == "--request-file" => {
+                interface.observe(run, &request_file(path)?)
+            }
+            [_, command, run] if command == "next" => interface.next(run),
+            [_, command, run] if command == "status" => interface.status(run),
+            [_, command, run] if matches!(command.as_str(), "pause" | "resume" | "cancel") => {
+                interface.control(run, command)
+            }
+            _ => Err(switchbite::workflow_interface::invalid()),
+        };
+        match result {
+            Ok(value) => println!("{}", value),
+            Err(error) => {
+                println!("{}", error);
+                std::process::exit(1);
+            }
+        }
+        return Ok(());
+    }
     let result = match args {
         [command] if command == "guide" => {
             print!("{}", agent::GUIDE);
@@ -456,7 +484,17 @@ fn main() {
     if matches!(selection, JudgeSelection::Laya(_))
         && !matches!(
             args.first().map(String::as_str),
-            Some("serve" | "route" | "invoke" | "doctor" | "probe" | "--help" | "-h" | "--version")
+            Some(
+                "serve"
+                    | "workflow"
+                    | "route"
+                    | "invoke"
+                    | "doctor"
+                    | "probe"
+                    | "--help"
+                    | "-h"
+                    | "--version"
+            )
         )
     {
         eprintln!(
@@ -466,8 +504,41 @@ fn main() {
     }
     if args == ["--help"] || args == ["-h"] {
         println!(
-            "Switchbite — the decision layer for your agents\nConnect once: switchbite codex | claude | cursor | grok | antigravity | opencode\nConnection options: --dry-run --json --offline --config-file FILE\nCopies a stable executable and merges user-level MCP settings; judge choice stays separate.\nPrint-only setup: setup --client NAME [--offline]\nRecommended MCP: serve --profile agent [--offline]\nLocal Laya: --judge laya [--endpoint http://127.0.0.1:11435] [--model laya:multilingual]\nStackbite plugin: stackbite [--workspace ABS] [--client codex|claude|both] [--judge jev|laya] [--endpoint URL] [--model NAME] [--dry-run] [--json] (default Jev; project server switchbite-stackbite)\nLocal synthetic check: probe --judge laya [--endpoint URL] [--model NAME]\nAdvanced server options: --max-concurrent N --max-queued N --queue-timeout-ms N --decision-timeout-ms N\nroute | snapshot | evaluate --request-file FILE\nguide | doctor | config --client NAME [--executable ABS] [--offline]\nCompatibility: no args = docking API1; serve --profile cli = original typed tools; invoke OP --request-file FILE"
+            "Switchbite — the decision layer for your agents\nConnect once: switchbite codex | claude | cursor | grok | antigravity | opencode\nConnection options: --dry-run --json --offline --config-file FILE\nCopies a stable executable and merges user-level MCP settings; judge choice stays separate.\nPrint-only setup: setup --client NAME [--offline]\nWorkflow MCP: serve --profile workflow [--workspace DIR] [--offline]\nworkflow start --request-file FILE | next/status/pause/resume/cancel RUN | observe RUN --request-file FILE\nLegacy MCP: serve --profile agent [--offline]\nLocal Laya: --judge laya [--endpoint http://127.0.0.1:11435] [--model laya:multilingual]\nStackbite plugin: stackbite [--workspace ABS] [--client codex|claude|both] [--judge jev|laya] [--endpoint URL] [--model NAME] [--dry-run] [--json] (default Jev; project server switchbite-stackbite)\nLocal synthetic check: probe --judge laya [--endpoint URL] [--model NAME]\nAdvanced server options: --max-concurrent N --max-queued N --queue-timeout-ms N --decision-timeout-ms N\nroute | snapshot | evaluate --request-file FILE\nguide | doctor | config --client NAME [--executable ABS] [--offline]\nCompatibility: no args = docking API1; serve --profile cli = original typed tools; invoke OP --request-file FILE"
         );
+        return;
+    }
+    if args.first().is_some_and(|s| s == "serve")
+        && args.get(1).is_some_and(|s| s == "--profile")
+        && args.get(2).is_some_and(|s| s == "workflow")
+    {
+        let result = (|| -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+            let mut options = args.clone();
+            let mut workspace = None;
+            if let Some(index) = options.iter().position(|s| s == "--workspace") {
+                if index + 1 >= options.len() {
+                    return Err("Missing workspace.".into());
+                }
+                workspace = Some(std::path::PathBuf::from(options.remove(index + 1)));
+                options.remove(index);
+            }
+            let workspace = workspace.unwrap_or(std::env::current_dir()?);
+            let (offline, config) = agent_config(&options)?;
+            let runtime = tokio::runtime::Builder::new_multi_thread()
+                .enable_all()
+                .build()?;
+            runtime.block_on(mcp_server::serve_workflow(
+                workspace,
+                agent_judge(&selection, offline),
+                config,
+                tokio::io::stdin(),
+                tokio::io::stdout(),
+            ))
+        })();
+        if result.is_err() {
+            eprintln!("Unable to start workflow profile; check --help and options.");
+            std::process::exit(1);
+        }
         return;
     }
     if args.first().is_some_and(|s| s == "serve")
