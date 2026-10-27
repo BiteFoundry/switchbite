@@ -30,6 +30,10 @@ fn manual_pool_wins_and_exact_pin_reaches_receipt_check() {
     let a = action(&state, "route", "work");
     let input = &a["payload"]["route_input"];
     assert_eq!(input["pool"].as_array().unwrap().len(), 1);
+    assert_eq!(
+        switchbite::route_context::explicit_route(&a).unwrap()["candidate_id"],
+        "codex:2"
+    );
     assert!(
         input["task"]["objective"]
             .as_str()
@@ -50,6 +54,14 @@ fn manual_pool_wins_and_exact_pin_reaches_receipt_check() {
         json!({"status":"ready","candidate_id":"codex:2"}),
     );
     assert_eq!(state["tasks"][0]["candidate"]["model"], "model-b");
+}
+
+#[test]
+fn automatic_choices_still_require_judgment() {
+    let dir = tempfile::tempdir().unwrap();
+    let engine = Workflow::new(dir.path().to_path_buf());
+    let state = engine.start(&json!({"workspace":"synthetic","pool":[candidate(1,"model-a")],"plan":{"nodes":[{"id":"work","objective":"Choose a target"}]}})).unwrap();
+    assert!(switchbite::route_context::explicit_route(&action(&state, "route", "work")).is_none());
 }
 
 #[test]
@@ -238,4 +250,63 @@ fn review_with_seventeen_producers_keeps_an_eligible_shortlist() {
         state = observe(&engine, run, &a, result);
     }
     panic!("review did not become ready");
+}
+
+#[test]
+fn quota_failure_reassigns_automatic_work_and_holds_an_explicit_target() {
+    for pinned in [false, true] {
+        let dir = tempfile::tempdir().unwrap();
+        let engine = Workflow::new(dir.path().to_path_buf());
+        let mut node = json!({"id":"work","objective":"Write a config"});
+        if pinned {
+            node["routing"] = json!({"candidate_id":"codex:1"});
+        }
+        let state=engine.start(&json!({"workspace":"synthetic","pool":[candidate(1,"a"),candidate(2,"b")],"plan":{"nodes":[node]}})).unwrap();
+        let run = state["run_id"].as_str().unwrap();
+        let state = observe(
+            &engine,
+            run,
+            &action(&state, "route", "work"),
+            json!({"status":"ready","candidate_id":"codex:1"}),
+        );
+        let state = observe(
+            &engine,
+            run,
+            &action(&state, "prepare", "work"),
+            json!({"status":"prepared","workspace":"w","branch":"b","integration_workspace":"i","integration_branch":"ib"}),
+        );
+        let a = action(&state, "launch", "work");
+        let state = observe(
+            &engine,
+            run,
+            &a,
+            json!({"status":"failed","execution_id":a["id"],"completion_verified":false,"error":{"code":"rate_limited"}}),
+        );
+        assert!(
+            state["actions"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|a| a["kind"] != "repair")
+        );
+        if pinned {
+            assert_eq!(
+                action(&state, "refresh_pool", "work")["kind"],
+                "refresh_pool"
+            );
+        } else {
+            let route = action(&state, "route", "work");
+            assert_eq!(
+                route["payload"]["candidate_snapshot"][0]["available"],
+                false
+            );
+            let state = observe(
+                &engine,
+                run,
+                &route,
+                json!({"status":"ready","candidate_id":"codex:2"}),
+            );
+            assert_eq!(state["tasks"][0]["candidate"]["id"], "codex:2");
+        }
+    }
 }

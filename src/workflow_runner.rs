@@ -270,11 +270,16 @@ fn advance_inner(
         if !engine.claim(run_id, id).map_err(map_core)? {
             continue;
         }
-        match agent::route_with_judge(
-            &action["payload"]["route_input"],
-            judge.clone(),
-            agent::now_ms(),
-        ) {
+        let decision = crate::route_context::explicit_route(action)
+            .map(Ok)
+            .unwrap_or_else(|| {
+                agent::route_with_judge(
+                    &action["payload"]["route_input"],
+                    judge.clone(),
+                    agent::now_ms(),
+                )
+            });
+        match decision {
             Ok(result) => {
                 engine
                     .observe(

@@ -463,12 +463,12 @@ pub fn snapshot(workspace: &Path, selection: &Value) -> Result<Value, CatalogErr
                     &scope,
                 ));
             }
-            if source == "user_config" {
-                if let Some(effort) = &configured {
-                    candidates.push(candidate(
-                        provider, &exe, &model, effort, &source, timestamp, &scope,
-                    ));
-                }
+            if source == "user_config"
+                && let Some(effort) = &configured
+            {
+                candidates.push(candidate(
+                    provider, &exe, &model, effort, &source, timestamp, &scope,
+                ));
             }
         }
         if provider == "codex" {
@@ -488,7 +488,7 @@ pub fn snapshot(workspace: &Path, selection: &Value) -> Result<Value, CatalogErr
         }
         diagnostics.push(json!({"provider":provider,"code":"readiness_unverified"}));
     }
-    candidates.sort_by(|a, b| candidate_order(a, b));
+    candidates.sort_by(candidate_order);
     let mut seen = BTreeSet::new();
     candidates.retain(|c| {
         c["id"]
@@ -593,13 +593,13 @@ pub fn shortlist(
     while result.len() < max {
         let mut progress = false;
         for p in &order {
-            if let Some(list) = groups.get_mut(p) {
-                if !list.is_empty() {
-                    result.push(list.remove(0));
-                    progress = true;
-                    if result.len() == max {
-                        break;
-                    }
+            if let Some(list) = groups.get_mut(p)
+                && !list.is_empty()
+            {
+                result.push(list.remove(0));
+                progress = true;
+                if result.len() == max {
+                    break;
                 }
             }
         }

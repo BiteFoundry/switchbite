@@ -39,6 +39,7 @@ impl Index {
         fs::create_dir_all(&root).map_err(|_| storage_error())?;
         let lock = fs::OpenOptions::new()
             .create(true)
+            .truncate(false)
             .read(true)
             .write(true)
             .open(root.join(".lock"))

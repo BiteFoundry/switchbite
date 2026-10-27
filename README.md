@@ -8,7 +8,7 @@ can run configured local Codex and Claude workers through verification and
 integration. The coordinator supplies plans and handles actions that need its
 judgment or context.
 
-**v0.7.0-workflow.1 preview · Windows x64 · MIT · No Python runtime.**
+**v0.8.0-pool.1 preview · Windows x64 · MIT · No Python runtime.**
 
 Connect a Stackbite coordinator to the project-scoped workflow server:
 
@@ -26,10 +26,12 @@ Judge selection does not silently fall back to another provider. See the
 
 ## Run a workflow
 
-Call `switchbite_start` with an absolute workspace, a goal or plan, and a factual
-worker pool. For native execution, describe each worker's actual provider,
-executable, model, and effort. An optional local `host` object configures the
-Git base and worker timeout.
+Call `switchbite_start` with an absolute workspace and a goal or plan. Omit
+`pool` to discover installed Claude, Codex, Cursor and OpenCode targets. Each
+ready task gets a shortlist of up to 16 candidates from the larger catalog;
+Jev/Laya sees acceptance, outputs, upstream results, model and effort facts.
+Use `switchbite models` to inspect the catalog. An explicit `pool` selects the
+existing manual mode. An optional local `host` configures the Git base and timeout.
 The engine generates run and action IDs and applies scheduling defaults. A plan
 contains task IDs, objectives, dependencies, acceptance checks, and owned
 `write_paths`; artifact references can go in `outputs`.
@@ -42,7 +44,7 @@ the coordinator supplies the result using `switchbite_observe` and calls next to
 continue. Unknown execution is inspected before any retry. When neither local host
 configuration nor complete worker metadata selects native execution, the coordinator handles the returned
 host actions and records their results. See the [coordinator guide](docs/coordinator.md)
-and [workflow guide](docs/workflow.ko.md).
+and [automatic pool guide](docs/automatic-pools.ko.md).
 
 | Workflow tool | Purpose |
 | --- | --- |
@@ -60,11 +62,12 @@ workspace; the viewer listens on loopback and shows the task graph and evidence.
 
 ## Preview validation
 
-On 2026-10-27, one synthetic three-task project ran on Windows using live Jev
-routing and real Claude and Codex workers. Two independent tasks were followed by a dependent Codex
-review; all three eventually passed the supplied checks and integrated. One task
-needed a coordinator-supplied repair and a shell fix before its retry. This smoke
-test checks the workflow path and does not establish model quality across projects.
+On 2026-10-27, automatic catalogs were read from four installed CLIs on Windows.
+A three-task project used explicit discovered Claude, OpenCode and Codex targets;
+all three passed their output checks and integrated. A separate live Jev probe
+compared 16 candidates shortlisted from 65 discovered Claude/Codex combinations.
+Cursor reported its account's weekly usage limit; its launch was not counted as
+a completed task. See [qualification](docs/model-pool-validation.json).
 ## Connect once
 
 Download the ZIP and SHA256SUMS from [Releases](https://github.com/BiteFoundry/switchbite/releases), verify and extract.

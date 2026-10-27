@@ -99,6 +99,35 @@ pub fn matches_pin(candidate: &Value, node: &Value) -> bool {
         })
 }
 
+/// A unique explicit target is already the user's selection. Judgment compares
+/// alternatives; it does not add a second approval to this selection.
+pub fn explicit_route(action: &Value) -> Option<Value> {
+    let node = &action["payload"]["task"];
+    node.get("routing")?.as_object().filter(|p| !p.is_empty())?;
+    let pool = action["payload"]["candidate_snapshot"].as_array()?;
+    let [candidate] = pool.as_slice() else {
+        return None;
+    };
+    if candidate["available"] != true || !matches_pin(candidate, node) {
+        return None;
+    }
+    if !node["requirements"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .all(|r| {
+            candidate["capabilities"]
+                .as_array()
+                .is_some_and(|a| a.contains(r))
+        })
+    {
+        return None;
+    }
+    Some(
+        json!({"status":"ready","candidate_id":candidate["id"],"next_action":"recheck_and_dispatch","reason_codes":["explicit_target"],"summary":"Use the target explicitly selected for this task."}),
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

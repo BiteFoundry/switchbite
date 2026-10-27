@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.8.0-pool.1 — 2026-10-27 (branch preview)
+
+- Automatic Claude, Codex, Cursor and OpenCode model catalogs, per-task shortlists
+  and exact provider/model/effort pins; explicit pools remain available.
+- Routing context includes acceptance, outputs, upstream integration and actual
+  harness/model/effort facts using the existing judgment contract.
+- Native Cursor and OpenCode adapters alongside the existing Claude/Codex path.
+- One-command connections use the workflow profile with durable workspace lookup
+  across projects; `models --refresh` inspects installed targets.
+- Candidate snapshots preserve in-flight decisions across pool changes and
+  recheck changed target facts before dispatch.
+- This package implements W0–W6 of the routing expansion plan. ACP/Herdr docking,
+  event-stream UI, outcome-based adaptation and PR/CI feedback are the next stages.
+
 ## 0.7.0-workflow.1 — 2026-10-27 (branch preview)
 
 - Three-tool workflow MCP profile and native CLI runner, with background progress

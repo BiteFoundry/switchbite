@@ -720,10 +720,10 @@ impl LocalHost {
             Err(error) => return Err(error),
         };
         let (verified, resolved_model) = verified_receipt(provider, &output, &session);
-        if !message_path.exists() {
-            if let Some(message) = workers::message(provider, &output) {
-                fs::write(&message_path, message).map_err(|_| HostError("io_error"))?;
-            }
+        if !message_path.exists()
+            && let Some(message) = workers::message(provider, &output)
+        {
+            fs::write(&message_path, message).map_err(|_| HostError("io_error"))?;
         }
         // Private context pointers let the coordinator inspect a failed attempt
         // and prepare a repair. Browser summaries never expose these raw logs.

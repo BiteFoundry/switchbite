@@ -96,12 +96,12 @@ impl Interface {
         if !workspace.is_dir() {
             return Err(invalid());
         }
-        if let Some(bound) = &self.workspace {
-            if std::fs::canonicalize(bound).map_err(|_| invalid())? != workspace {
-                return Err(
-                    json!({"error":{"code":"invalid_request","message":"Workspace does not match this server's bound workspace."}}),
-                );
-            }
+        if let Some(bound) = &self.workspace
+            && std::fs::canonicalize(bound).map_err(|_| invalid())? != workspace
+        {
+            return Err(
+                json!({"error":{"code":"invalid_request","message":"Workspace does not match this server's bound workspace."}}),
+            );
         }
         let mut request = request.clone();
         request["workspace"] = json!(workspace);
@@ -158,12 +158,16 @@ impl Interface {
         }
         for action in routes {
             let id = action["id"].as_str().ok_or_else(invalid)?;
-            let result = agent::route_with_judge(
-                &action["payload"]["route_input"],
-                self.judge.clone(),
-                agent::now_ms(),
-            )
-            .map_err(|e| e.to_value())?;
+            let result = crate::route_context::explicit_route(&action)
+                .map(Ok)
+                .unwrap_or_else(|| {
+                    agent::route_with_judge(
+                        &action["payload"]["route_input"],
+                        self.judge.clone(),
+                        agent::now_ms(),
+                    )
+                })
+                .map_err(|e| e.to_value())?;
             workflow
                 .observe(
                     run,

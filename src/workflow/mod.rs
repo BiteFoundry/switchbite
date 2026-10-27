@@ -719,6 +719,47 @@ impl Workflow {
                         }
                         s.tasks[i].state = "verifying".into();
                     }
+                    Some("failed")
+                        if s.status != "cancelled"
+                            && [Some("rate_limited"), Some("quota_or_rate_limit")]
+                                .contains(&host_error(result)) =>
+                    {
+                        let resource = s.tasks[i]
+                            .candidate
+                            .as_ref()
+                            .map(|c| c.get("resource_key").unwrap_or(&c["id"]).clone())
+                            .unwrap_or(Value::Null);
+                        let pool = if let Some(catalog) = &mut s.catalog {
+                            &mut catalog["candidates"]
+                        } else {
+                            &mut s.request["pool"]
+                        };
+                        if let Some(candidates) = pool.as_array_mut() {
+                            for candidate in candidates {
+                                if candidate.get("resource_key").unwrap_or(&candidate["id"])
+                                    == &resource
+                                {
+                                    candidate["available"] = json!(false);
+                                    if let Some(info) = candidate.get_mut("catalog_info") {
+                                        info["readiness"] = json!("rate_limited");
+                                    }
+                                }
+                            }
+                        }
+                        s.tasks[i].prepared = None;
+                        s.tasks[i].execution_id = None;
+                        if s.tasks[i].node.get("routing").is_none()
+                            && s.tasks[i].attempts
+                                < s.request["repair_rounds"].as_u64().unwrap_or(2)
+                        {
+                            s.tasks[i].attempts += 1;
+                            s.tasks[i].candidate = None;
+                            s.tasks[i].state = "pending".into();
+                        } else {
+                            s.tasks[i].attempts += 1;
+                            s.tasks[i].state = "needs_pool".into();
+                        }
+                    }
                     Some("failed") => {
                         s.tasks[i].state =
                             if s.status == "cancelled" && result["cancelled"] == true {

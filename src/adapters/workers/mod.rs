@@ -112,6 +112,7 @@ pub(super) fn verified_receipt(
     (valid && init && terminal, model)
 }
 
+#[allow(clippy::too_many_arguments)] // Keep native argv construction at one protocol boundary.
 pub(super) fn command(
     provider: &str,
     executable: &str,

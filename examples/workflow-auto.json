@@ -1,0 +1,17 @@
+{
+  "workspace": "C:\\project",
+  "goal": "Create a self-contained project status page",
+  "plan": {
+    "nodes": [
+      {
+        "id": "page",
+        "objective": "Create index.html with title Project status, inline CSS, viewport meta and three cards: Plan, Build, Review. Use no external assets.",
+        "role": "mockup",
+        "acceptance": ["The actual index.html contains the title, cards, inline CSS and viewport meta"],
+        "requirements": ["html.write"],
+        "outputs": ["index.html"],
+        "write_paths": ["index.html"]
+      }
+    ]
+  }
+}

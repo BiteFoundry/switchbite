@@ -29,11 +29,17 @@ fn config(args: &[String]) -> Result<String, Box<dyn std::error::Error + Send + 
         index += 1;
     }
     let path = executable.unwrap_or(std::env::current_exe()?);
-    Ok(switchbite::connection::render(
-        client.ok_or("Missing --client; use --help.")?,
-        &path,
-        offline,
-    )?)
+    let client = client.ok_or("Missing --client; use --help.")?;
+    if args.first().is_some_and(|s| s == "setup") {
+        let mut launch = vec!["serve", "--profile", "agent"];
+        if offline {
+            launch.push("--offline");
+        }
+        return Ok(switchbite::connection::render_launch(
+            client, &path, &launch, !offline,
+        )?);
+    }
+    Ok(switchbite::connection::render(client, &path, offline)?)
 }
 
 #[derive(Default)]

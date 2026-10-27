@@ -113,6 +113,14 @@ pub fn build(binary: &Path, output: &Path) -> Result<Value, Error> {
             include_bytes!("../docs/workflow.ko.md").to_vec(),
         ),
         (
+            "docs/automatic-pools.ko.md".to_owned(),
+            include_bytes!("../docs/automatic-pools.ko.md").to_vec(),
+        ),
+        (
+            "examples/workflow-auto.json".to_owned(),
+            include_bytes!("../examples/workflow-auto.json").to_vec(),
+        ),
+        (
             "docs/workflow-ui.ko.md".to_owned(),
             include_bytes!("../docs/workflow-ui.ko.md").to_vec(),
         ),
