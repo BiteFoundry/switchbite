@@ -769,10 +769,12 @@ fn drive(run: &Run, judge: Option<Arc<ConfiguredJudge>>) -> Result<(), Value> {
             }
             continue;
         }
-        if coordinator_job.is_none() && active == 0 && state["status"] != "cancelled" {
-            if let Some(detail) = attention.take() {
-                return Err(detail);
-            }
+        if coordinator_job.is_none()
+            && active == 0
+            && state["status"] != "cancelled"
+            && let Some(detail) = attention.take()
+        {
+            return Err(detail);
         }
         if (state["status"] == "completed" || state["status"] == "cancelled")
             && active == 0

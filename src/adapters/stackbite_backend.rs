@@ -82,14 +82,14 @@ fn bounded_output(command: &mut Command, timeout: Duration) -> Result<Vec<u8>, H
                 Err(_) => break Err(()),
             }
         }
-        if let Some(exit) = status {
-            if streams.iter().all(Option::is_some) {
-                break if exit.success() {
-                    Ok(streams[0].take().unwrap())
-                } else {
-                    Err(())
-                };
-            }
+        if let Some(exit) = status
+            && streams.iter().all(Option::is_some)
+        {
+            break if exit.success() {
+                Ok(streams[0].take().unwrap())
+            } else {
+                Err(())
+            };
         }
         if Instant::now() >= deadline {
             break Err(());
