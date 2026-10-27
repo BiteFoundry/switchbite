@@ -254,6 +254,11 @@ fn failure_hint(bytes: &[u8]) -> Option<&'static str> {
         None
     }
 }
+fn attach_rate_limit_error(result: &mut Value) {
+    if let Some(code @ ("rate_limited" | "quota_or_rate_limit")) = result["reason"].as_str() {
+        result["error"] = json!({"code":code});
+    }
+}
 fn value_file(path: &Path) -> Result<Value, HostError> {
     serde_json::from_slice(&read_bounded(path)?).map_err(|_| HostError("invalid_state"))
 }
@@ -730,8 +735,8 @@ impl LocalHost {
         let stream_path = messages.join(format!("{}.jsonl", hash(id)));
         fs::write(&stream_path, &output).map_err(|_| HostError("io_error"))?;
         let mut result = json!({"status":if ok && verified {"completed"} else {"failed"},"execution_id":id,"completion_verified":ok && verified,"requested_model":model,"resolved_model":resolved_model,"message_ref":if message_path.exists(){Some(message_path)}else{None},"stream_ref":stream_path,"reason":if !ok {Some(stderr_hint.or_else(|| failure_hint(&output)).unwrap_or("provider_exit_failed"))} else if !verified {Some("provider_receipt_invalid")} else {None}});
+        attach_rate_limit_error(&mut result);
         if stderr_hint == Some("rate_limited") {
-            result["error"] = json!({"code":"rate_limited"});
             result["stderr_ref"] =
                 json!(self.state.join("output").join(format!("{}.err", hash(id))));
         }
@@ -1129,6 +1134,35 @@ mod tests {
             )
             .unwrap()
         ));
+    }
+    #[cfg(windows)]
+    #[test]
+    fn normal_provider_quota_failure_exposes_workflow_error_code() {
+        use super::*;
+        let temp = tempfile::tempdir().unwrap();
+        let host = LocalHost {
+            workspace: temp.path().to_owned(),
+            state: temp.path().to_owned(),
+            worktrees: temp.path().to_owned(),
+            base: String::new(),
+            timeout: 20,
+        };
+        let mut cmd = Command::new("powershell.exe");
+        cmd.args([
+            "-NoProfile",
+            "-Command",
+            "[Console]::Error.WriteLine('rate limit exceeded'); exit 1",
+        ]);
+        let (ok, output, hint) = host
+            .execute(cmd, temp.path(), "normal-quota-test", true, false)
+            .unwrap();
+        assert!(!ok);
+        let reason = hint
+            .or_else(|| failure_hint(&output))
+            .unwrap_or("provider_exit_failed");
+        let mut result = json!({"status":"failed", "reason":reason});
+        attach_rate_limit_error(&mut result);
+        assert_eq!(result["error"]["code"], "quota_or_rate_limit");
     }
     #[test]
     fn receipts_fail_closed_on_contradictions() {
