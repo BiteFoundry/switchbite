@@ -32,6 +32,64 @@ pub struct LocalHost {
     base: String,
     timeout: u64,
 }
+fn git_lock(root: &Path) -> Result<fs::File, HostError> {
+    let file = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(root.join("git.lock"))
+        .map_err(|_| HostError("io_error"))?;
+    lock_file(&file)?;
+    Ok(file)
+}
+#[cfg(unix)]
+fn lock_file(file: &fs::File) -> Result<(), HostError> {
+    use std::os::fd::AsRawFd;
+    unsafe extern "C" {
+        fn flock(fd: i32, operation: i32) -> i32;
+    }
+    if unsafe { flock(file.as_raw_fd(), 2) } == 0 {
+        Ok(())
+    } else {
+        Err(HostError("git_locked"))
+    }
+}
+#[cfg(windows)]
+fn lock_file(file: &fs::File) -> Result<(), HostError> {
+    use std::os::windows::io::AsRawHandle;
+    #[repr(C)]
+    struct Overlapped {
+        internal: usize,
+        internal_high: usize,
+        offset: u32,
+        offset_high: u32,
+        event: *mut std::ffi::c_void,
+    }
+    #[link(name = "kernel32")]
+    unsafe extern "system" {
+        fn LockFileEx(
+            file: *mut std::ffi::c_void,
+            flags: u32,
+            reserved: u32,
+            low: u32,
+            high: u32,
+            overlapped: *mut Overlapped,
+        ) -> i32;
+    }
+    let mut o = Overlapped {
+        internal: 0,
+        internal_high: 0,
+        offset: 0,
+        offset_high: 0,
+        event: std::ptr::null_mut(),
+    };
+    if unsafe { LockFileEx(file.as_raw_handle(), 2, 0, 1, 0, &mut o) } != 0 {
+        Ok(())
+    } else {
+        Err(HostError("git_locked"))
+    }
+}
 fn string<'a>(v: &'a Value, key: &str) -> Result<&'a str, HostError> {
     v.get(key)
         .and_then(Value::as_str)
@@ -40,6 +98,144 @@ fn string<'a>(v: &'a Value, key: &str) -> Result<&'a str, HostError> {
 }
 fn hash(s: &str) -> String {
     format!("{:x}", Sha256::digest(s.as_bytes()))[..24].to_string()
+}
+fn path_allowed(path: &str, pattern: &str) -> bool {
+    if pattern == "." {
+        return true;
+    }
+    let mut expression = String::from("^");
+    let mut chars = pattern.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c == '*' {
+            if chars.peek() == Some(&'*') {
+                chars.next();
+                if chars.peek() == Some(&'/') {
+                    chars.next();
+                    expression.push_str("(?:.*/)?");
+                } else {
+                    expression.push_str(".*");
+                }
+            } else {
+                expression.push_str("[^/]*");
+            }
+        } else {
+            expression.push_str(&regex::escape(&c.to_string()));
+        }
+    }
+    expression.push_str("(?:/.*)?$");
+    regex::Regex::new(&expression).is_ok_and(|r| r.is_match(path))
+}
+fn session_id(id: &str) -> String {
+    let h = format!("{:x}", Sha256::digest(id.as_bytes()));
+    format!(
+        "{}-{}-4{}-a{}-{}",
+        &h[0..8],
+        &h[8..12],
+        &h[13..16],
+        &h[17..20],
+        &h[20..32]
+    )
+}
+fn verified_receipt(provider: &str, output: &[u8], session: &str) -> (bool, Option<String>) {
+    let mut init = false;
+    let mut turn = false;
+    let mut terminal = false;
+    let mut model = None;
+    let mut valid = true;
+    for line in output.split(|b| *b == b'\n').filter(|l| !l.is_empty()) {
+        let Ok(v) = serde_json::from_slice::<Value>(line) else {
+            return (false, None);
+        };
+        let Some(kind) = v.get("type").and_then(Value::as_str) else {
+            return (false, None);
+        };
+        if terminal {
+            valid = false;
+        }
+        if provider == "claude" {
+            if v.get("session_id")
+                .is_some_and(|x| x.as_str() != Some(session))
+            {
+                valid = false;
+            }
+            match kind {
+                "system" if v["subtype"] == "init" => {
+                    if init || v["session_id"] != session {
+                        valid = false;
+                    }
+                    init = true;
+                    model = v
+                        .get("model")
+                        .and_then(Value::as_str)
+                        .filter(|s| !s.is_empty() && s.len() <= 256)
+                        .map(str::to_owned);
+                }
+                "result" => {
+                    if !init
+                        || v["session_id"] != session
+                        || v["subtype"] != "success"
+                        || v["is_error"] != false
+                        || !v
+                            .get("permission_denials")
+                            .and_then(Value::as_array)
+                            .is_some_and(Vec::is_empty)
+                    {
+                        valid = false;
+                    }
+                    terminal = true;
+                }
+                "error" => valid = false,
+                "assistant" | "user" => {
+                    if !init
+                        || v.get("error").is_some_and(|x| !x.is_null())
+                        || v["message"]["stop_reason"] == "refusal"
+                        || v["message"]["content"].as_array().is_some_and(|a| {
+                            a.iter()
+                                .any(|x| x["is_error"] == true || x["type"] == "refusal")
+                        })
+                    {
+                        valid = false;
+                    }
+                }
+                _ => {
+                    if !init {
+                        valid = false;
+                    }
+                }
+            }
+        } else {
+            match kind {
+                "thread.started" => {
+                    if init || v["thread_id"].as_str().is_none_or(str::is_empty) {
+                        valid = false;
+                    }
+                    init = true;
+                }
+                "turn.started" => {
+                    if !init || turn {
+                        valid = false;
+                    }
+                    turn = true;
+                }
+                "turn.completed" => {
+                    if !init || !turn {
+                        valid = false;
+                    }
+                    terminal = true;
+                }
+                "error" | "turn.failed" | "item.failed" => valid = false,
+                _ => {
+                    if !turn
+                        || v["item"]["status"] == "failed"
+                        || v["item"]["exit_code"].as_i64().is_some_and(|n| n != 0)
+                    {
+                        valid = false;
+                    }
+                }
+            }
+        }
+    }
+    (valid && init && terminal, model)
 }
 fn run_git(dir: &Path, args: &[&str]) -> Result<String, HostError> {
     let output = Command::new("git")
@@ -188,6 +384,12 @@ impl LocalHost {
         let taskid = hash(string(task, "id")?);
         let root = self.state.join("worktrees").join(&run);
         fs::create_dir_all(&root).map_err(|_| HostError("io_error"))?;
+        let _lock = git_lock(&root)?;
+        let base_file = root.join("base");
+        if !base_file.exists() {
+            fs::write(&base_file, &self.base).map_err(|_| HostError("io_error"))?;
+        }
+        let base = fs::read_to_string(&base_file).map_err(|_| HostError("io_error"))?;
         let integration = root.join("integration");
         let ib = format!("switchbite/{run}/integration");
         if !integration.exists() {
@@ -199,7 +401,7 @@ impl LocalHost {
                     "-b",
                     &ib,
                     path_string(&integration)?,
-                    &self.base,
+                    &base,
                 ],
             )?;
         }
@@ -270,6 +472,14 @@ impl LocalHost {
         loop {
             if let Some(status) = child.try_wait().map_err(|_| HostError("process_failed"))? {
                 let bytes = read_bounded(&out)?;
+                if fs::metadata(&err)
+                    .map(|m| m.len() > MAX_OUTPUT)
+                    .unwrap_or(false)
+                {
+                    let _ = fs::remove_file(&out);
+                    let _ = fs::remove_file(&err);
+                    return Err(HostError("output_limit"));
+                }
                 let _ = fs::remove_file(&out);
                 let _ = fs::remove_file(&err);
                 return Ok((status.success(), bytes));
@@ -318,8 +528,23 @@ impl LocalHost {
             return Err(HostError("invalid_action"));
         }
         let task = p.get("task").ok_or(HostError("invalid_action"))?;
-        let prompt = string(task, "objective")?;
+        string(task, "objective")?;
+        let prompt = format!(
+            "Complete the following task only within this working directory. Treat outputs beginning with artifact: as references, not writable paths. Task: {}",
+            serde_json::to_string(task).map_err(|_| HostError("invalid_action"))?
+        );
+        if prompt.len() > 128 * 1024 {
+            return Err(HostError("invalid_action"));
+        }
         let mut cmd = Command::new(executable);
+        if c.get("args")
+            .and_then(Value::as_array)
+            .is_some_and(|args| !args.is_empty())
+        {
+            return Err(HostError("unsupported_candidate_args"));
+        }
+        let id = string(a, "id")?;
+        let session = session_id(id);
         match provider {
             "codex" => {
                 cmd.args([
@@ -327,9 +552,12 @@ impl LocalHost {
                     "--json",
                     "--model",
                     model,
+                    "--sandbox",
+                    "workspace-write",
+                    "--ignore-user-config",
                     "-c",
                     &format!("model_reasoning_effort=\"{effort}\""),
-                    prompt,
+                    &prompt,
                 ]);
             }
             "claude" => {
@@ -342,43 +570,63 @@ impl LocalHost {
                     model,
                     "--effort",
                     effort,
-                    prompt,
+                    "--session-id",
+                    &session,
+                    "--restricted",
+                    "--safe-mode",
+                    "--no-session-persistence",
+                    "--disable-slash-commands",
+                    "--permission-mode",
+                    "acceptEdits",
+                    "--permission-prompts",
+                    "none",
+                    "--allowedTools",
+                    "Read",
+                    "Write",
+                    "Edit",
+                    "--tools",
+                    "Read,Write,Edit",
+                    "--strict-mcp-config",
+                    "--mcp-config",
+                    "{\"mcpServers\":{}}",
+                    "--settings",
+                    "{\"disableAllHooks\":true}",
+                    "--",
+                    &prompt,
                 ]);
             }
             _ => return Err(HostError("unsupported_provider")),
         }
-        if let Some(args) = c.get("args").and_then(Value::as_array) {
-            if args.len() > 32 {
-                return Err(HostError("invalid_action"));
-            }
-            for arg in args {
-                cmd.arg(
-                    arg.as_str()
-                        .filter(|s| s.len() <= 4096)
-                        .ok_or(HostError("invalid_action"))?,
-                );
+        for (key, _) in std::env::vars_os() {
+            let name = key.to_string_lossy().to_ascii_uppercase();
+            if [
+                "STACKBITE_",
+                "WORKBITE_",
+                "WORKSTACK_",
+                "SWITCHBITE_",
+                "HELM_",
+                "CLAUDECODE",
+                "CLAUDE_CODE_",
+                "TYPESAFE_API_KEY",
+            ]
+            .iter()
+            .any(|p| name.starts_with(p))
+            {
+                cmd.env_remove(key);
             }
         }
-        let id = string(a, "id")?;
         let (ok, output) = match self.execute(cmd, &dir, id, true) {
             Ok(result) => result,
             Err(HostError("cancelled")) => {
                 return Ok(
-                    json!({"status":"failed","execution_id":id,"completion_verified":false,"cancelled":true}),
+                    json!({"status":"unknown","execution_id":id,"completion_verified":false,"cancellation_requested":true}),
                 );
             }
             Err(error) => return Err(error),
         };
-        let verified = output
-            .split(|b| *b == b'\n')
-            .filter_map(|line| serde_json::from_slice::<Value>(line).ok())
-            .any(|v| match provider {
-                "codex" => v["type"] == "turn.completed",
-                "claude" => v["type"] == "result" && v["is_error"] == false,
-                _ => false,
-            });
+        let (verified, resolved_model) = verified_receipt(provider, &output, &session);
         Ok(
-            json!({"status":if ok && verified {"completed"} else {"failed"},"execution_id":id,"completion_verified":ok && verified}),
+            json!({"status":if ok && verified {"completed"} else {"failed"},"execution_id":id,"completion_verified":ok && verified,"requested_model":model,"resolved_model":resolved_model}),
         )
     }
     fn inspect(&self, p: &Value) -> Result<Value, HostError> {
@@ -438,10 +686,57 @@ impl LocalHost {
     fn integrate(&self, p: &Value) -> Result<Value, HostError> {
         let task = self.owned(p, "workspace")?;
         let target = self.owned(p, "integration_workspace")?;
+        if task.parent() != target.parent() || task == target {
+            return Err(HostError("invalid_workspace"));
+        }
+        let _lock = git_lock(target.parent().ok_or(HostError("invalid_workspace"))?)?;
         if !run_git(&target, &["status", "--porcelain"])?.is_empty() {
             return Ok(json!({"status":"failed","evidence":["integration workspace dirty"]}));
         }
         run_git(&task, &["add", "-A"])?;
+        let outputs = p["task"]
+            .get("write_paths")
+            .or_else(|| p["task"].get("outputs"))
+            .and_then(Value::as_array)
+            .cloned()
+            .unwrap_or_default();
+        let mut owned = Vec::new();
+        for output in outputs {
+            let s = output.as_str().ok_or(HostError("invalid_action"))?;
+            if s.starts_with("artifact:") || s.contains("://") {
+                continue;
+            }
+            let path = Path::new(s);
+            if s != "."
+                && (path.is_absolute()
+                    || path
+                        .components()
+                        .any(|c| !matches!(c, std::path::Component::Normal(_))))
+            {
+                return Err(HostError("invalid_output_path"));
+            }
+            owned.push(s.replace('\\', "/").trim_end_matches('/').to_owned());
+        }
+        {
+            let ancestor = run_git(
+                &task,
+                &[
+                    "merge-base",
+                    "HEAD",
+                    &run_git(&target, &["rev-parse", "HEAD"])?,
+                ],
+            )?;
+            let changed = run_git(&task, &["diff", "--cached", "--name-only", "-z", &ancestor])?;
+            if changed
+                .split('\0')
+                .filter(|s| !s.is_empty())
+                .any(|path| !owned.iter().any(|o| path_allowed(path, o)))
+            {
+                return Ok(
+                    json!({"status":"failed","evidence":["write outside declared outputs"]}),
+                );
+            }
+        }
         let status = run_git(&task, &["status", "--porcelain"])?;
         if !status.is_empty() {
             run_git(
@@ -478,7 +773,20 @@ impl LocalHost {
             return Ok(json!({"status":"failed","evidence":["integration conflict"]}));
         }
         let commit = run_git(&target, &["rev-parse", "HEAD"])?;
-        Ok(json!({"status":"integrated","commit":commit,"evidence":[]}))
+        let mut integration_payload = p.clone();
+        integration_payload["prepared"]["workspace"] = json!(target);
+        let checked = self
+            .verify(&integration_payload)
+            .unwrap_or_else(|_| json!({"status":"failed","evidence":[]}));
+        if checked["status"] != "passed"
+            || !run_git(&target, &["status", "--porcelain"])?.is_empty()
+        {
+            run_git(&target, &["reset", "--hard", &target_head])?;
+            return Ok(
+                json!({"status":"failed","commit":commit,"evidence":checked["evidence"],"reason":"integration_checks_failed"}),
+            );
+        }
+        Ok(json!({"status":"integrated","commit":commit,"evidence":checked["evidence"]}))
     }
     fn gather(&self, p: &Value) -> Result<Value, HostError> {
         let task = p.get("task").ok_or(HostError("invalid_action"))?;
@@ -503,5 +811,25 @@ impl LocalHost {
             }
         }
         Ok(json!({"status":"gathered","context_refs":refs}))
+    }
+}
+#[cfg(test)]
+mod tests {
+    use super::verified_receipt;
+    #[test]
+    fn receipts_fail_closed_on_contradictions() {
+        let valid = b"{\"type\":\"thread.started\",\"thread_id\":\"t\"}\n{\"type\":\"turn.started\"}\n{\"type\":\"turn.completed\"}\n";
+        assert!(verified_receipt("codex", valid, "unused").0);
+        assert!(!verified_receipt("codex", b"{\"type\":\"turn.completed\"}\n", "unused").0);
+        let mut duplicate = valid.to_vec();
+        duplicate.extend_from_slice(b"{\"type\":\"turn.completed\"}\n");
+        assert!(!verified_receipt("codex", &duplicate, "unused").0);
+        let claude = b"{\"type\":\"system\",\"subtype\":\"init\",\"session_id\":\"s\",\"model\":\"m\"}\n{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":false,\"permission_denials\":[],\"session_id\":\"s\"}\n";
+        assert_eq!(
+            verified_receipt("claude", claude, "s"),
+            (true, Some("m".into()))
+        );
+        assert!(!verified_receipt("claude", claude, "other").0);
+        assert!(!verified_receipt("claude", b"{\"type\":\"system\",\"subtype\":\"init\",\"session_id\":\"s\"}\n{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":false,\"session_id\":\"s\"}\n", "s").0);
     }
 }

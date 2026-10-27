@@ -37,7 +37,7 @@ fn owned_workflow_and_idempotence() {
         ],
     );
     let worker = tmp.path().join("worker.rs");
-    fs::write(&worker, r#"fn main() { std::fs::write("created.txt", "done").unwrap(); println!("{{\"type\":\"turn.completed\"}}"); }"#).unwrap();
+    fs::write(&worker, r#"fn main() { std::fs::write("created.txt", "done").unwrap(); println!("{{\"type\":\"thread.started\",\"thread_id\":\"t\"}}"); println!("{{\"type\":\"turn.started\"}}"); println!("{{\"type\":\"turn.completed\"}}"); }"#).unwrap();
     let exe = tmp.path().join(if cfg!(windows) {
         "worker.exe"
     } else {
@@ -62,7 +62,7 @@ fn owned_workflow_and_idempotence() {
         ))
         .unwrap();
     assert_eq!(gathered["context_refs"][0], "artifact:design/mockup");
-    let task = json!({"id":"task-1","objective":"Make the change"});
+    let task = json!({"id":"task-1","objective":"Make the change","outputs":["created.txt"]});
     let candidate = json!({"provider":"codex","executable":exe,"model":"example","effort":"high"});
     let prepare = action("prepare-1", "prepare", json!({"task":task}));
     let prepared = host.perform(&prepare).unwrap();
@@ -225,8 +225,8 @@ fn cancel_from_another_host_signals_only_owned_child() {
         .unwrap();
     assert_eq!(cancel["status"], "unknown");
     let result = owner.join().unwrap();
-    assert_eq!(result["status"], "failed");
-    assert_eq!(result["cancelled"], true);
+    assert_eq!(result["status"], "unknown");
+    assert_eq!(result["cancellation_requested"], true);
     let recovered = observer
         .perform(&action(
             "inspect",
@@ -235,4 +235,52 @@ fn cancel_from_another_host_signals_only_owned_child() {
         ))
         .unwrap();
     assert_eq!(recovered, result);
+}
+
+#[test]
+fn integration_enforces_outputs_and_checks_the_merged_tree() {
+    let tmp = tempfile::tempdir().unwrap();
+    let repo = tmp.path().join("repo");
+    fs::create_dir(&repo).unwrap();
+    git(&repo, &["init"]);
+    git(
+        &repo,
+        &[
+            "-c",
+            "user.name=Test",
+            "-c",
+            "user.email=test@localhost",
+            "commit",
+            "--allow-empty",
+            "-m",
+            "base",
+        ],
+    );
+    let host = LocalHost::new(&repo, &tmp.path().join("state"), &json!({})).unwrap();
+    let task = json!({"id":"t","objective":"work","outputs":["allowed.txt", "artifact:design"]});
+    let prepared = host
+        .perform(&action("prep-check", "prepare", json!({"task":task})))
+        .unwrap();
+    let dir = Path::new(prepared["workspace"].as_str().unwrap());
+    fs::write(dir.join("outside.txt"), "outside").unwrap();
+    let payload = json!({"task":task,"prepared":prepared,"checks":[]});
+    let rejected = host
+        .perform(&action("reject", "integrate", payload.clone()))
+        .unwrap();
+    assert_eq!(rejected["status"], "failed");
+    assert_eq!(rejected["evidence"][0], "write outside declared outputs");
+    fs::remove_file(dir.join("outside.txt")).unwrap();
+    fs::write(dir.join("allowed.txt"), "ok").unwrap();
+    let mut failing = payload.clone();
+    failing["checks"] = json!([{"program":"git","args":["not-a-real-subcommand"]}]);
+    let result = host
+        .perform(&action("failed-check", "integrate", failing))
+        .unwrap();
+    assert_eq!(result["reason"], "integration_checks_failed");
+    assert!(
+        !Path::new(prepared["integration_workspace"].as_str().unwrap())
+            .join("allowed.txt")
+            .exists()
+    );
+    assert!(dir.join("allowed.txt").exists());
 }
