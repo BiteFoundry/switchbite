@@ -46,7 +46,7 @@ jobs:
           cargo run --release --locked --bin package-plugin -- --binary target/release/switchbite.exe --output $archive
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           $hash = (Get-FileHash -LiteralPath $archive -Algorithm SHA256).Hash.ToLowerInvariant()
-          "$hash  $([IO.Path]::GetFileName($archive))" | Set-Content -LiteralPath dist/SHA256SUMS -Encoding ascii
+          "$hash  $([IO.Path]::GetFileName($archive))" | Set-Content -LiteralPath dist/plugin-SHA256SUMS -Encoding ascii
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: switchbite-windows-x64
@@ -84,6 +84,10 @@ jobs:
           GH_REPO: ${{ github.repository }}
           RELEASE_TAG: ${{ github.ref_name }}
         run: |
-          gh release create "$RELEASE_TAG" dist/* --verify-tag --prerelease \
-            --title "Switchbite $RELEASE_TAG — public preview" \
-            --notes-file "docs/releases/$RELEASE_TAG.md"
+          if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
+            gh release upload "$RELEASE_TAG" dist/* --clobber
+          else
+            gh release create "$RELEASE_TAG" dist/* --verify-tag --prerelease \
+              --title "Switchbite $RELEASE_TAG — public preview" \
+              --notes-file "docs/releases/$RELEASE_TAG.md"
+          fi

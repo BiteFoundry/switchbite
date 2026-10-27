@@ -53,4 +53,11 @@ switchbite workflow app
 - [복제본에 적용할 엔진 소스](../integrations/stackbite-engine/README.md)
 - 현재 완료 화면: http://127.0.0.1:62859/
 
-현재 PC는 작업용 디렉터리의 로컬 매니페스트 채널을 사용한다. GitHub 배포 채널은 게시하지 않았다. 기존 StackBite 설치와 원래 SwitchBite 작업 트리의 변경 사항은 유지했다.
+GitHub 프리뷰 배포 채널은 다음 주소를 사용한다. 기존 StackBite 설치와 원래 SwitchBite 작업 트리의 변경 사항은 유지한다.
+
+```powershell
+switchbite runtime configure --manifest https://github.com/BiteFoundry/switchbite/releases/download/runtime-preview/channel-windows-x64.json
+switchbite workflow app
+```
+
+채널의 매니페스트는 버전별 릴리스의 실행 파일을 가리킨다. 새 배포에서도 이전 실행 파일은 유지한다.

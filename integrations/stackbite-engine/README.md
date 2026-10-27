@@ -1,5 +1,9 @@
 # Switchbite isolated clone engine
 
+License provenance: this crate is built in the StackBite source workspace and
+inherits its `LicenseRef-Proprietary` designation. SwitchBite's MIT license does
+not change the license designation of the bundled StackBite component.
+
 Private opt-in adapter built inside the independent Stackbite source clone.
 Reuses `stackbite-provider-stream`'s owned `ChildTransport`, bounded
 `NdjsonFramer`, and `ExecutionBinding`. It does not read installed Stackbite
