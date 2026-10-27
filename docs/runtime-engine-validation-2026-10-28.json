@@ -1,0 +1,119 @@
+{
+  "date": "2026-10-28",
+  "scope": "SwitchBite web runtime with isolated StackBite clone engine",
+  "switchbite": {
+    "branch": "feature/automatic-model-pool",
+    "source_commit": "53efb2644cf29d3399a3cb4b7872e89806a6a63c",
+    "version": "0.9.0-preview.1"
+  },
+  "engine": {
+    "stackbite_app_version": "0.5.54",
+    "source_commit": "0431b7cf8c75d20ad42140e521116a5d3d1a6a96",
+    "bridge_version": "0.1.0",
+    "source_location": "integrations/stackbite-engine",
+    "protocol_version": 1,
+    "providers": [
+      "codex",
+      "claude",
+      "cursor",
+      "opencode",
+      "antigravity"
+    ]
+  },
+  "checks": {
+    "release_build": "passed",
+    "failed": 0,
+    "engine_tests_passed": 9,
+    "startup_error_browser_retry": "passed; input preserved, idle with no CLI execution",
+    "clippy": "passed",
+    "ignored": 2,
+    "switchbite_tests_passed": 253,
+    "immutable_bundle_tests": "passed"
+  },
+  "live": {
+    "all_three_overlap_ms": 7815,
+    "requested_model": "gpt-6.1-terra",
+    "requested_effort": "high",
+    "exact_utf8_lf_outputs_verified": [
+      "alpha.txt",
+      "beta.txt",
+      "gamma.txt",
+      "combined.txt",
+      "verification.txt"
+    ],
+    "explanation": "Codex stream did not attest the actual model; UI separates requested settings from observed values.",
+    "run_id": "run-1793114067273887400-55492",
+    "result_commit": "c8bbd266f76a8b9687662f69756302b7a54b953f",
+    "repairs": 0,
+    "requested_provider": "codex",
+    "workflow_source_commit": "7d9cce7f8f9060211471ccb3064724dc66b09a11",
+    "independent_workers": 3,
+    "tasks": 5,
+    "result_workspace": "C:\\Users\\user\\AppData\\Local\\Switchbite\\workspaces\\bfa852129c94eaf5ee37a76c\\be448a638322df518255f443\\integration",
+    "timings": [
+      {
+        "started_unix_ms": 1793114085314,
+        "task": "alpha",
+        "finished_unix_ms": 1793114093838
+      },
+      {
+        "started_unix_ms": 1793114085579,
+        "task": "beta",
+        "finished_unix_ms": 1793114093660
+      },
+      {
+        "started_unix_ms": 1793114085845,
+        "task": "gamma",
+        "finished_unix_ms": 1793114097101
+      }
+    ],
+    "provider_reported_model": null,
+    "status": "completed",
+    "url": "http://127.0.0.1:62859/",
+    "launch_spread_ms": 531
+  },
+  "pause_resume": {
+    "status_while_paused": "paused",
+    "fixture_note": "This earlier run found CRLF conversion in the byte-exact fixture; final run pins LF in .gitattributes.",
+    "run_id": "run-1793113688888985100-68656",
+    "resume": "continued to review",
+    "completed_while_paused": 4
+  },
+  "jev_live": {
+    "elapsed_ms": 573,
+    "candidate_id": "codex-terra-high",
+    "worker_dispatched": false,
+    "status": "ready",
+    "backend": "jev-1.14.0",
+    "next_action": "recheck_and_dispatch"
+  },
+  "updating": {
+    "running_jobs": "retain pinned request metadata and engine path",
+    "configured_channel": "local manifest",
+    "installed_bundle": "preview-0.9.0-53efb26-0431b7cf",
+    "github_release_channel_published": false,
+    "new_task_handoff": "verified in browser across immutable app bundles"
+  },
+  "preserved": {
+    "original_switchbite_existing_changes": "unchanged",
+    "original_private_clone_head": "a29952dfd09c85dc854c275fdf7c5efc7f47421f",
+    "original_stackbite_installation": "not modified",
+    "original_switchbite_head": "4db2db779bd723bc4a816c745e5f5902b30dd765",
+    "original_private_clone_existing_changes": "unchanged"
+  },
+  "delegation": {
+    "model": "gpt-6.1-terra",
+    "scopes": [
+      "routing and coordinator progress",
+      "isolated engine execution bridge",
+      "web activity and startup recovery"
+    ],
+    "workers": 3,
+    "reasoning_effort": "high"
+  },
+  "known_limits": [
+    "Only Codex was exercised with a real provider in this qualification; other advertised providers use existing adapters.",
+    "Automatic updates follow the configured manifest; no GitHub release channel was published.",
+    "Capability probe reader threads can outlive the probe if an unrelated surviving descendant keeps inherited pipes open; caller wait and output are bounded."
+  ]
+}
