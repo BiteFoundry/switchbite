@@ -161,7 +161,13 @@ fn insufficient_context_and_bounded_repair() {
         &w,
         run,
         action(&s, "gather_context", "one"),
-        json!({"status":"gathered","context_refs":["docs/context.md"]}),
+        json!({"status":"gathered","context_refs":["docs/context.md"],"summary":"important context"}),
+    );
+    assert!(
+        action(&s, "route", "one")["payload"]["route_input"]["task"]["objective"]
+            .as_str()
+            .unwrap()
+            .contains("important context")
     );
     let s = send(
         &w,
@@ -404,4 +410,89 @@ fn compact_events_preserve_idempotency_and_bound_snapshots() {
     assert!(count <= 2, "snapshot files: {count}");
     let restarted = Workflow::new(dir.path().to_path_buf());
     assert_eq!(restarted.observe(&run, &event).unwrap(), s);
+}
+
+#[test]
+fn role_policies_exclude_dependency_producers_from_review() {
+    let dir = tempfile::tempdir().unwrap();
+    let w = Workflow::new(dir.path().to_path_buf());
+    let req = json!({"workspace":"workspace","pool":[{"id":"a","description":"worker","capabilities":[],"available":true},{"id":"b","description":"worker","capabilities":[],"available":true}],"plan":{"nodes":[{"id":"build","objective":"build","role":"implementation"},{"id":"review","objective":"review","role":"review","depends_on":["build"]}]}});
+    let s = w.start(&req).unwrap();
+    let run = s["run_id"].as_str().unwrap();
+    assert_eq!(
+        action(&s, "route", "build")["payload"]["route_input"]["policy"]["profile"],
+        "implementation"
+    );
+    let s = send(
+        &w,
+        run,
+        action(&s, "route", "build"),
+        json!({"status":"ready","candidate_id":"a"}),
+    );
+    let s = send(&w, run, action(&s, "prepare", "build"), prepared());
+    let s = send(
+        &w,
+        run,
+        action(&s, "launch", "build"),
+        json!({"status":"completed","completion_verified":true}),
+    );
+    let s = send(
+        &w,
+        run,
+        action(&s, "verify", "build"),
+        json!({"status":"passed","evidence":[]}),
+    );
+    let s = send(
+        &w,
+        run,
+        action(&s, "integrate", "build"),
+        json!({"status":"integrated"}),
+    );
+    let a = action(&s, "route", "review");
+    let input = &a["payload"]["route_input"];
+    assert_eq!(input["policy"]["profile"], "review");
+    assert_eq!(input["policy"]["excluded_candidate_ids"], json!(["a"]));
+    switchbite::routing::normalize(input).unwrap();
+    let event = json!({"action_id":a["id"],"event_id":"bad-reviewer","result":{"status":"ready","candidate_id":"a"}});
+    assert_eq!(w.observe(run, &event).unwrap_err().code, "invalid_receipt");
+    let s = send(&w, run, a, json!({"status":"ready","candidate_id":"b"}));
+    assert_eq!(action(&s, "prepare", "review")["kind"], "prepare");
+}
+#[test]
+fn refresh_pool_resumes_holds_and_protects_active_candidates() {
+    let dir = tempfile::tempdir().unwrap();
+    let w = Workflow::new(dir.path().to_path_buf());
+    let req = request();
+    let s = w.start(&req).unwrap();
+    let run = s["run_id"].as_str().unwrap();
+    let s = send(
+        &w,
+        run,
+        action(&s, "route", "one"),
+        json!({"status":"ready","candidate_id":"a"}),
+    );
+    let s = send(
+        &w,
+        run,
+        action(&s, "route", "two"),
+        json!({"status":"hold","reason_codes":["no_eligible_candidates"],"next_action":"refresh_pool"}),
+    );
+    let refresh = action(&s, "refresh_pool", "two").clone();
+    let mut pool = req["pool"].clone();
+    pool[0]["description"] = json!("changed active profile");
+    let bad = json!({"action_id":refresh["id"],"event_id":"bad-pool","result":{"pool":pool}});
+    assert_eq!(w.observe(run, &bad).unwrap_err().code, "invalid_receipt");
+    let mut pool = req["pool"].clone();
+    pool[1]["description"] = json!("updated idle profile");
+    let s = send(&w, run, &refresh, json!({"pool":pool}));
+    let route = action(&s, "route", "two");
+    assert_eq!(
+        route["payload"]["route_input"]["pool"][1]["description"],
+        "updated idle profile"
+    );
+    assert_eq!(
+        route["payload"]["route_input"]["policy"]["tie_behavior"],
+        "stable_id"
+    );
+    assert_eq!(action(&s, "prepare", "one")["kind"], "prepare");
 }

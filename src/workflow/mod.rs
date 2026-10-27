@@ -71,6 +71,8 @@ struct Task {
     attempts: u64,
     context_gathered: bool,
     #[serde(default)]
+    context_summary: Option<String>,
+    #[serde(default)]
     next_inspect_at_ms: u64,
     #[serde(default)]
     evidence: Vec<Value>,
@@ -220,58 +222,7 @@ impl Workflow {
                 strings(check.get("args"), 4096)?;
             }
         }
-        let pool = request["pool"]
-            .as_array()
-            .filter(|p| p.len() <= 16)
-            .ok_or(err("invalid_request"))?;
-        let mut ids = BTreeSet::new();
-        for c in pool {
-            let obj = c.as_object().ok_or(err("invalid_request"))?;
-            if obj.keys().any(|k| {
-                ![
-                    "id",
-                    "description",
-                    "capabilities",
-                    "available",
-                    "estimated_cost",
-                    "estimated_latency_ms",
-                    "has_context",
-                    "provider",
-                    "model",
-                    "effort",
-                    "executable",
-                    "resource_key",
-                    "args",
-                ]
-                .contains(&k.as_str())
-            }) {
-                return Err(err("invalid_request"));
-            }
-            for key in ["provider", "model", "effort", "executable", "resource_key"] {
-                if c.get(key).is_some() {
-                    text(c, key, 4096)?;
-                }
-            }
-            strings(c.get("args"), 4096)?;
-            let mut route_candidate = c.clone();
-            route_candidate.as_object_mut().unwrap().retain(|k, _| {
-                [
-                    "id",
-                    "description",
-                    "capabilities",
-                    "available",
-                    "estimated_cost",
-                    "estimated_latency_ms",
-                    "has_context",
-                ]
-                .contains(&k.as_str())
-            });
-            crate::routing::normalize(&json!({"version":2,"task":{"id":"validation","objective":"validation"},"pool":[route_candidate]})).map_err(|_| err("invalid_request"))?;
-            let cid = text(c, "id", 128)?;
-            if !id(cid) || !ids.insert(cid.to_owned()) {
-                return Err(err("invalid_request"));
-            }
-        }
+        validate_pool(&request["pool"])?;
         for (k, default, max) in [("max_parallel", 2, 16), ("repair_rounds", 2, 10)] {
             if let Some(v) = request.get(k) {
                 if v.as_u64()
@@ -501,6 +452,9 @@ impl Workflow {
                             })
                             .ok_or(err("invalid_receipt"))?
                             .clone();
+                        if review_exclusions(&s, i).contains(&cid.to_string()) {
+                            return Err(err("invalid_receipt"));
+                        }
                         s.tasks[i].candidate = Some(c);
                         s.tasks[i].state = "routed".into();
                     }
@@ -512,11 +466,44 @@ impl Workflow {
                         {
                             "needs_context"
                         } else {
-                            "held"
+                            "needs_pool"
                         }
                         .into();
                     }
                     _ => return Err(err("invalid_receipt")),
+                }
+            }
+            "refresh_pool" => {
+                let pool = result.get("pool").ok_or(err("invalid_receipt"))?;
+                validate_pool(pool).map_err(|_| err("invalid_receipt"))?;
+                let replacement = pool.as_array().unwrap();
+                for task in &s.tasks {
+                    if [
+                        "routed",
+                        "preparing",
+                        "prepared",
+                        "launching",
+                        "running",
+                        "unknown",
+                        "verifying",
+                        "integrating",
+                    ]
+                    .contains(&task.state.as_str())
+                    {
+                        if let Some(candidate) = &task.candidate {
+                            if !replacement.iter().any(|c| c == candidate) {
+                                return Err(err("invalid_receipt"));
+                            }
+                        }
+                    }
+                }
+                s.request["pool"] = pool.clone();
+                for task in &mut s.tasks {
+                    if ["needs_pool", "awaiting_pool", "held", "routing"]
+                        .contains(&task.state.as_str())
+                    {
+                        task.state = "pending".into();
+                    }
                 }
             }
             "prepare" => {
@@ -622,6 +609,11 @@ impl Workflow {
                     let refs = strings(result.get("context_refs"), 1000)
                         .map_err(|_| err("invalid_receipt"))?;
                     s.tasks[i].node["context_refs"] = json!(refs);
+                    s.tasks[i].context_summary = match result.get("summary") {
+                        None => None,
+                        Some(Value::String(v)) if v.len() <= 4000 => Some(v.clone()),
+                        _ => return Err(err("invalid_receipt")),
+                    };
                     s.tasks[i].context_gathered = true;
                     s.tasks[i].state = "pending".into();
                 }
@@ -646,6 +638,10 @@ impl Workflow {
         }
         s.recent_events.push(summary);
         s.actions.remove(pos);
+        if kind == "refresh_pool" {
+            s.actions
+                .retain(|a| a["kind"] != "refresh_pool" && a["kind"] != "route");
+        }
         s.events.insert(eid.to_string(), json!(digest));
         self.schedule(&mut s);
         self.save(&mut s)?;
@@ -727,14 +723,42 @@ impl Workflow {
                 .tasks
                 .iter()
                 .filter(|t| {
-                    !["pending", "done", "held", "failed", "blocked"].contains(&t.state.as_str())
+                    ![
+                        "pending",
+                        "done",
+                        "held",
+                        "failed",
+                        "blocked",
+                        "needs_pool",
+                        "awaiting_pool",
+                    ]
+                    .contains(&t.state.as_str())
                 })
                 .count();
             match state.as_str() {
                 "pending" if active < max => {
                     s.tasks[i].state = "routing".into();
                     let node = &s.tasks[i].node;
-                    let task = json!({"id":node["id"],"objective":node["objective"],"requirements":node.get("requirements").cloned().unwrap_or(json!([])),"context_refs":node.get("context_refs").cloned().unwrap_or(json!([]))});
+                    let mut objective = node["objective"].as_str().unwrap().to_owned();
+                    if let Some(summary) = s.tasks[i]
+                        .context_summary
+                        .as_deref()
+                        .filter(|v| !v.trim().is_empty())
+                    {
+                        objective = format!(
+                            "{}\nGathered context: {}",
+                            objective.chars().take(20000).collect::<String>(),
+                            summary.chars().take(2000).collect::<String>()
+                        );
+                    }
+                    let task = json!({"id":node["id"],"objective":objective,"requirements":node.get("requirements").cloned().unwrap_or(json!([])),"context_refs":node.get("context_refs").cloned().unwrap_or(json!([]))});
+                    let profile = match node["role"].as_str() {
+                        Some("review") => "review",
+                        Some("implementation") | Some("integration") => "implementation",
+                        Some("mockup") => "mockup",
+                        _ => "balanced",
+                    };
+                    let exclusions = review_exclusions(s, i);
                     let pool = s.request["pool"]
                         .as_array()
                         .unwrap()
@@ -758,7 +782,7 @@ impl Workflow {
                             c
                         })
                         .collect::<Vec<_>>();
-                    self.action(s,"route",Some(i),json!({"route_input":{"version":2,"task":task,"pool":pool,"preferences":s.request.get("preferences").cloned().unwrap_or(json!(""))}}));
+                    self.action(s,"route",Some(i),json!({"route_input":{"version":2,"task":task,"pool":pool,"preferences":s.request.get("preferences").cloned().unwrap_or(json!("")),"policy":{"profile":profile,"tie_behavior":"stable_id","excluded_candidate_ids":exclusions}}}));
                 }
                 "routed" => {
                     if self.conflicts(s, i) {
@@ -776,6 +800,15 @@ impl Workflow {
                 }
                 "verifying" => self.action(s, "verify", Some(i), json!({})),
                 "integrating" => self.action(s, "integrate", Some(i), json!({})),
+                "needs_pool" => {
+                    s.tasks[i].state = "awaiting_pool".into();
+                    self.action(
+                        s,
+                        "refresh_pool",
+                        Some(i),
+                        json!({"evidence":s.tasks[i].evidence}),
+                    );
+                }
                 "needs_context" => {
                     s.tasks[i].state = "gathering".into();
                     self.action(s, "gather_context", Some(i), json!({}));
@@ -842,6 +875,73 @@ impl Workflow {
         })
     }
 }
+fn validate_pool(value: &Value) -> Result<(), WorkflowError> {
+    let pool = value
+        .as_array()
+        .filter(|p| p.len() <= 16)
+        .ok_or(err("invalid_request"))?;
+    let mut ids = BTreeSet::new();
+    for c in pool {
+        let obj = c.as_object().ok_or(err("invalid_request"))?;
+        if obj.keys().any(|k| {
+            ![
+                "id",
+                "description",
+                "capabilities",
+                "available",
+                "estimated_cost",
+                "estimated_latency_ms",
+                "has_context",
+                "provider",
+                "model",
+                "effort",
+                "executable",
+                "resource_key",
+                "args",
+            ]
+            .contains(&k.as_str())
+        }) {
+            return Err(err("invalid_request"));
+        }
+        for key in ["provider", "model", "effort", "executable", "resource_key"] {
+            if c.get(key).is_some() {
+                text(c, key, 4096)?;
+            }
+        }
+        strings(c.get("args"), 4096)?;
+        let mut route_candidate = c.clone();
+        route_candidate.as_object_mut().unwrap().retain(|k, _| {
+            [
+                "id",
+                "description",
+                "capabilities",
+                "available",
+                "estimated_cost",
+                "estimated_latency_ms",
+                "has_context",
+            ]
+            .contains(&k.as_str())
+        });
+        crate::routing::normalize(&json!({"version":2,"task":{"id":"validation","objective":"validation"},"pool":[route_candidate]})).map_err(|_| err("invalid_request"))?;
+        let cid = text(c, "id", 128)?;
+        if !id(cid) || !ids.insert(cid.to_owned()) {
+            return Err(err("invalid_request"));
+        }
+    }
+    Ok(())
+}
+fn review_exclusions(s: &State, index: usize) -> BTreeSet<String> {
+    let task = &s.tasks[index];
+    if task.node["role"] != "review" {
+        return BTreeSet::new();
+    }
+    let deps = strings(task.node.get("depends_on"), 128).unwrap_or_default();
+    s.tasks
+        .iter()
+        .filter(|t| deps.iter().any(|id| t.node["id"] == *id))
+        .filter_map(|t| t.candidate.as_ref()?.get("id")?.as_str().map(str::to_owned))
+        .collect()
+}
 fn now_ms() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -879,6 +979,32 @@ fn evidence_summary(kind: &str, result: &Value) -> Value {
         })
         .unwrap_or("accepted");
     let mut summary = json!({"stage":kind, "status":status});
+    if let Some(code) = result
+        .get("reason_codes")
+        .and_then(Value::as_array)
+        .and_then(|a| a.first())
+        .and_then(Value::as_str)
+        .filter(|s| {
+            !s.is_empty()
+                && s.len() <= 128
+                && s.bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || b"_-".contains(&b))
+        })
+    {
+        summary["reason_code"] = json!(code);
+    }
+    if let Some(action) = result
+        .get("next_action")
+        .and_then(Value::as_str)
+        .filter(|s| {
+            !s.is_empty()
+                && s.len() <= 128
+                && s.bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || b"_-".contains(&b))
+        })
+    {
+        summary["next_action"] = json!(action);
+    }
     if let Some(code) = host_error(result) {
         summary["error_code"] = json!(code);
     }
@@ -1022,6 +1148,7 @@ fn validate_plan(plan: &Value) -> Result<Vec<Task>, WorkflowError> {
             execution_id: None,
             attempts: 0,
             context_gathered: false,
+            context_summary: None,
             next_inspect_at_ms: 0,
             evidence: vec![],
         });
