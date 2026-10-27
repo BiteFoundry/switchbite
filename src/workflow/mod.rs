@@ -30,14 +30,7 @@ fn err(code: &'static str) -> WorkflowError {
     WorkflowError { code }
 }
 fn bounded(v: &Value) -> Result<(), WorkflowError> {
-    if serde_json::to_vec(v)
-        .map_err(|_| err("invalid_request"))?
-        .len()
-        > LIMIT
-    {
-        return Err(err("invalid_request"));
-    }
-    Ok(())
+    crate::contracts::bounded(v, LIMIT).map_err(|_| err("invalid_request"))
 }
 fn text<'a>(v: &'a Value, key: &str, max: usize) -> Result<&'a str, WorkflowError> {
     v.get(key)
@@ -156,7 +149,7 @@ impl Workflow {
     }
     fn response(s: &State) -> Value {
         let done = s.tasks.iter().filter(|t| t.state == "done").count();
-        json!({"run_id":s.run_id,"status":s.status,"summary":format!("{done}/{} tasks completed",s.tasks.len()),"tasks":s.tasks.iter().map(|t|json!({"task":t.node,"id":t.node["id"],"status":t.state,"candidate":t.candidate,"prepared":t.prepared,"execution_id":t.execution_id,"repair_rounds":t.attempts})).collect::<Vec<_>>(),"actions":s.actions,"events":s.events.values().collect::<Vec<_>>(),"progress":{"done":done,"total":s.tasks.len()}})
+        json!({"run_id":s.run_id,"status":s.status,"summary":format!("{done}/{} tasks completed",s.tasks.len()),"tasks":s.tasks.iter().map(|t|json!({"task":t.node,"id":t.node["id"],"status":t.state,"candidate":t.candidate,"prepared":t.prepared,"execution_id":t.execution_id,"repair_rounds":t.attempts})).collect::<Vec<_>>(),"actions":s.actions,"events":s.events.values().collect::<Vec<_>>(),"revision":s.revision,"progress":{"done":done,"total":s.tasks.len(),"blocked":s.tasks.iter().filter(|t| ["held","blocked"].contains(&t.state.as_str())).count()}})
     }
     pub fn start(&self, request: &Value) -> Result<Value, WorkflowError> {
         let _g = MUTATION.lock().map_err(|_| err("storage_error"))?;
@@ -180,12 +173,79 @@ impl Workflow {
             return Err(err("invalid_request"));
         }
         text(request, "workspace", 4096)?;
+        if request.get("goal").is_some() {
+            text(request, "goal", 24000)?;
+        }
+        if request.get("host").is_some_and(|v| !v.is_object()) {
+            return Err(err("invalid_request"));
+        }
+        if request
+            .get("preferences")
+            .is_some_and(|v| v.as_str().is_none_or(|s| s.len() > 8000))
+        {
+            return Err(err("invalid_request"));
+        }
+        if let Some(checks) = request.get("checks") {
+            let checks = checks
+                .as_array()
+                .filter(|a| a.len() <= 32)
+                .ok_or(err("invalid_request"))?;
+            for check in checks {
+                let o = check.as_object().ok_or(err("invalid_request"))?;
+                if o.keys().any(|k| !["program", "args"].contains(&k.as_str())) {
+                    return Err(err("invalid_request"));
+                }
+                text(check, "program", 4096)?;
+                strings(check.get("args"), 4096)?;
+            }
+        }
         let pool = request["pool"]
             .as_array()
             .filter(|p| p.len() <= 16)
             .ok_or(err("invalid_request"))?;
         let mut ids = BTreeSet::new();
         for c in pool {
+            let obj = c.as_object().ok_or(err("invalid_request"))?;
+            if obj.keys().any(|k| {
+                ![
+                    "id",
+                    "description",
+                    "capabilities",
+                    "available",
+                    "estimated_cost",
+                    "estimated_latency_ms",
+                    "has_context",
+                    "provider",
+                    "model",
+                    "effort",
+                    "executable",
+                    "resource_key",
+                    "args",
+                ]
+                .contains(&k.as_str())
+            }) {
+                return Err(err("invalid_request"));
+            }
+            for key in ["provider", "model", "effort", "executable", "resource_key"] {
+                if c.get(key).is_some() {
+                    text(c, key, 4096)?;
+                }
+            }
+            strings(c.get("args"), 4096)?;
+            let mut route_candidate = c.clone();
+            route_candidate.as_object_mut().unwrap().retain(|k, _| {
+                [
+                    "id",
+                    "description",
+                    "capabilities",
+                    "available",
+                    "estimated_cost",
+                    "estimated_latency_ms",
+                    "has_context",
+                ]
+                .contains(&k.as_str())
+            });
+            crate::routing::normalize(&json!({"version":2,"task":{"id":"validation","objective":"validation"},"pool":[route_candidate]})).map_err(|_| err("invalid_request"))?;
             let cid = text(c, "id", 128)?;
             if !id(cid) || !ids.insert(cid.to_owned()) {
                 return Err(err("invalid_request"));
@@ -227,6 +287,12 @@ impl Workflow {
         self.save(&mut s)?;
         Ok(Self::response(&s))
     }
+    /// Read the persisted request for a trusted local host constructing an adapter.
+    pub fn request(&self, run_id: &str) -> Result<Value, WorkflowError> {
+        let _g = MUTATION.lock().map_err(|_| err("storage_error"))?;
+        let _lock = self.lock()?;
+        Ok(self.load(run_id)?.request)
+    }
     pub fn status(&self, run_id: &str) -> Result<Value, WorkflowError> {
         let _g = MUTATION.lock().map_err(|_| err("storage_error"))?;
         let _lock = self.lock()?;
@@ -252,6 +318,15 @@ impl Workflow {
             }
             "cancel" if s.status == "running" || s.status == "paused" => {
                 s.status = "cancelled".into();
+                // A launch lease may already be executing even if no receipt was observed.
+                for a in &s.actions {
+                    if a["kind"] == "launch" {
+                        if let Some(i) = s.tasks.iter().position(|t| t.node["id"] == a["task_id"]) {
+                            s.tasks[i].execution_id = a["id"].as_str().map(str::to_owned);
+                            s.tasks[i].state = "unknown".into();
+                        }
+                    }
+                }
                 s.actions.clear();
                 for i in 0..s.tasks.len() {
                     if s.tasks[i].execution_id.is_some()
@@ -317,22 +392,38 @@ impl Workflow {
             }
             "repair" => {
                 let i = index.ok_or(err("invalid_receipt"))?;
-                if let Some(plan) = result.get("plan") {
-                    let replacements = validate_plan(plan).map_err(|_| err("invalid_receipt"))?;
-                    if replacements.len() != 1
-                        || replacements[0].node["id"] != s.tasks[i].node["id"]
-                    {
-                        return Err(err("invalid_receipt"));
-                    }
-                    s.tasks[i].node = replacements[0].node.clone();
+                let nodes = if let Some(plan) = result.get("plan") {
+                    plan.get("nodes")
+                        .and_then(Value::as_array)
+                        .ok_or(err("invalid_receipt"))?
+                        .clone()
                 } else {
-                    let node = result.get("task").ok_or(err("invalid_receipt"))?;
-                    let replacement = validate_plan(&json!({"nodes":[node]}))
-                        .map_err(|_| err("invalid_receipt"))?;
-                    if replacement[0].node["id"] != s.tasks[i].node["id"] {
+                    vec![result.get("task").ok_or(err("invalid_receipt"))?.clone()]
+                };
+                if nodes.is_empty() || !nodes.iter().any(|n| n["id"] == s.tasks[i].node["id"]) {
+                    return Err(err("invalid_receipt"));
+                }
+                let mut merged = s.tasks.iter().map(|t| t.node.clone()).collect::<Vec<_>>();
+                let mut seen = BTreeSet::new();
+                for node in nodes {
+                    let name = text(&node, "id", 128).map_err(|_| err("invalid_receipt"))?;
+                    if !seen.insert(name.to_owned()) {
                         return Err(err("invalid_receipt"));
                     }
-                    s.tasks[i].node = replacement[0].node.clone();
+                    let j = s
+                        .tasks
+                        .iter()
+                        .position(|t| t.node["id"] == name)
+                        .ok_or(err("invalid_receipt"))?;
+                    if j != i && s.tasks[j].state != "pending" && s.tasks[j].state != "blocked" {
+                        return Err(err("invalid_receipt"));
+                    }
+                    merged[j] = node;
+                }
+                let validated =
+                    validate_plan(&json!({"nodes": merged})).map_err(|_| err("invalid_receipt"))?;
+                for (old, new) in s.tasks.iter_mut().zip(validated) {
+                    old.node = new.node;
                 }
                 s.tasks[i].state = "pending".into();
                 s.tasks[i].candidate = None;
@@ -349,7 +440,18 @@ impl Workflow {
                             .as_array()
                             .unwrap()
                             .iter()
-                            .find(|c| c["id"] == cid && c["available"] == true)
+                            .find(|c| {
+                                c["id"] == cid
+                                    && c["available"] == true
+                                    && strings(s.tasks[i].node.get("requirements"), 128)
+                                        .unwrap_or_default()
+                                        .iter()
+                                        .all(|r| {
+                                            c["capabilities"]
+                                                .as_array()
+                                                .is_some_and(|a| a.iter().any(|v| v == r))
+                                        })
+                            })
                             .ok_or(err("invalid_receipt"))?
                             .clone();
                         s.tasks[i].candidate = Some(c);
@@ -398,10 +500,25 @@ impl Workflow {
                             .filter(|x| !x.is_empty() && x.len() <= 1024)
                             .ok_or(err("invalid_receipt"))?
                             .to_string();
+                        if s.tasks[i]
+                            .execution_id
+                            .as_ref()
+                            .is_some_and(|old| old != &ex)
+                        {
+                            return Err(err("invalid_receipt"));
+                        }
                         s.tasks[i].execution_id = Some(ex);
                         s.tasks[i].state = result["status"].as_str().unwrap().into();
                     }
                     Some("completed") if result["completion_verified"] == true => {
+                        if let (Some(expected), Some(received)) = (
+                            s.tasks[i].execution_id.as_deref(),
+                            result.get("execution_id").and_then(Value::as_str),
+                        ) {
+                            if expected != received {
+                                return Err(err("invalid_receipt"));
+                            }
+                        }
                         s.tasks[i].state = "verifying".into();
                     }
                     Some("failed") => {
@@ -508,7 +625,9 @@ impl Workflow {
             let active = s
                 .tasks
                 .iter()
-                .filter(|t| !["pending", "done", "held", "failed"].contains(&t.state.as_str()))
+                .filter(|t| {
+                    !["pending", "done", "held", "failed", "blocked"].contains(&t.state.as_str())
+                })
                 .count();
             match state.as_str() {
                 "pending" if active < max => {
@@ -610,11 +729,24 @@ impl Workflow {
     }
 }
 fn path_overlap(a: &str, b: &str) -> bool {
+    if a.contains("://")
+        || b.contains("://")
+        || a.starts_with("artifact:")
+        || b.starts_with("artifact:")
+    {
+        return false;
+    }
     let a = a.replace('\\', "/");
     let b = b.replace('\\', "/");
     a == b || a.starts_with(&(b.clone() + "/")) || b.starts_with(&(a + "/"))
 }
 fn validate_plan(plan: &Value) -> Result<Vec<Task>, WorkflowError> {
+    if plan
+        .as_object()
+        .is_none_or(|o| o.keys().any(|k| k != "nodes"))
+    {
+        return Err(err("invalid_request"));
+    }
     let nodes = plan
         .get("nodes")
         .and_then(Value::as_array)
