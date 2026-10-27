@@ -223,6 +223,15 @@ struct Stream {
     value: Value,
     dir: PathBuf,
     hash: String,
+    started: Option<u64>,
+}
+fn stdout_path(dir: &Path, hash: &str) -> PathBuf {
+    let output = dir.join("output").join(format!("{hash}.out"));
+    if file(&output).is_some() {
+        output
+    } else {
+        dir.join("messages").join(format!("{hash}.jsonl"))
+    }
 }
 fn add(
     streams: &mut Vec<Stream>,
@@ -246,7 +255,7 @@ fn add(
             serde_json::from_slice::<Value>(&b).ok()
         })
         .unwrap_or(Value::Null);
-    let out = dir.join("output").join(format!("{hash}.out"));
+    let out = stdout_path(&dir, &hash);
     let err = dir.join("output").join(format!("{hash}.err"));
     if record.is_null() && !out.exists() && !err.exists() {
         return;
@@ -273,27 +282,29 @@ fn add(
     let silence = modified.or(start).map(|t| now.saturating_sub(t));
     let id = format!("{stage}-{hash}");
     let needs_input = alive == Some(true)
-        && ["out", "err"].iter().any(|suffix| {
-            let (entries, _, _, _) = tail(
-                &dir.join("output").join(format!("{hash}.{suffix}")),
-                &id,
-                suffix,
-            );
-            entries.iter().any(|e| {
-                let text = e["text"].as_str().unwrap_or("").to_ascii_lowercase();
-                [
-                    "permission required",
-                    "permission to continue",
-                    "approve this command",
-                    "press enter to continue",
-                    "please log in",
-                    "please login",
-                    "sign in to continue",
-                ]
-                .iter()
-                .any(|p| text.contains(p))
-            })
-        });
+        && [("out", "stdout"), ("err", "stderr")]
+            .iter()
+            .any(|(suffix, source)| {
+                let (entries, _, _, _) = tail(
+                    &dir.join("output").join(format!("{hash}.{suffix}")),
+                    &id,
+                    source,
+                );
+                entries.iter().any(|e| {
+                    let text = e["text"].as_str().unwrap_or("").to_ascii_lowercase();
+                    [
+                        "permission required",
+                        "permission to continue",
+                        "approve this command",
+                        "press enter to continue",
+                        "please log in",
+                        "please login",
+                        "sign in to continue",
+                    ]
+                    .iter()
+                    .any(|p| text.contains(p))
+                })
+            });
     let health = if needs_input {
         "needs_input"
     } else if status == "failed" || status == "timeout" || status == "output_limit" {
@@ -309,8 +320,13 @@ fn add(
     } else {
         status
     };
-    let value = json!({"id":id,"task_id":task,"provider":provider,"stage":stage,"status":status,"health":health,"label":health,"elapsed_ms":start.map(|t| record["finished_unix_ms"].as_u64().unwrap_or(now).saturating_sub(t)),"silence_ms":silence,"last_output_at_ms":modified,"process_alive":alive,"stdout_bytes":record["stdout_bytes"].as_u64().unwrap_or_else(|| fs::metadata(dir.join("output").join(format!("{hash}.out"))).map(|m|m.len()).unwrap_or(0)),"stderr_bytes":record["stderr_bytes"].as_u64().unwrap_or_else(|| fs::metadata(dir.join("output").join(format!("{hash}.err"))).map(|m|m.len()).unwrap_or(0)),"can_retry":retry && alive == Some(true) && status == "running"});
-    streams.push(Stream { value, dir, hash });
+    let value = json!({"id":id,"task_id":task,"provider":provider,"stage":stage,"status":status,"health":health,"label":health,"elapsed_ms":start.map(|t| record["finished_unix_ms"].as_u64().unwrap_or(now).saturating_sub(t)),"silence_ms":silence,"last_output_at_ms":modified,"process_alive":alive,"stdout_bytes":record["stdout_bytes"].as_u64().unwrap_or_else(|| fs::metadata(stdout_path(&dir, &hash)).map(|m|m.len()).unwrap_or(0)),"stderr_bytes":record["stderr_bytes"].as_u64().unwrap_or_else(|| fs::metadata(dir.join("output").join(format!("{hash}.err"))).map(|m|m.len()).unwrap_or(0)),"can_retry":retry && alive == Some(true) && status == "running"});
+    streams.push(Stream {
+        value,
+        dir,
+        hash,
+        started: start,
+    });
 }
 /// Snapshot only filenames derived from workflow-owned execution IDs.
 pub fn snapshot(
@@ -383,7 +399,10 @@ pub fn snapshot(
                     return None;
                 }
                 let s = e["stream_ref"].as_str()?;
-                let base = s.rsplit(['/', '\\']).next()?.strip_suffix(".out")?;
+                let name = s.rsplit(['/', '\\']).next()?;
+                let base = name
+                    .strip_suffix(".jsonl")
+                    .or_else(|| name.strip_suffix(".out"))?;
                 if base.len() == 24
                     && base
                         .bytes()
@@ -416,21 +435,43 @@ pub fn snapshot(
             ("verify", "workspace"),
             ("integrate", "integration_workspace"),
         ] {
-            if let Some(dir) = task["prepared"][key].as_str() {
-                for i in 0..count {
-                    let tag = format!("check-{}-{i}", Path::new(dir).display());
-                    add(
-                        &mut streams,
-                        host.clone(),
-                        hash(&tag),
-                        tid,
-                        provider,
-                        stage,
-                        status,
-                        now_ms,
-                        false,
-                    );
-                }
+            let action_id = state["actions"]
+                .as_array()
+                .and_then(|actions| {
+                    actions
+                        .iter()
+                        .rev()
+                        .find(|a| a["kind"] == stage && a["task_id"] == task["id"])
+                        .and_then(|a| a["id"].as_str())
+                })
+                .or_else(|| {
+                    task["evidence"].as_array().and_then(|evidence| {
+                        evidence
+                            .iter()
+                            .rev()
+                            .find(|e| e["stage"] == stage)
+                            .and_then(|e| e["action_id"].as_str())
+                    })
+                });
+            for i in 0..count {
+                let tag = if let Some(action_id) = action_id {
+                    format!("check-{action_id}-{i}")
+                } else if let Some(dir) = task["prepared"][key].as_str() {
+                    format!("check-{}-{i}", Path::new(dir).display())
+                } else {
+                    continue;
+                };
+                add(
+                    &mut streams,
+                    host.clone(),
+                    hash(&tag),
+                    tid,
+                    provider,
+                    stage,
+                    status,
+                    now_ms,
+                    false,
+                );
             }
         }
     }
@@ -442,18 +483,32 @@ pub fn snapshot(
                 .ok_or_else(|| json!({"code":"unknown_stream"}))?,
         )
     } else {
+        let newest = |s: &&Stream| {
+            (
+                s.started.unwrap_or(0),
+                s.value["last_output_at_ms"].as_u64().unwrap_or(0),
+            )
+        };
         streams
             .iter()
-            .find(|s| s.value["process_alive"] == true)
-            .or_else(|| streams.first())
+            .filter(|s| s.value["process_alive"] == true)
+            .max_by_key(newest)
+            .or_else(|| {
+                streams
+                    .iter()
+                    .filter(|s| s.value["stage"] == "worker")
+                    .max_by_key(|s| {
+                        (
+                            s.value["last_output_at_ms"].as_u64().unwrap_or(0),
+                            s.started.unwrap_or(0),
+                        )
+                    })
+            })
+            .or_else(|| streams.iter().max_by_key(newest))
     };
     let selected_value = chosen.map(|s| {
         let id = s.value["id"].as_str().unwrap_or("");
-        let (mut out, a, _, _) = tail(
-            &s.dir.join("output").join(format!("{}.out", s.hash)),
-            id,
-            "stdout",
-        );
+        let (mut out, a, _, _) = tail(&stdout_path(&s.dir, &s.hash), id, "stdout");
         let (err, b, _, _) = tail(
             &s.dir.join("output").join(format!("{}.err", s.hash)),
             id,
@@ -472,7 +527,9 @@ pub fn snapshot(
     let active = streams.iter().find(|s| s.value["process_alive"] == true);
     let (health, action) = if state["status"] == "paused" {
         ("paused", Some("resume"))
-    } else if coordinator.is_some_and(|c| c["error"].is_object() || c["error"].is_string()) {
+    } else if (!state["coordinator"]["error"].is_null() && state["coordinator"]["error"] != false)
+        || (!state["attention"].is_null() && state["attention"] != false)
+    {
         ("needs_attention", Some("resume"))
     } else if let Some(s) = active {
         (s.value["health"].as_str().unwrap_or("active"), None)

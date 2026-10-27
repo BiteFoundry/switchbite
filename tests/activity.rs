@@ -6,7 +6,7 @@ use switchbite::{activity::snapshot, workflow::Workflow};
 fn setup() -> (tempfile::TempDir, String, Value, String) {
     let root = tempfile::tempdir().unwrap();
     let workflow = Workflow::new(root.path().to_path_buf());
-    let started = workflow.start(&json!({"workspace":"workspace","pool":[{"id":"a","description":"worker","capabilities":[],"available":true}],"plan":{"nodes":[{"id":"one","objective":"one","outputs":["src/one"]}]}})).unwrap();
+    let started = workflow.start(&json!({"workspace":"workspace","pool":[{"id":"a","description":"worker","capabilities":[],"available":true}],"checks":[{"program":"test","args":[]}],"plan":{"nodes":[{"id":"one","objective":"one","outputs":["src/one"]}]}})).unwrap();
     let run = started["run_id"].as_str().unwrap().to_owned();
     let execution = "owned-execution";
     let hash = format!("{:x}", Sha256::digest(execution.as_bytes()))[..24].to_owned();
@@ -109,4 +109,47 @@ fn parses_actual_antigravity_and_multiple_provider_content_items() {
     assert_ne!(entries[2]["id"], entries[3]["id"]);
     assert!(!value.to_string().contains("hidden reasoning"));
     assert!(!value.to_string().contains("secret"));
+}
+
+#[test]
+fn recovers_completed_worker_from_owned_jsonl_reference() {
+    let (root, run, mut state, hash) = setup();
+    let messages = root.path().join(&run).join("host/messages");
+    fs::create_dir_all(&messages).unwrap();
+    fs::write(
+        messages.join(format!("{hash}.jsonl")),
+        "{\"type\":\"text\",\"part\":{\"text\":\"legacy response\"}}\n",
+    )
+    .unwrap();
+    state["tasks"][0]["execution_id"] = Value::Null;
+    state["tasks"][0]["status"] = json!("done");
+    state["tasks"][0]["evidence"] =
+        json!([{ "stage":"launch", "stream_ref":format!("untrusted/path/{hash}.jsonl") }]);
+    let value = snapshot(root.path(), &run, &state, None, None, 10_000).unwrap();
+    assert_eq!(value["selected_stream"]["stage"], "worker");
+    assert_eq!(
+        value["selected_stream"]["entries"][0]["text"],
+        "legacy response"
+    );
+}
+
+#[test]
+fn check_logs_use_the_matching_action_id() {
+    let (root, run, mut state, _) = setup();
+    let output = root.path().join(&run).join("host/output");
+    let id = "verify-action-1";
+    let hash = format!("{:x}", Sha256::digest(format!("check-{id}-0").as_bytes()))[..24].to_owned();
+    fs::write(output.join(format!("{hash}.out")), "check output\n").unwrap();
+    state["tasks"][0]["execution_id"] = Value::Null;
+    state["tasks"][0]["prepared"] =
+        json!({"workspace":"workspace", "integration_workspace":"shared"});
+    state["tasks"][0]["evidence"] = json!([{ "stage":"verify", "action_id":id }]);
+    let value = snapshot(root.path(), &run, &state, None, None, 10_000).unwrap();
+    assert_eq!(value["streams"].as_array().unwrap().len(), 1);
+    assert_eq!(value["selected_stream"]["stage"], "verify");
+    assert_eq!(value["selected_stream"]["task_id"], "one");
+    assert_eq!(
+        value["selected_stream"]["entries"][0]["text"],
+        "check output"
+    );
 }
