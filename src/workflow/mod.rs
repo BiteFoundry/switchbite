@@ -1026,6 +1026,14 @@ fn evidence_summary(kind: &str, result: &Value) -> Value {
         })
         .unwrap_or("accepted");
     let mut summary = json!({"stage":kind, "status":status});
+    for key in ["message_ref", "stream_ref"] {
+        if let Some(reference) = result[key]
+            .as_str()
+            .filter(|s| s.len() <= 4096 && !s.chars().any(char::is_control))
+        {
+            summary[key] = json!(reference);
+        }
+    }
     if let Some(code) = result
         .get("reason_codes")
         .and_then(Value::as_array)

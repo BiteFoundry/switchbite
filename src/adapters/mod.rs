@@ -30,6 +30,7 @@ impl HostError {
 pub struct LocalHost {
     workspace: PathBuf,
     state: PathBuf,
+    worktrees: PathBuf,
     base: String,
     timeout: u64,
 }
@@ -193,10 +194,9 @@ fn verified_receipt(provider: &str, output: &[u8], session: &str) -> (bool, Opti
                     if !init
                         || v.get("error").is_some_and(|x| !x.is_null())
                         || v["message"]["stop_reason"] == "refusal"
-                        || v["message"]["content"].as_array().is_some_and(|a| {
-                            a.iter()
-                                .any(|x| x["is_error"] == true || x["type"] == "refusal")
-                        })
+                        || v["message"]["content"]
+                            .as_array()
+                            .is_some_and(|a| a.iter().any(|x| x["type"] == "refusal"))
                     {
                         valid = false;
                     }
@@ -227,12 +227,14 @@ fn verified_receipt(provider: &str, output: &[u8], session: &str) -> (bool, Opti
                     }
                     terminal = true;
                 }
-                "error" | "turn.failed" | "item.failed" => valid = false,
+                "error" | "turn.failed" => valid = false,
+                "item.failed" => {
+                    if !turn {
+                        valid = false;
+                    }
+                }
                 _ => {
-                    if !turn
-                        || v["item"]["status"] == "failed"
-                        || v["item"]["exit_code"].as_i64().is_some_and(|n| n != 0)
-                    {
+                    if !turn {
                         valid = false;
                     }
                 }
@@ -243,6 +245,7 @@ fn verified_receipt(provider: &str, output: &[u8], session: &str) -> (bool, Opti
 }
 fn run_git(dir: &Path, args: &[&str]) -> Result<String, HostError> {
     let output = Command::new("git")
+        .args(["-c", "core.longpaths=true"])
         .current_dir(dir)
         .args(args)
         .output()
@@ -331,10 +334,47 @@ fn validate_worktree(path: &Path, branch: &str, original: &Path) -> Result<(), H
     Ok(())
 }
 impl LocalHost {
+    fn add_worktree(&self, path: &Path, branch: &str, base: &str) -> Result<(), HostError> {
+        if let Ok(existing) = run_git(
+            &self.workspace,
+            &[
+                "rev-parse",
+                "--verify",
+                &format!("refs/heads/{branch}^{{commit}}"),
+            ],
+        ) {
+            if existing != base {
+                return Err(HostError("worktree_branch_conflict"));
+            }
+            run_git(
+                &self.workspace,
+                &["worktree", "add", path_string(path)?, branch],
+            )?;
+        } else {
+            run_git(
+                &self.workspace,
+                &["worktree", "add", "-b", branch, path_string(path)?, base],
+            )?;
+        }
+        Ok(())
+    }
     pub fn new(workspace: &Path, state_dir: &Path, config: &Value) -> Result<Self, HostError> {
         let workspace = fs::canonicalize(workspace).map_err(|_| HostError("invalid_workspace"))?;
         fs::create_dir_all(state_dir).map_err(|_| HostError("io_error"))?;
         let state = fs::canonicalize(state_dir).map_err(|_| HostError("io_error"))?;
+        // Git for Windows has fixed-size internal GIT_DIR buffers even with
+        // core.longpaths. Keep owned worktrees short while receipts stay with
+        // the project. The state-path digest isolates different runs/stores.
+        let worktrees = if cfg!(windows) && path_string(&state)?.len() > 120 {
+            std::env::var_os("LOCALAPPDATA")
+                .map(PathBuf::from)
+                .unwrap_or_else(std::env::temp_dir)
+                .join("Switchbite")
+                .join("workspaces")
+                .join(hash(path_string(&state)?))
+        } else {
+            state.join("worktrees")
+        };
         let reference = config.get("base").and_then(Value::as_str).unwrap_or("HEAD");
         let base = run_git(
             &workspace,
@@ -350,6 +390,7 @@ impl LocalHost {
         Ok(Self {
             workspace,
             state,
+            worktrees,
             base,
             timeout: config
                 .get("timeout_seconds")
@@ -462,7 +503,7 @@ impl LocalHost {
         } else {
             hash(&format!("{task_name}:attempt:{attempt}"))
         };
-        let root = self.state.join("worktrees").join(&run);
+        let root = self.worktrees.join(&run);
         fs::create_dir_all(&root).map_err(|_| HostError("io_error"))?;
         let _lock = git_lock(&root)?;
         let pending = root.join("integration-transaction.json");
@@ -488,34 +529,14 @@ impl LocalHost {
         let integration = root.join("integration");
         let ib = format!("switchbite/{run}/integration");
         if !integration.exists() {
-            run_git(
-                &self.workspace,
-                &[
-                    "worktree",
-                    "add",
-                    "-b",
-                    &ib,
-                    path_string(&integration)?,
-                    &base,
-                ],
-            )?;
+            self.add_worktree(&integration, &ib, &base)?;
         }
         validate_worktree(&integration, &ib, &self.workspace)?;
         let taskpath = root.join(&taskid);
         let branch = format!("switchbite/{run}/{taskid}");
         if !taskpath.exists() {
             let head = run_git(&integration, &["rev-parse", "HEAD"])?;
-            run_git(
-                &self.workspace,
-                &[
-                    "worktree",
-                    "add",
-                    "-b",
-                    &branch,
-                    path_string(&taskpath)?,
-                    &head,
-                ],
-            )?;
+            self.add_worktree(&taskpath, &branch, &head)?;
         }
         validate_worktree(&taskpath, &branch, &self.workspace)?;
         Ok(
@@ -525,8 +546,7 @@ impl LocalHost {
     fn owned(&self, p: &Value, key: &str) -> Result<PathBuf, HostError> {
         let s = string(p.get("prepared").ok_or(HostError("invalid_action"))?, key)?;
         let path = fs::canonicalize(s).map_err(|_| HostError("invalid_workspace"))?;
-        let root = fs::canonicalize(self.state.join("worktrees"))
-            .map_err(|_| HostError("invalid_workspace"))?;
+        let root = fs::canonicalize(&self.worktrees).map_err(|_| HostError("invalid_workspace"))?;
         if !path.starts_with(root) {
             return Err(HostError("invalid_workspace"));
         }
@@ -663,6 +683,9 @@ impl LocalHost {
         }
         let id = string(a, "id")?;
         let session = session_id(id);
+        let messages = self.state.join("messages");
+        fs::create_dir_all(&messages).map_err(|_| HostError("io_error"))?;
+        let message_path = messages.join(format!("{}.txt", hash(id)));
         match provider {
             "codex" => {
                 cmd.args([
@@ -673,6 +696,13 @@ impl LocalHost {
                     "--sandbox",
                     "workspace-write",
                     "--ignore-user-config",
+                    "--ephemeral",
+                    "--output-last-message",
+                    path_string(&message_path)?,
+                    "-c",
+                    "approval_policy=\"never\"",
+                    "-c",
+                    "windows.sandbox=\"unelevated\"",
                     "-c",
                     &format!("model_reasoning_effort=\"{effort}\""),
                     &prompt,
@@ -729,6 +759,14 @@ impl LocalHost {
             ]
             .iter()
             .any(|p| name.starts_with(p))
+                || [
+                    "CODEX_THREAD_ID",
+                    "CODEX_SESSION_ID",
+                    "CODEX_TOOL_CALL_ID",
+                    "CODEX_PERMISSION_PROFILE",
+                    "CODEX_INTERNAL_ORIGINATOR_OVERRIDE",
+                ]
+                .contains(&name.as_str())
             {
                 cmd.env_remove(key);
             }
@@ -743,8 +781,12 @@ impl LocalHost {
             Err(error) => return Err(error),
         };
         let (verified, resolved_model) = verified_receipt(provider, &output, &session);
+        // Private context pointers let the coordinator inspect a failed attempt
+        // and prepare a repair. Browser summaries never expose these raw logs.
+        let stream_path = messages.join(format!("{}.jsonl", hash(id)));
+        fs::write(&stream_path, &output).map_err(|_| HostError("io_error"))?;
         Ok(
-            json!({"status":if ok && verified {"completed"} else {"failed"},"execution_id":id,"completion_verified":ok && verified,"requested_model":model,"resolved_model":resolved_model,"reason":if !ok {Some(stderr_hint.unwrap_or("provider_exit_failed"))} else if !verified {Some("provider_receipt_invalid")} else {None}}),
+            json!({"status":if ok && verified {"completed"} else {"failed"},"execution_id":id,"completion_verified":ok && verified,"requested_model":model,"resolved_model":resolved_model,"message_ref":if message_path.exists(){Some(message_path)}else{None},"stream_ref":stream_path,"reason":if !ok {Some(stderr_hint.unwrap_or("provider_exit_failed"))} else if !verified {Some("provider_receipt_invalid")} else {None}}),
         )
     }
     fn inspect(&self, p: &Value) -> Result<Value, HostError> {
@@ -1023,7 +1065,7 @@ impl LocalHost {
             return Err(HostError("invalid_action"));
         }
         let run = hash(string(action, "run_id")?);
-        let integrated = self.state.join("worktrees").join(&run).join("integration");
+        let integrated = self.worktrees.join(&run).join("integration");
         let _lock = if integrated.exists() {
             let root = integrated.parent().ok_or(HostError("invalid_workspace"))?;
             let lock = git_lock(root)?;
@@ -1109,5 +1151,11 @@ mod tests {
         );
         assert!(!verified_receipt("claude", claude, "other").0);
         assert!(!verified_receipt("claude", b"{\"type\":\"system\",\"subtype\":\"init\",\"session_id\":\"s\"}\n{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":false,\"session_id\":\"s\"}\n", "s").0);
+    }
+    #[test]
+    fn recovered_tool_failure_keeps_terminal_success_for_artifact_verification() {
+        let stream=b"{\"type\":\"thread.started\",\"thread_id\":\"t\"}\n{\"type\":\"turn.started\"}\n{\"type\":\"item.completed\",\"item\":{\"type\":\"command_execution\",\"status\":\"failed\",\"exit_code\":1}}\n{\"type\":\"item.completed\",\"item\":{\"type\":\"agent_message\",\"text\":\"Created the required artifact with another tool\"}}\n{\"type\":\"turn.completed\"}\n";
+        assert!(verified_receipt("codex", stream, "unused").0);
+        assert!(!verified_receipt("codex",b"{\"type\":\"thread.started\",\"thread_id\":\"t\"}\n{\"type\":\"turn.started\"}\n{\"type\":\"turn.failed\"}\n","unused").0);
     }
 }

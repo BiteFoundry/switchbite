@@ -346,7 +346,7 @@ fn package_exact_allowlist_hashes_determinism_and_existing_output_preservation()
     let second = switchbite::package::build(Path::new(BIN), &two).unwrap();
     assert_eq!(first["sha256"], second["sha256"]);
     let mut zip = zip::ZipArchive::new(std::fs::File::open(&one).unwrap()).unwrap();
-    assert_eq!(zip.len(), 18);
+    assert_eq!(zip.len(), 21);
     let manifest: Value = {
         use std::io::Read;
         let mut raw = Vec::new();
@@ -364,13 +364,15 @@ fn package_exact_allowlist_hashes_determinism_and_existing_output_preservation()
     );
     assert!(manifest.get("entrypoint").is_none());
     assert_eq!(manifest["id"], "switchbite");
-    assert_eq!(manifest["files"].as_object().unwrap().len(), 17);
+    assert_eq!(manifest["files"].as_object().unwrap().len(), 20);
     for name in [
         "LICENSE",
         "README.md",
         "docs/stackbite-laya.ko.md",
         "docs/stackbite.ko.md",
         "examples/stackbite-workflow.json",
+        "examples/workflow-minimal.json",
+        "docs/workflow.ko.md",
         "THIRD_PARTY_NOTICES.html",
         "RUST_STANDARD_LIBRARY_NOTICES.html",
     ] {

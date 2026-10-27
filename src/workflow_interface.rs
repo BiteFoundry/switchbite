@@ -45,7 +45,7 @@ pub fn tools() -> Vec<Tool> {
         }}},"examples":[{"run_id":"RUN_ID","event":{"action_id":"PLAN_ACTION_ID","event_id":"plan-1","result":{"plan":{"nodes":[{"id":"build","objective":"Implement the feature","depends_on":[],"role":"implementation","acceptance":["Feature checks pass"],"write_paths":["src/feature.rs"]}]}}}}]});
     vec![
         Tool::new("switchbite_start", "Start a workflow with a goal or plan and a factual worker pool. Run and action IDs and scheduling defaults are generated automatically.", start.as_object().unwrap().clone()),
-        Tool::new("switchbite_next", "Advance a run and return actions. Operation defaults to next; status, pause, resume and cancel inspect or control the same run.", json!({"type":"object","properties":{"run_id":{"type":"string","description":"Run ID returned by start."},"operation":{"type":"string","enum":["next","status","pause","resume","cancel"],"default":"next"}},"required":["run_id"],"additionalProperties":false}).as_object().unwrap().clone()),
+        Tool::new("switchbite_next", "Advance a run and return actions. Operation defaults to next; status, pause, resume and cancel inspect or control the same run. External hosts claim an action immediately before dispatch.", json!({"type":"object","properties":{"run_id":{"type":"string","description":"Run ID returned by start."},"operation":{"type":"string","enum":["next","status","pause","resume","cancel","claim"],"default":"next"},"action_id":{"type":"string","description":"Required for operation claim; exact leased action ID."}},"required":["run_id"],"additionalProperties":false}).as_object().unwrap().clone()),
         Tool::new("switchbite_observe", "Record a plan, repair or host action result with its exact action ID and a stable event ID; identical retries are idempotent.", observe.as_object().unwrap().clone()),
     ]
 }
@@ -70,10 +70,16 @@ impl Interface {
         self.workflow.observe(run, event).map_err(|e| e.to_value())
     }
     pub fn status(&self, run: &str) -> Result<Value, Value> {
-        crate::workflow_runner::background_status(&self.root,run).map_err(|e|e.to_value())
+        crate::workflow_runner::background_status(&self.root, run).map_err(|e| e.to_value())
     }
     pub fn control(&self, run: &str, action: &str) -> Result<Value, Value> {
         self.workflow.control(run, action).map_err(|e| e.to_value())
+    }
+    pub fn claim(&self, run: &str, action: &str) -> Result<Value, Value> {
+        let claimed = self.workflow.claim(run, action).map_err(|e| e.to_value())?;
+        Ok(
+            json!({"run_id":run,"action_id":action,"claimed":claimed,"summary":if claimed{"Action ready for dispatch"}else{"Action is no longer ready; refresh run state"}}),
+        )
     }
     pub fn next(&self, run: &str) -> Result<Value, Value> {
         let request = self.workflow.request(run).map_err(|e| e.to_value())?;

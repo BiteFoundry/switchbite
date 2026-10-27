@@ -35,49 +35,92 @@ static SUPERVISORS: OnceLock<Mutex<BTreeMap<String, Supervisor>>> = OnceLock::ne
 fn supervisors() -> &'static Mutex<BTreeMap<String, Supervisor>> {
     SUPERVISORS.get_or_init(|| Mutex::new(BTreeMap::new()))
 }
-fn supervisor_key(root:&Path,run:&str)->String {format!("{}:{run}",root.display())}
+fn supervisor_key(root: &Path, run: &str) -> String {
+    format!("{}:{run}", root.display())
+}
 
-pub fn local_execution(request:&Value)->bool {
+pub fn local_execution(request: &Value) -> bool {
     request.get("host").is_some_and(Value::is_object)
-        || request["pool"].as_array().is_some_and(|pool|!pool.is_empty()&&pool.iter().all(|c|
-            ["provider","executable","model","effort"].iter().all(|k|c.get(k).is_some_and(Value::is_string))))
+        || request["pool"].as_array().is_some_and(|pool| {
+            !pool.is_empty()
+                && pool.iter().all(|c| {
+                    ["provider", "executable", "model", "effort"]
+                        .iter()
+                        .all(|k| c.get(k).is_some_and(Value::is_string))
+                })
+        })
 }
 
 /// A persistent MCP process owns one lightweight supervisor per run. The known
 /// DAG advances without repeated model/tool calls; coordinator actions wait in
 /// the durable queue until the coordinator supplies their observations.
-pub fn start_background(root:&Path,run:&str,judge:Option<Arc<agent::ConfiguredJudge>>)->Result<Value,RunnerError> {
-    let engine=Workflow::new(root.to_path_buf());
-    let state=engine.status(run).map_err(map_core)?;
-    let key=supervisor_key(root,run);
-    let mut map=supervisors().lock().map_err(|_|error("driver_busy"))?;
-    let live=map.get(&key).is_some_and(|s|!s.handle.is_finished());
-    if !live&&state["status"]!="completed" {
-        let path=root.to_path_buf(); let run=run.to_owned();
-        let latest=Arc::new(Mutex::new(None)); let output=latest.clone();
-        let handle=thread::spawn(move ||loop {
-            let result=advance(&path,&run,judge.clone());
-            let terminal=result.as_ref().is_ok_and(|s|
-                s["status"]=="completed"||(s["status"]=="cancelled"
-                &&s["driver"]["active_actions"].as_u64().unwrap_or(0)==0
-                && !s["tasks"].as_array().is_some_and(|ts|ts.iter().any(|t|t["status"]=="unknown"||t["status"]=="running"))));
-            let failed=result.is_err();
-            if let Ok(mut slot)=output.lock(){*slot=Some(match result{Ok(v)=>v,Err(e)=>json!({"attention":e.to_value()})});}
-            if terminal||failed {break;}
-            thread::sleep(Duration::from_millis(250));
+pub fn start_background(
+    root: &Path,
+    run: &str,
+    judge: Option<Arc<agent::ConfiguredJudge>>,
+) -> Result<Value, RunnerError> {
+    let engine = Workflow::new(root.to_path_buf());
+    let state = engine.status(run).map_err(map_core)?;
+    let key = supervisor_key(root, run);
+    let mut map = supervisors().lock().map_err(|_| error("driver_busy"))?;
+    let live = map.get(&key).is_some_and(|s| !s.handle.is_finished());
+    if !live && state["status"] != "completed" {
+        let path = root.to_path_buf();
+        let run = run.to_owned();
+        let latest = Arc::new(Mutex::new(None));
+        let output = latest.clone();
+        let handle = thread::spawn(move || {
+            loop {
+                let result = advance(&path, &run, judge.clone());
+                let terminal = result.as_ref().is_ok_and(|s| {
+                    s["status"] == "completed"
+                        || (s["status"] == "cancelled"
+                            && s["driver"]["active_actions"].as_u64().unwrap_or(0) == 0
+                            && !s["tasks"].as_array().is_some_and(|ts| {
+                                ts.iter()
+                                    .any(|t| t["status"] == "unknown" || t["status"] == "running")
+                            }))
+                });
+                let failed = result.is_err();
+                if let Ok(mut slot) = output.lock() {
+                    *slot = Some(match result {
+                        Ok(v) => v,
+                        Err(e) => json!({"attention":e.to_value()}),
+                    });
+                }
+                if terminal || failed {
+                    break;
+                }
+                thread::sleep(Duration::from_millis(250));
+            }
         });
-        map.insert(key,Supervisor{handle,latest});
+        map.insert(key, Supervisor { handle, latest });
     }
     drop(map);
-    background_status(root,run)
+    background_status(root, run)
 }
 
-pub fn background_status(root:&Path,run:&str)->Result<Value,RunnerError> {
-    let mut state=Workflow::new(root.to_path_buf()).status(run).map_err(map_core)?;
-    if let Some(supervisor)=supervisors().lock().map_err(|_|error("driver_busy"))?.get(&supervisor_key(root,run)) {
-        state["driver"]=json!({"background":!supervisor.handle.is_finished(),"next_poll_ms":250});
-        if let Some(latest)=supervisor.latest.lock().map_err(|_|error("driver_busy"))?.as_ref() {
-            for name in ["attention","next_action"] {if let Some(v)=latest.get(name){state[name]=v.clone();}}
+pub fn background_status(root: &Path, run: &str) -> Result<Value, RunnerError> {
+    let mut state = Workflow::new(root.to_path_buf())
+        .status(run)
+        .map_err(map_core)?;
+    if let Some(supervisor) = supervisors()
+        .lock()
+        .map_err(|_| error("driver_busy"))?
+        .get(&supervisor_key(root, run))
+    {
+        state["driver"] = json!({"background":!supervisor.handle.is_finished(),"next_poll_ms":250});
+        if let Some(latest) = supervisor
+            .latest
+            .lock()
+            .map_err(|_| error("driver_busy"))?
+            .as_ref()
+        {
+            for name in ["attention", "next_action"] {
+                if let Some(v) = latest.get(name) {
+                    state[name] = v.clone();
+                }
+            }
         }
     }
     Ok(state)
@@ -124,15 +167,37 @@ pub fn advance(
             .as_array()
             .into_iter()
             .flatten()
-            .find(|a| a["id"] == action_id).cloned().unwrap_or(Value::Null);
-        let action_kind = current_action["kind"].as_str()
+            .find(|a| a["id"] == action_id)
+            .cloned()
+            .unwrap_or(Value::Null);
+        let action_kind = current_action["kind"]
+            .as_str()
             .unwrap_or("launch")
             .to_owned();
         let result = match job.join() {
             Ok(Ok(result)) => result,
+            Ok(Err(failure))
+                if action_kind == "inspect"
+                    || (action_kind == "launch"
+                        && [
+                            "process_ownership_unavailable",
+                            "process_failed",
+                            "io_error",
+                            "invalid_state",
+                        ]
+                        .iter()
+                        .any(|code| failure["code"] == *code)) =>
+            {
+                let execution_id = current_action["payload"]["execution_id"]
+                    .as_str()
+                    .unwrap_or(action_id);
+                json!({"status":"unknown","execution_id":execution_id,"completion_verified":false,"error":failure})
+            }
             Ok(Err(failure)) => json!({"status":"failed","error":failure}),
             Err(_) if action_kind == "launch" || action_kind == "inspect" => {
-                let execution_id=current_action["payload"]["execution_id"].as_str().unwrap_or(action_id);
+                let execution_id = current_action["payload"]["execution_id"]
+                    .as_str()
+                    .unwrap_or(action_id);
                 json!({"status":"unknown","execution_id":execution_id,"completion_verified":false})
             }
             Err(_) => json!({"status":"failed","error":{"code":"host_panic"}}),
@@ -217,9 +282,8 @@ pub fn advance(
         }
         // Paused/cancelled runs may reconcile existing owned work, never launch
         // another worker from an earlier lease.
-        if state["status"] == "cancelled" && kind != "inspect" {
-            continue;
-        }
+        // Core claim() also authorizes reconciliation of mutations that were
+        // already dispatched before cancellation.
         let id = action["id"]
             .as_str()
             .ok_or_else(|| error("invalid_action"))?;
@@ -291,10 +355,11 @@ pub fn resume_to_completion(
                     return Ok(state);
                 }
             }
-            if actions
-                .iter()
-                .any(|a| ["plan", "repair", "review", "refresh_pool"].iter().any(|k| a["kind"] == *k))
-            {
+            if actions.iter().any(|a| {
+                ["plan", "repair", "review", "refresh_pool"]
+                    .iter()
+                    .any(|k| a["kind"] == *k)
+            }) {
                 state["next_action"] = json!("continue_with_coordinator");
                 return Ok(state);
             }
@@ -303,8 +368,12 @@ pub fn resume_to_completion(
             }
             if actions.is_empty()
                 && state["tasks"].as_array().is_some_and(|tasks| {
-                    tasks.iter().any(|t| t["status"]=="blocked"||t["status"]=="held")
-                        && !tasks.iter().any(|t|["running","unknown"].iter().any(|s|t["status"]==*s))
+                    tasks
+                        .iter()
+                        .any(|t| t["status"] == "blocked" || t["status"] == "held")
+                        && !tasks
+                            .iter()
+                            .any(|t| ["running", "unknown"].iter().any(|s| t["status"] == *s))
                 })
             {
                 state["next_action"] = json!("continue_with_coordinator");

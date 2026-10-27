@@ -109,6 +109,18 @@ pub fn build(binary: &Path, output: &Path) -> Result<Value, Error> {
             include_bytes!("../docs/stackbite.ko.md").to_vec(),
         ),
         (
+            "docs/workflow.ko.md".to_owned(),
+            include_bytes!("../docs/workflow.ko.md").to_vec(),
+        ),
+        (
+            "docs/workflow-ui.ko.md".to_owned(),
+            include_bytes!("../docs/workflow-ui.ko.md").to_vec(),
+        ),
+        (
+            "examples/workflow-minimal.json".to_owned(),
+            include_bytes!("../examples/workflow-minimal.json").to_vec(),
+        ),
+        (
             "examples/stackbite-workflow.json".to_owned(),
             include_bytes!("../examples/stackbite-workflow.json").to_vec(),
         ),

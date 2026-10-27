@@ -1,0 +1,35 @@
+{
+  "workspace": "C:\\project",
+  "goal": "Implement and review the approved feature",
+  "host": {},
+  "max_parallel": 2,
+  "repair_rounds": 2,
+  "pool": [
+    {
+      "id": "claude:implementation",
+      "description": "Host-authorized Claude implementation worker with the configured model and reasoning setting",
+      "capabilities": ["code.change"],
+      "available": true,
+      "provider": "claude",
+      "executable": "C:\\Users\\user\\.local\\bin\\claude.exe",
+      "model": "opus",
+      "effort": "medium",
+      "resource_key": "claude-account"
+    }
+  ],
+  "plan": {
+    "nodes": [
+      {
+        "id": "implement",
+        "role": "implementation",
+        "objective": "Implement the approved feature described in the referenced specification. Update only the assigned source subtree and add behavior checks where required by the feature contract.",
+        "depends_on": [],
+        "requirements": ["code.change"],
+        "acceptance": ["The specified behavior and project checks pass"],
+        "outputs": ["artifact:implementation"],
+        "write_paths": ["src/"],
+        "context_refs": ["docs/spec.md"]
+      }
+    ]
+  }
+}

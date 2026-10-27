@@ -123,6 +123,10 @@ impl McpServer {
                 _ => match args["operation"].as_str().unwrap_or("next") {
                     "next" => interface.next(run),
                     "status" => interface.status(run),
+                    "claim" => match args["action_id"].as_str() {
+                        Some(action) => interface.claim(run, action),
+                        None => Err(crate::workflow_interface::invalid()),
+                    },
                     action => interface.control(run, action),
                 },
             }

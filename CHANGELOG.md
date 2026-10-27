@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.7.0-workflow.1 — 2026-10-27 (branch preview)
+
+- Three-tool workflow MCP profile and native CLI runner, with background progress
+  for supplied DAGs after one next call; existing individual routing stays available.
+- Durable task state, resource/output reservations, role-aware Jev/Laya routing,
+  independent review, compact event history and factual worker-pool refresh.
+- Owned Git worktrees per attempt, structured Claude/Codex execution, output and
+  command checks, serialized integration and interrupted-transaction recovery.
+- Windows job-owned process trees, cancellation and stopped-owner restart recovery.
+- Bounded context gathering and repair handoff, plan observations and resumable runs.
+- Loopback workflow graph with progress, assignment, evidence and run controls.
+
 ## 0.6.0-stackbite.1 — 2026-10-25 (branch preview)
 
 - Stackbite coordinator project installation defaults to Jev 1.14, with explicit
