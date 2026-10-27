@@ -101,7 +101,11 @@ fn observation(dir: &Path, kind: &str, action_value: &Value) -> Result<Value, Va
     }
     // A single prose acceptance condition has exactly the same meaning as one
     // list item. Canonicalize it here; the workflow still validates the full DAG.
-    if let Some(nodes) = result["plan"]["nodes"].as_array_mut() {
+    if let Some(nodes) = result
+        .get_mut("plan")
+        .and_then(|plan| plan.get_mut("nodes"))
+        .and_then(Value::as_array_mut)
+    {
         for node in nodes {
             normalize_acceptance(node);
             normalize_routing_effort(node)?;
@@ -333,5 +337,56 @@ mod tests {
                 "coordinator_artifact_invalid"
             );
         }
+    }
+    #[test]
+    fn task_only_repair_is_accepted_by_workflow() {
+        let dir = tempfile::tempdir().unwrap();
+        let workflow = Workflow::new(dir.path().join("state"));
+        let mut state = workflow.start(&json!({"workspace":"workspace","repair_rounds":1,"pool":[{"id":"worker","description":"worker","capabilities":[],"available":true}],"plan":{"nodes":[{"id":"one","objective":"build"}]}})).unwrap();
+        let run = state["run_id"].as_str().unwrap().to_owned();
+        for (kind, result) in [
+            ("route", json!({"status":"ready","candidate_id":"worker"})),
+            (
+                "prepare",
+                json!({"status":"prepared","workspace":"w","branch":"b","integration_workspace":"i","integration_branch":"ib"}),
+            ),
+            ("launch", json!({"status":"failed"})),
+        ] {
+            let action = state["actions"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|a| a["kind"] == kind)
+                .unwrap();
+            state = workflow.observe(&run, &json!({"action_id":action["id"],"event_id":format!("test:{kind}"),"result":result})).unwrap();
+        }
+        let artifact =
+            json!({"task":{"id":"one","objective":"retry","routing":{"reasoning_effort":"high"}}});
+        fs::write(
+            dir.path().join("switchbite-observation.json"),
+            serde_json::to_vec(&artifact).unwrap(),
+        )
+        .unwrap();
+        let result = observation(dir.path(), "repair", &Value::Null).unwrap();
+        assert!(result.get("plan").is_none());
+        let action = state["actions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|a| a["kind"] == "repair")
+            .unwrap();
+        let next = workflow
+            .observe(
+                &run,
+                &json!({"action_id":action["id"],"event_id":"test:repair","result":result}),
+            )
+            .unwrap();
+        assert!(
+            next["actions"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|a| a["kind"] == "route" && a["task_id"] == "one")
+        );
     }
 }
