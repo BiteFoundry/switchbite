@@ -980,6 +980,26 @@ impl LocalHost {
         }
         let run = hash(string(action, "run_id")?);
         let integrated = self.state.join("worktrees").join(&run).join("integration");
+        let _lock = if integrated.exists() {
+            let root = integrated.parent().ok_or(HostError("invalid_workspace"))?;
+            let lock = git_lock(root)?;
+            let pending = root.join("integration-transaction.json");
+            if pending.exists() {
+                let transaction = value_file(&pending)?;
+                let id = string(&transaction, "action_id")?;
+                if !self
+                    .state
+                    .join("actions")
+                    .join(format!("{}.json", hash(id)))
+                    .exists()
+                {
+                    return Err(HostError("recovery_required"));
+                }
+            }
+            Some(lock)
+        } else {
+            None
+        };
         let integration_root = if integrated.exists() {
             validate_worktree(
                 &integrated,
@@ -990,9 +1010,15 @@ impl LocalHost {
         } else {
             None
         };
+        let source_commit = run_git(
+            integration_root.as_deref().unwrap_or(&self.workspace),
+            &["rev-parse", "HEAD"],
+        )?;
+        let mut sources = Vec::new();
         for r in &refs {
             let reference = r.as_str().ok_or(HostError("invalid_action"))?;
             if reference.starts_with("artifact:") {
+                sources.push(json!({"reference":reference,"kind":"artifact"}));
                 continue;
             }
             let rel = Path::new(reference);
@@ -1006,11 +1032,19 @@ impl LocalHost {
                     .ok()
                     .filter(|p| p.starts_with(&self.workspace) && p.is_file())
             };
-            if in_integration.or_else(in_original).is_none() {
+            if in_integration.is_some() {
+                sources.push(
+                    json!({"reference":reference,"kind":"integration","commit":source_commit}),
+                );
+            } else if in_original().is_some() {
+                sources.push(json!({"reference":reference,"kind":"workspace","commit":run_git(&self.workspace, &["rev-parse", "HEAD"])?,"working_tree":true}));
+            } else {
                 return Err(HostError("context_missing"));
             }
         }
-        Ok(json!({"status":"gathered","context_refs":refs}))
+        Ok(
+            json!({"status":"gathered","context_refs":refs,"source_commit":source_commit,"sources":sources}),
+        )
     }
 }
 #[cfg(test)]

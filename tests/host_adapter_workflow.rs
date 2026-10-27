@@ -360,15 +360,14 @@ fn repair_uses_fresh_worktree_and_gathers_integrated_context() {
     assert_ne!(first_dir, fresh_dir);
     assert!(!fresh_dir.join("failed-dirty").exists());
     fs::write(fresh_dir.join("new-context"), "ok").unwrap();
-    assert_eq!(
-        host.perform(&action(
+    let integrated = host
+        .perform(&action(
             "i1",
             "integrate",
-            json!({"task":task,"prepared":fresh,"checks":[]})
+            json!({"task":task,"prepared":fresh,"checks":[]}),
         ))
-        .unwrap()["status"],
-        "integrated"
-    );
+        .unwrap();
+    assert_eq!(integrated["status"], "integrated");
     let context = host
         .perform(&action(
             "g1",
@@ -377,6 +376,8 @@ fn repair_uses_fresh_worktree_and_gathers_integrated_context() {
         ))
         .unwrap();
     assert_eq!(context["status"], "gathered");
+    assert_eq!(context["source_commit"], integrated["commit"]);
+    assert_eq!(context["sources"][0]["commit"], integrated["commit"]);
     assert!(!repo.join("new-context").exists());
 }
 #[test]
