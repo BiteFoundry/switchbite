@@ -246,7 +246,7 @@ pub fn run_runtime_metadata(request: &Value) -> Result<Value> {
         );
         let caps = crate::adapters::stackbite_backend::capabilities(path)
             .map_err(|_| "stackbite_backend_unavailable")?;
-        json!({"kind":"stackbite_private_clone","version":caps["stackbite_version"].as_str().unwrap_or_else(|| caps["version"].as_str().unwrap_or("unknown")),"bridge_version":caps["version"],"protocol_version":caps["protocol_version"],"executable":path,"sha256":digest(path)?,"providers":caps["providers"]})
+        json!({"kind":"stackbite_private_clone","version":caps["stackbite_version"].as_str().unwrap_or_else(|| caps["version"].as_str().unwrap_or("unknown")),"bridge_version":caps["version"],"protocol_version":caps["protocol_version"],"executable":path,"sha256":digest(path)?,"providers":caps["providers"],"session_isolation":caps["session_isolation"]})
     } else {
         json!({"kind":"native_cli","version":env!("CARGO_PKG_VERSION"),"protocol_version":1})
     };
