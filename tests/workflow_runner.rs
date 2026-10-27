@@ -203,3 +203,35 @@ fn recovered_host_receipt_does_not_launch_worker_twice() {
     assert_eq!(finish["status"], "completed", "{finish}");
     assert_eq!(fs::read_dir(tmp.path().join("markers")).unwrap().count(), 1);
 }
+
+#[test]
+fn one_interface_next_drives_workflow_while_status_only_is_polled() {
+    let (tmp, repo, exe, _) = fixture();
+    let mut req = request(&repo, &exe, json!([node("solo", &[])]));
+    req.as_object_mut().unwrap().remove("host");
+    let interface = switchbite::workflow_interface::Interface::new(repo.clone(), judge());
+    let start = interface.start(&req).unwrap();
+    let run = start["run_id"].as_str().unwrap();
+    let began = Instant::now();
+    interface.next(run).unwrap();
+    assert!(
+        began.elapsed() < Duration::from_secs(3),
+        "next must return promptly"
+    );
+    let deadline = Instant::now() + Duration::from_secs(30);
+    loop {
+        let state = interface.status(run).unwrap();
+        if state["status"] == "completed" {
+            assert_eq!(state["progress"]["done"], 1);
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "background supervisor did not complete: {state}"
+        );
+        thread::sleep(Duration::from_millis(100));
+    }
+    assert!(tmp.path().join("markers/solo").exists());
+    assert!(!repo.join("solo.txt").exists());
+    assert_eq!(git(&repo, &["status", "--porcelain"]), "");
+}
