@@ -1,0 +1,136 @@
+{
+  "date": "2026-10-27",
+  "version": "0.7.0-workflow.1",
+  "branch": "feature/spec-workflow",
+  "runtime_candidate_commit": "2b28f16",
+  "source_candidate_commit": "921ac4ab62f034786c2c2596b6ac2585efaa1ea7",
+  "platform": "Windows x64 MSVC",
+  "rustc": "1.99.1",
+  "minimum_rust": {
+    "locally_tested": false,
+    "declared": "1.88"
+  },
+  "checks": {
+    "release_build": "passed",
+    "clippy_all_targets_deny_warnings": "passed",
+    "installed_workflow_jev_live": {
+      "passed": 1,
+      "failed": 0
+    },
+    "default_suite": {
+      "passed": 154,
+      "ignored": 2,
+      "failed": 0
+    },
+    "format": "passed",
+    "archive_readback_and_payload_hashes": "passed"
+  },
+  "native_smoke": {
+    "judge": "jev-1.14.0",
+    "project": "synthetic three-task workflow board",
+    "status": "completed",
+    "completed": 3,
+    "total": 3,
+    "initial_max_parallel": 2,
+    "tasks": [
+      {
+        "reported_model": "claude-opus-5-5",
+        "provider": "claude",
+        "effort": "medium",
+        "id": "theme",
+        "requested_model": "opus"
+      },
+      {
+        "reported_model": null,
+        "provider": "codex",
+        "effort": "high",
+        "id": "html",
+        "requested_model": "gpt-6.1-terra"
+      },
+      {
+        "effort": "high",
+        "provider": "codex",
+        "requested_model": "gpt-6.1-terra",
+        "id": "review",
+        "reported_model": null,
+        "depends_on": [
+          "theme",
+          "html"
+        ]
+      }
+    ],
+    "coordinator_repairs_in_completed_run": 1,
+    "output_files": [
+      "theme.json",
+      "index.html",
+      "review.json"
+    ],
+    "final_contract_command": "passed",
+    "review": {
+      "theme_valid": true,
+      "issues": 0,
+      "html_valid": true
+    },
+    "receipts_and_failure_history_preserved": true,
+    "scope": "Tests dispatch, dependency ordering, checks, repair and integration; does not benchmark model quality or optimality."
+  },
+  "mcp": {
+    "configured_judge": "jev",
+    "controls": [
+      {
+        "operation": "status",
+        "status": "running"
+      },
+      {
+        "operation": "pause",
+        "status": "paused"
+      },
+      {
+        "operation": "resume",
+        "status": "running"
+      },
+      {
+        "operation": "cancel",
+        "status": "cancelled"
+      }
+    ],
+    "goal_plan_observed": true,
+    "routing": {
+      "next_action": "clarify_task",
+      "reason_code": "context_insufficient",
+      "status": "hold"
+    },
+    "synthetic_only": true,
+    "tools_discovered": [
+      "switchbite_next",
+      "switchbite_observe",
+      "switchbite_start"
+    ],
+    "worker_execution": false
+  },
+  "discovery": {
+    "codex": "enabled project workflow stdio server",
+    "global_settings_modified": false,
+    "original_stackbite_modified": false,
+    "claude": "project workflow stdio server found; client approval pending"
+  },
+  "ui": {
+    "desktop": "Aside screenshot inspected at 1440x900; completed dependency graph and task evidence displayed",
+    "mobile_visual_qualification": false
+  },
+  "package": {
+    "payload_files": 20,
+    "binary_sha256": "7111afecb93a03d35ebca1f16852f477f0255b2ce5c294d7c3179e6b9a4111c1",
+    "sha256": "e91327f0deb2b07755855179488d4203b567af57c01764f47a3e703d5df5c635",
+    "zip_entries": 21,
+    "filename": "switchbite-0.7.0-workflow.1-windows-x64.zip"
+  },
+  "coverage_notes": [
+    "Local Laya live qualification was not run for this preview; its workflow test compiles and remains opt-in.",
+    "Local native execution adapters cover Claude Code and Codex; other harnesses use external host actions.",
+    "Coordinator supplies task plans, repairs and factual model pool; the runner advances the supplied DAG.",
+    "Plain output paths and configured commands are checked; abstract artifact/URI/glob references require host-specific validation.",
+    "Codex requested model is explicit; the CLI stream did not report a resolved model identity.",
+    "No verified WorkBite Task binding was available; existing output paths were reused without storage enrollment."
+  ]
+}
