@@ -1,0 +1,45 @@
+{
+  "date": "2026-10-27",
+  "version": "0.8.3-live.2",
+  "runtime_commit": "8cc11f48ef9bc9da92cfa0dbdbef5616352c88d8",
+  "reported_failure": {
+    "cli": "verified native coordinator completion",
+    "registration": "invalid_receipt: each node acceptance was a string instead of a list",
+    "other_output": "PowerShell profile errors did not stop the plan; stdin startup notice did not indicate a live input request"
+  },
+  "changes": {
+    "prompt": "explicit node field types and an example; Windows non-login shell guidance",
+    "boundary": "one acceptance string becomes one list item for plans and repairs; other invalid shapes remain subject to core validation",
+    "codex": "allow_login_shell=false set only on SwitchBite-owned workers",
+    "codex_reference": "https://learn.chatgpt.com/docs/config-file/config-reference#allow_login_shell",
+    "output": "command lifecycle events share entries by provider item ID; repeated commands with distinct IDs remain visible"
+  },
+  "checks": {
+    "default_suite": { "passed": 210, "failed": 0, "ignored": 2 },
+    "format": "passed",
+    "clippy_all_targets_deny_warnings": "passed",
+    "release_build": "passed",
+    "package_readback_and_payload_hashes": "passed",
+    "regressions": ["fake native coordinator prose acceptance successfully registers in core", "plan and task-repair acceptance normalization", "command start/update/completed coalescing without merging separate executions"]
+  },
+  "existing_execution_recovery": {
+    "method": "kept the native coordinator artifact; converted only acceptance fields; submitted through workflow observe; resumed the existing app through its UI",
+    "result": "5 tasks registered; Jev selected Codex gpt-6.1-sol for the first task; native worker active with 209189 stdout bytes at observation",
+    "planner_rerun": false,
+    "existing_driver_stopped": false,
+    "completion_claim": false,
+    "aside_browser": "confirmed the attention alert cleared after resume and the updated standalone monitor shows worker output, liveness and last output time"
+  },
+  "deployment": {
+    "existing_execution_app": "http://127.0.0.1:58422/",
+    "updated_execution_monitor": "http://127.0.0.1:58424/",
+    "updated_new_task_app": "http://127.0.0.1:58425/",
+    "scope": "new app and native MCP installation use live.2; already-running driver remains live.1"
+  },
+  "package": {
+    "filename": "switchbite-0.8.3-live.2-windows-x64.zip",
+    "payload_files": 22,
+    "sha256": "2aa6a44a6b4832820e1d81cefd614aa35cec9c80bc2d27b58566f999b9b2fb9d",
+    "binary_sha256": "67723c8a3dc1774e39bce6a19b8025ed72cb4d5a7aa40d0e2106b4d8ac130c0a"
+  }
+}
