@@ -79,3 +79,16 @@ fn selection_and_archived_workspace_are_checked() {
     std::fs::write(tmp.path().join("ARCHIVED.json"), "{}").unwrap();
     assert!(snapshot(tmp.path(), &json!({})).is_err());
 }
+
+#[test]
+fn configured_candidate_survives_large_catalog() {
+    let mut list = (0..80)
+        .map(|i| c(&format!("old{i}"), "codex", &format!("a{i:02}"), "high"))
+        .collect::<Vec<_>>();
+    let mut configured = c("configured", "codex", "z-current", "high");
+    configured["catalog_info"] = json!({"source":"user_config"});
+    list.push(configured);
+    let result = shortlist(&json!({"candidates":list}), &json!({}), "", 16).unwrap();
+    assert_eq!(result[0]["id"], "configured");
+    assert_eq!(result.len(), 16);
+}

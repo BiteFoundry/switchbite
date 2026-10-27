@@ -12,7 +12,6 @@ use std::{
 };
 
 const MODEL_TTL: u64 = 86_400_000;
-const READY_TTL: u64 = 60_000;
 const PROVIDERS: [&str; 4] = ["claude", "codex", "cursor", "opencode"];
 #[derive(Debug)]
 pub struct CatalogError(&'static str);
@@ -153,7 +152,7 @@ fn configured_effort() -> Option<String> {
     let text = fs::read_to_string(base.join("config.toml")).ok()?;
     let doc = text.parse::<toml_edit::DocumentMut>().ok()?;
     let effort = doc.get("model_reasoning_effort")?.as_str()?;
-    ["minimal", "low", "medium", "high", "xhigh"]
+    ["minimal", "low", "medium", "high", "xhigh", "max", "ultra"]
         .contains(&effort)
         .then(|| effort.to_owned())
 }
@@ -194,7 +193,7 @@ fn candidate(
         "cursor" => "General coding, exploration and debugging",
         _ => "Explicit model and custom agent work",
     };
-    json!({"id":id,"description":format!("{role}; {provider} model {model}, {effort} effort."),"capabilities":["code.change"],"available":true,"provider":provider,"executable":exe.to_string_lossy(),"model":model,"effort":effort,"resource_key":format!("{provider}:{scope}"),"catalog_info":{"source":source,"readiness":"unverified","observed_at_ms":observed}})
+    json!({"id":id,"description":format!("{role}; {provider} model {model}, {effort} effort."),"capabilities":["file.read","file.write","code.change","code.review","html.write","data.write","writing","code.explore"],"available":true,"provider":provider,"executable":exe.to_string_lossy(),"model":model,"effort":effort,"resource_key":format!("{provider}:{scope}"),"catalog_info":{"source":source,"readiness":"unverified","observed_at_ms":observed}})
 }
 fn models_from_output(provider: &str, output: &str) -> Vec<String> {
     let mut models = BTreeSet::new();
@@ -214,7 +213,97 @@ fn models_from_output(provider: &str, output: &str) -> Vec<String> {
             models.insert(first.to_string());
         }
     }
-    models.into_iter().take(1024).collect()
+    models.into_iter().collect()
+}
+fn codex_models(value: &Value) -> Vec<(String, String, u64)> {
+    let mut result = Vec::new();
+    if let Some(models) = value.get("models").and_then(Value::as_array) {
+        for model in models {
+            if model.get("visibility").and_then(Value::as_str) != Some("list") {
+                continue;
+            }
+            let Some(name) = model
+                .get("slug")
+                .and_then(Value::as_str)
+                .filter(|s| valid_model(s))
+            else {
+                continue;
+            };
+            let priority = model
+                .get("priority")
+                .and_then(Value::as_u64)
+                .unwrap_or(u64::MAX);
+            if let Some(levels) = model
+                .get("supported_reasoning_levels")
+                .and_then(Value::as_array)
+            {
+                for level in levels {
+                    if let Some(effort) = level.get("effort").and_then(Value::as_str).filter(|e| {
+                        ["minimal", "low", "medium", "high", "xhigh", "max", "ultra"].contains(e)
+                    }) {
+                        result.push((name.to_owned(), effort.to_owned(), priority));
+                    }
+                }
+            }
+        }
+    }
+    result
+}
+fn codex_cache() -> Vec<(String, String, u64)> {
+    let Some(base) = std::env::var_os("CODEX_HOME")
+        .map(PathBuf::from)
+        .or_else(|| home().map(|p| p.join(".codex")))
+    else {
+        return Vec::new();
+    };
+    fs::read(base.join("models_cache.json"))
+        .ok()
+        .and_then(|b| serde_json::from_slice(&b).ok())
+        .map(|v| codex_models(&v))
+        .unwrap_or_default()
+}
+// Replace the complete cache file in one operation. Concurrent writers use distinct names.
+fn write_cache(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    use std::io::Write;
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static SEQUENCE: AtomicU64 = AtomicU64::new(0);
+    let tmp = path.with_extension(format!(
+        "tmp-{}-{}",
+        std::process::id(),
+        SEQUENCE.fetch_add(1, Ordering::Relaxed)
+    ));
+    let result = (|| {
+        let mut f = fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&tmp)?;
+        f.write_all(bytes)?;
+        drop(f);
+        replace_file(&tmp, path)
+    })();
+    if result.is_err() {
+        let _ = fs::remove_file(tmp);
+    }
+    result
+}
+#[cfg(not(windows))]
+fn replace_file(from: &Path, to: &Path) -> std::io::Result<()> {
+    fs::rename(from, to)
+}
+#[cfg(windows)]
+fn replace_file(from: &Path, to: &Path) -> std::io::Result<()> {
+    use std::os::windows::ffi::OsStrExt;
+    #[link(name = "kernel32")]
+    unsafe extern "system" {
+        fn MoveFileExW(from: *const u16, to: *const u16, flags: u32) -> i32;
+    }
+    let from: Vec<u16> = from.as_os_str().encode_wide().chain(Some(0)).collect();
+    let to: Vec<u16> = to.as_os_str().encode_wide().chain(Some(0)).collect();
+    if unsafe { MoveFileExW(from.as_ptr(), to.as_ptr(), 1) } != 0 {
+        Ok(())
+    } else {
+        Err(std::io::Error::last_os_error())
+    }
 }
 /// Discover installed local CLIs; cached data never supplies executable paths.
 pub fn snapshot(workspace: &Path, selection: &Value) -> Result<Value, CatalogError> {
@@ -317,7 +406,10 @@ pub fn snapshot(workspace: &Path, selection: &Value) -> Result<Value, CatalogErr
             };
             if !fresh && !discovered.is_empty() {
                 let _ = fs::create_dir_all(&dir);
-                let _ = fs::write(&cache_path, serde_json::to_vec(&json!({"version":version,"scope":scope,"observed_at_ms":timestamp,"models":discovered})).unwrap_or_default());
+                let bytes = serde_json::to_vec(&json!({"version":version,"scope":scope,"observed_at_ms":timestamp,"models":discovered})).unwrap_or_default();
+                if write_cache(&cache_path, &bytes).is_err() {
+                    diagnostics.push(json!({"provider":provider,"code":"cache_write_failed"}));
+                }
             }
             for m in discovered {
                 models.push((m, if fresh { "cached_cli" } else { "cli" }.into()));
@@ -345,11 +437,33 @@ pub fn snapshot(workspace: &Path, selection: &Value) -> Result<Value, CatalogErr
                 }
             }
         }
-        diagnostics.push(
-            json!({"provider":provider,"code":"readiness_unverified","readiness_ttl_ms":READY_TTL}),
-        );
+        if provider == "codex" {
+            for (model, effort, priority) in codex_cache() {
+                let mut entry = candidate(
+                    provider,
+                    &exe,
+                    &model,
+                    &effort,
+                    "codex_models_cache",
+                    timestamp,
+                    &scope,
+                );
+                entry["catalog_info"]["priority"] = json!(priority);
+                candidates.push(entry);
+            }
+        }
+        diagnostics.push(json!({"provider":provider,"code":"readiness_unverified"}));
     }
-    candidates.sort_by(|a, b| a["id"].as_str().cmp(&b["id"].as_str()));
+    candidates.sort_by(|a, b| candidate_order(a, b));
+    let mut seen = BTreeSet::new();
+    candidates.retain(|c| {
+        c["id"]
+            .as_str()
+            .is_some_and(|id| seen.insert(id.to_owned()))
+    });
+    if candidates.len() > 1024 {
+        diagnostics.push(json!({"provider":"all","code":"catalog_limit","total":candidates.len(),"limit":1024,"message":"Catalog is limited to 1024 candidates; narrow selection.providers to inspect individual providers."}));
+    }
     candidates.truncate(1024);
     let revision = hash(
         &serde_json::to_string(
@@ -363,6 +477,24 @@ pub fn snapshot(workspace: &Path, selection: &Value) -> Result<Value, CatalogErr
     Ok(
         json!({"schema_version":1,"revision":revision,"observed_at_ms":timestamp,"candidates":candidates,"diagnostics":diagnostics}),
     )
+}
+fn candidate_order(a: &Value, b: &Value) -> std::cmp::Ordering {
+    let key = |v: &Value| {
+        let info = &v["catalog_info"];
+        let configured = info["source"] == "user_config";
+        let configured_default = configured && v["effort"] == "default";
+        let cli_default = v["provider"] == "cursor" && v["model"] == "auto";
+        (
+            !configured,
+            configured_default,
+            !cli_default,
+            info["priority"].as_u64().unwrap_or(u64::MAX),
+            v["model"].as_str().unwrap_or("").to_owned(),
+            v["effort"].as_str().unwrap_or("").to_owned(),
+            v["id"].as_str().unwrap_or("").to_owned(),
+        )
+    };
+    key(a).cmp(&key(b))
 }
 /// Return deterministic, diverse candidates that meet known requirements and exact pins.
 pub fn shortlist(
@@ -407,13 +539,7 @@ pub fn shortlist(
         groups.entry(p.to_owned()).or_default().push(c.clone());
     }
     for list in groups.values_mut() {
-        list.sort_by(|a, b| {
-            a["model"]
-                .as_str()
-                .cmp(&b["model"].as_str())
-                .then(a["effort"].as_str().cmp(&b["effort"].as_str()))
-                .then(a["id"].as_str().cmp(&b["id"].as_str()))
-        });
+        list.sort_by(candidate_order);
     }
     let pref = preferences.to_lowercase();
     let objective = task["objective"].as_str().unwrap_or("").to_lowercase();
@@ -445,4 +571,57 @@ pub fn shortlist(
         }
     }
     Ok(result)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn discovered_workers_support_review_and_html_tasks() {
+        let entry = candidate(
+            "codex",
+            Path::new("worker"),
+            "model",
+            "high",
+            "user_config",
+            0,
+            "host",
+        );
+        for capability in ["code.review", "html.write"] {
+            let matches = shortlist(
+                &json!({"candidates":[entry]}),
+                &json!({"requirements":[capability]}),
+                "",
+                16,
+            )
+            .unwrap();
+            assert_eq!(matches.len(), 1);
+        }
+    }
+    #[test]
+    fn codex_cache_only_admits_listed_models_and_reported_efforts() {
+        let input = json!({"models":[
+            {"slug":"z-model","visibility":"list","priority":4,"supported_reasoning_levels":[{"effort":"high"},{"effort":"ultra"}]},
+            {"slug":"hidden","visibility":"hide","supported_reasoning_levels":[{"effort":"low"}]},
+            {"slug":"bad name","visibility":"list","supported_reasoning_levels":[{"effort":"high"}]}
+        ]});
+        assert_eq!(
+            codex_models(&input),
+            vec![
+                ("z-model".into(), "high".into(), 4),
+                ("z-model".into(), "ultra".into(), 4)
+            ]
+        );
+    }
+    #[test]
+    fn cache_replacement_never_leaves_partial_json() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("cache.json");
+        write_cache(&path, br#"{"version":1}"#).unwrap();
+        write_cache(&path, br#"{"version":2}"#).unwrap();
+        assert_eq!(
+            serde_json::from_slice::<Value>(&fs::read(path).unwrap()).unwrap()["version"],
+            2
+        );
+    }
 }
