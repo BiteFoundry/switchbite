@@ -93,6 +93,7 @@ fn view(state: &Value) -> Value {
         "tools",
         "connection",
         "max_parallel",
+        "startup_submission",
     ] {
         if let Some(value) = state.get(field) {
             result[field] = value.clone();
@@ -601,7 +602,7 @@ pub fn serve_app_resume(
         let app = app.clone();
         std::thread::spawn(move || {
             if let Err(error) = app.start(&body) {
-                app.record_start_error(error);
+                app.record_start_error(error, &body);
             }
         });
     }
@@ -615,6 +616,13 @@ pub fn serve_app_resume(
 #[cfg(test)]
 mod summary_tests {
     use super::*;
+    #[test]
+    fn startup_failure_keeps_recovery_submission_in_view() {
+        let state = json!({"status":"idle","attention":{"code":"startup_failed"},"startup_submission":{"workspace":"C:/project","goal":"work","tools":["codex"],"coordinator_id":"candidate","max_parallel":3}});
+        let output = view(&state);
+        assert_eq!(output["startup_submission"], state["startup_submission"]);
+        assert_eq!(output["attention"]["code"], "startup_failed");
+    }
     #[test]
     fn handoff_allows_only_a_loopback_http_endpoint() {
         let state = |url| json!({"status":"handoff","handoff":{"url":url,"bundle_id":"release-1","secret":"hidden"}});

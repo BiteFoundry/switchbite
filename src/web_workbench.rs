@@ -215,7 +215,7 @@ impl Workbench {
 
     pub fn info(&self) -> Result<Value, Value> {
         let state = self.status()?;
-        let current = if state["status"] == "idle" {
+        let current = if state["status"] == "idle" && state["attention"].is_null() {
             Value::Null
         } else {
             state
@@ -409,6 +409,7 @@ impl Workbench {
             tools: selected,
         });
         *current = Some(run.clone());
+        *self.startup_error.lock().map_err(|_| lock_error())? = None;
         drop(current);
         self.spawn(run);
         self.status()
@@ -419,7 +420,8 @@ impl Workbench {
         let Some(run) = current else {
             let mut state = json!({"status":"idle","tasks":[],"actions":[],"progress":{"done":0,"total":0},"event_count":0});
             if let Some(detail) = self.startup_error.lock().map_err(|_| lock_error())?.clone() {
-                state["attention"] = detail;
+                state["attention"] = detail["error"].clone();
+                state["startup_submission"] = detail["submission"].clone();
             }
             return Ok(state);
         };
@@ -475,9 +477,28 @@ impl Workbench {
         Ok(state)
     }
 
-    pub(crate) fn record_start_error(&self, error: Value) {
+    pub(crate) fn record_start_error(&self, error: Value, body: &Value) {
+        let bounded = |key: &str, max: usize| {
+            body[key]
+                .as_str()
+                .unwrap_or("")
+                .chars()
+                .take(max)
+                .filter(|c| !c.is_control() || *c == '\n')
+                .collect::<String>()
+        };
+        let tools: Vec<String> = body["tools"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .take(6)
+            .filter_map(|v| v.as_str())
+            .filter(|v| v.len() <= 64)
+            .map(str::to_owned)
+            .collect();
+        let submission = json!({"workspace":bounded("workspace",4096),"goal":bounded("goal",24000),"coordinator_id":bounded("coordinator_id",256),"tools":tools,"max_parallel":body["max_parallel"].as_u64().filter(|n| (1..=16).contains(n)).unwrap_or(3)});
         if let Ok(mut slot) = self.startup_error.lock() {
-            *slot = Some(error);
+            *slot = Some(json!({"error":error,"submission":submission}));
         }
     }
 
@@ -855,6 +876,31 @@ mod parallel_tests {
         fs, thread,
         time::{Duration, Instant},
     };
+
+    #[test]
+    fn failed_initial_submission_survives_idle_info() {
+        let tmp = tempfile::tempdir().unwrap();
+        let app = Workbench {
+            workspace: tmp.path().to_path_buf(),
+            tools: Mutex::new(ToolState {
+                inventory: json!({"tools":[],"snapshot":{"candidates":[]}}),
+                selected: vec![],
+            }),
+            preferences: tmp.path().join("prefs.json"),
+            judge: None,
+            current: Mutex::new(None),
+            startup_error: Mutex::new(None),
+        };
+        let body = json!({"workspace":"C:/project","goal":"do the work","tools":["codex"],"coordinator_id":"candidate","max_parallel":4,"secret":"not copied"});
+        app.record_start_error(error("startup_failed", "Start failed"), &body);
+        let state = app.info().unwrap()["current"].clone();
+        assert_eq!(state["status"], "idle");
+        assert_eq!(state["attention"]["code"], "startup_failed");
+        assert_eq!(
+            state["startup_submission"],
+            json!({"workspace":"C:/project","goal":"do the work","tools":["codex"],"coordinator_id":"candidate","max_parallel":4})
+        );
+    }
 
     #[test]
     fn coordinator_review_does_not_block_independent_worker() {
