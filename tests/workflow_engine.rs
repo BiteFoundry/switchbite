@@ -621,3 +621,29 @@ fn cancelled_unclaimed_launch_does_not_create_phantom_execution() {
             .any(|a| a["task_id"] == "one")
     );
 }
+#[test]
+fn cancelled_claimed_prepare_receipt_leaves_task_cancelled() {
+    let dir = tempfile::tempdir().unwrap();
+    let w = Workflow::new(dir.path().to_path_buf());
+    let s = w.start(&request()).unwrap();
+    let run = s["run_id"].as_str().unwrap();
+    let s = send(
+        &w,
+        run,
+        action(&s, "route", "one"),
+        json!({"status":"ready","candidate_id":"a"}),
+    );
+    let prepare = action(&s, "prepare", "one").clone();
+    assert!(w.claim(run, prepare["id"].as_str().unwrap()).unwrap());
+    w.control(run, "cancel").unwrap();
+    let s = send(&w, run, &prepare, prepared());
+    assert_eq!(s["status"], "cancelled");
+    assert_eq!(s["tasks"][0]["status"], "cancelled");
+    assert!(
+        !s["actions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|a| a["task_id"] == "one")
+    );
+}
