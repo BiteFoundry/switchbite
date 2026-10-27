@@ -312,6 +312,7 @@ fn unix_ms() -> u128 {
 }
 
 /// Query only the named job and the recorded process identity; never signal it.
+#[allow(dead_code)] // Used by the execution progress consumer.
 pub(crate) fn execution_alive(record: &Value) -> Option<bool> {
     let name = record["job_name"].as_str()?;
     match process::job_drained(name)? {
@@ -1303,16 +1304,15 @@ mod tests {
         let deadline = Instant::now() + Duration::from_secs(8);
         let mut observed = false;
         while Instant::now() < deadline {
-            if let Ok(record) = value_file(&record_path) {
-                if record["status"] == "running"
-                    && record["kind"] == "check"
-                    && record["pid"].is_number()
-                    && output_len(&out) > 0
-                {
-                    assert_eq!(execution_alive(&record), Some(true));
-                    observed = true;
-                    break;
-                }
+            if let Ok(record) = value_file(&record_path)
+                && record["status"] == "running"
+                && record["kind"] == "check"
+                && record["pid"].is_number()
+                && output_len(&out) > 0
+            {
+                assert_eq!(execution_alive(&record), Some(true));
+                observed = true;
+                break;
             }
             thread::sleep(Duration::from_millis(50));
         }
