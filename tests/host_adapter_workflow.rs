@@ -95,9 +95,8 @@ fn owned_workflow_and_idempotence() {
         .perform(&action("verify-1", "verify", payload.clone()))
         .unwrap();
     assert_eq!(verify["status"], "passed");
-    let integrated = host
-        .perform(&action("integrate-1", "integrate", payload))
-        .unwrap();
+    let integration_action = action("integrate-1", "integrate", payload);
+    let integrated = host.perform(&integration_action).unwrap();
     assert_eq!(integrated["status"], "integrated");
     assert!(
         Path::new(prepared["integration_workspace"].as_str().unwrap())
@@ -105,6 +104,25 @@ fn owned_workflow_and_idempotence() {
             .exists()
     );
     assert!(!repo.join("created.txt").exists());
+    let integration_key = format!("{:x}", Sha256::digest(b"integrate-1"));
+    fs::remove_file(
+        state
+            .join("actions")
+            .join(format!("{}.json", &integration_key[..24])),
+    )
+    .unwrap();
+    let base = Command::new("git")
+        .current_dir(&repo)
+        .args(["rev-parse", "HEAD"])
+        .output()
+        .unwrap();
+    let base = String::from_utf8(base.stdout).unwrap();
+    let target = Path::new(prepared["integration_workspace"].as_str().unwrap());
+    fs::write(target.parent().unwrap().join("integration-transaction.json"), serde_json::to_vec(&json!({"action_id":"integrate-1","base_commit":base.trim(),"task_commit":integrated["commit"]})).unwrap()).unwrap();
+    assert_eq!(
+        host.perform(&integration_action).unwrap()["status"],
+        "integrated"
+    );
     let conflicting = action("launch-1", "launch", json!({}));
     assert_eq!(
         host.perform(&conflicting).unwrap_err().to_value()["code"],

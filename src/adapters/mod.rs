@@ -292,6 +292,25 @@ fn path_string(p: &Path) -> Result<&str, HostError> {
         })
         .ok_or(HostError("invalid_path"))
 }
+fn validate_worktree(path: &Path, branch: &str, original: &Path) -> Result<(), HostError> {
+    if run_git(path, &["branch", "--show-current"])? != branch {
+        return Err(HostError("recovery_required"));
+    }
+    let top = run_git(path, &["rev-parse", "--show-toplevel"])?;
+    if fs::canonicalize(top).map_err(|_| HostError("recovery_required"))?
+        != fs::canonicalize(path).map_err(|_| HostError("recovery_required"))?
+    {
+        return Err(HostError("recovery_required"));
+    }
+    let common = |directory: &Path| -> Result<PathBuf, HostError> {
+        let s = run_git(directory, &["rev-parse", "--git-common-dir"])?;
+        fs::canonicalize(directory.join(s)).map_err(|_| HostError("recovery_required"))
+    };
+    if common(path)? != common(original)? {
+        return Err(HostError("recovery_required"));
+    }
+    Ok(())
+}
 impl LocalHost {
     pub fn new(workspace: &Path, state_dir: &Path, config: &Value) -> Result<Self, HostError> {
         let workspace = fs::canonicalize(workspace).map_err(|_| HostError("invalid_workspace"))?;
@@ -360,7 +379,15 @@ impl LocalHost {
                         json!({"status":"unknown","execution_id":id,"completion_verified":false}),
                     );
                 }
-                if !["prepare", "inspect", "gather_context"].contains(&kind) {
+                if ![
+                    "prepare",
+                    "inspect",
+                    "gather_context",
+                    "verify",
+                    "integrate",
+                ]
+                .contains(&kind)
+                {
                     return Err(HostError("recovery_required"));
                 }
             }
@@ -371,13 +398,23 @@ impl LocalHost {
             "launch" => self.launch(action, payload),
             "inspect" => self.inspect(payload),
             "verify" => self.verify(payload),
-            "integrate" => self.integrate(payload),
+            "integrate" => self.integrate(action, payload),
             "gather_context" => self.gather(payload),
             _ => Err(HostError("unsupported_action")),
         };
         match result {
             Ok(v) => {
                 write_atomic(&record, &json!({"fingerprint":fingerprint,"result":v}))?;
+                if kind == "integrate" {
+                    let target = self.owned(payload, "integration_workspace")?;
+                    let journal = target
+                        .parent()
+                        .ok_or(HostError("invalid_workspace"))?
+                        .join("integration-transaction.json");
+                    if journal.exists() && value_file(&journal)?["action_id"] == id {
+                        let _ = fs::remove_file(journal);
+                    }
+                }
                 Ok(v)
             }
             Err(e) => {
@@ -395,6 +432,21 @@ impl LocalHost {
         let root = self.state.join("worktrees").join(&run);
         fs::create_dir_all(&root).map_err(|_| HostError("io_error"))?;
         let _lock = git_lock(&root)?;
+        let pending = root.join("integration-transaction.json");
+        if pending.exists() {
+            let transaction = value_file(&pending)?;
+            let id = string(&transaction, "action_id")?;
+            if self
+                .state
+                .join("actions")
+                .join(format!("{}.json", hash(id)))
+                .exists()
+            {
+                fs::remove_file(pending).map_err(|_| HostError("io_error"))?;
+            } else {
+                return Err(HostError("recovery_required"));
+            }
+        }
         let base_file = root.join("base");
         if !base_file.exists() {
             fs::write(&base_file, &self.base).map_err(|_| HostError("io_error"))?;
@@ -415,9 +467,7 @@ impl LocalHost {
                 ],
             )?;
         }
-        if run_git(&integration, &["branch", "--show-current"])? != ib {
-            return Err(HostError("recovery_required"));
-        }
+        validate_worktree(&integration, &ib, &self.workspace)?;
         let taskpath = root.join(&taskid);
         let branch = format!("switchbite/{run}/{taskid}");
         if !taskpath.exists() {
@@ -434,9 +484,7 @@ impl LocalHost {
                 ],
             )?;
         }
-        if run_git(&taskpath, &["branch", "--show-current"])? != branch {
-            return Err(HostError("recovery_required"));
-        }
+        validate_worktree(&taskpath, &branch, &self.workspace)?;
         Ok(
             json!({"status":"prepared","workspace":taskpath,"branch":branch,"integration_workspace":integration,"integration_branch":ib}),
         )
@@ -702,13 +750,35 @@ impl LocalHost {
         }
         Ok(json!({"status":if passed {"passed"} else {"failed"},"evidence":evidence}))
     }
-    fn integrate(&self, p: &Value) -> Result<Value, HostError> {
+    fn integrate(&self, action: &Value, p: &Value) -> Result<Value, HostError> {
         let task = self.owned(p, "workspace")?;
         let target = self.owned(p, "integration_workspace")?;
         if task.parent() != target.parent() || task == target {
             return Err(HostError("invalid_workspace"));
         }
         let _lock = git_lock(target.parent().ok_or(HostError("invalid_workspace"))?)?;
+        let action_id = string(action, "id")?;
+        let journal = target
+            .parent()
+            .ok_or(HostError("invalid_workspace"))?
+            .join("integration-transaction.json");
+        if journal.exists() {
+            let saved = value_file(&journal)?;
+            if saved["action_id"] != action_id {
+                let old = saved["action_id"]
+                    .as_str()
+                    .ok_or(HostError("invalid_state"))?;
+                let receipt = self
+                    .state
+                    .join("actions")
+                    .join(format!("{}.json", hash(old)));
+                if receipt.exists() {
+                    fs::remove_file(&journal).map_err(|_| HostError("io_error"))?;
+                } else {
+                    return Err(HostError("recovery_required"));
+                }
+            }
+        }
         if !run_git(&target, &["status", "--porcelain"])?.is_empty() {
             return Ok(json!({"status":"failed","evidence":["integration workspace dirty"]}));
         }
@@ -772,8 +842,32 @@ impl LocalHost {
             )?;
         }
         let head = run_git(&task, &["rev-parse", "HEAD"])?;
-        let target_head = run_git(&target, &["rev-parse", "HEAD"])?;
-        if head != target_head
+        let current = run_git(&target, &["rev-parse", "HEAD"])?;
+        let target_head = if journal.exists() {
+            let saved = value_file(&journal)?;
+            if saved["action_id"] != action_id || saved["task_commit"] != head {
+                return Err(HostError("recovery_required"));
+            }
+            string(&saved, "base_commit")?.to_owned()
+        } else {
+            write_atomic(
+                &journal,
+                &json!({"action_id":action_id,"base_commit":current,"task_commit":head}),
+            )?;
+            current.clone()
+        };
+        if current != target_head
+            && (run_git(
+                &target,
+                &["merge-base", "--is-ancestor", &target_head, &current],
+            )
+            .is_err()
+                || run_git(&target, &["merge-base", "--is-ancestor", &head, &current]).is_err())
+        {
+            return Err(HostError("recovery_required"));
+        }
+        if current == target_head
+            && head != target_head
             && run_git(
                 &target,
                 &[
