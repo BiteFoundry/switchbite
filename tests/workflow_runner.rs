@@ -61,7 +61,8 @@ fn main() {{
  if *id=="one"||*id=="two" {{ let other=if *id=="one"{{"two"}}else{{"one"}}; let deadline=Instant::now()+Duration::from_secs(10); while !dir.join(other).exists() {{ assert!(Instant::now()<deadline,"parallel worker did not start");thread::sleep(Duration::from_millis(20)); }} }}
  if ["p1","p2","p3"].contains(id) {{ let deadline=Instant::now()+Duration::from_secs(15); while !["p1","p2","p3"].iter().all(|name|dir.join(name).exists()) {{ assert!(Instant::now()<deadline,"three parallel workers did not start"); thread::sleep(Duration::from_millis(20)); }} }}
  if *id=="review3" {{ assert!(["p1.txt","p2.txt","p3.txt"].iter().all(|name|std::path::Path::new(name).exists()),"review ran before integration"); }}
- if *id=="slow" {{ thread::sleep(Duration::from_millis(4000)); }}
+  if *id=="solo" && dir.join("hold-slow").exists() {{ let deadline=Instant::now()+Duration::from_secs(20); while !dir.join("slow").exists() {{ assert!(Instant::now()<deadline,"slow worker did not start");thread::sleep(Duration::from_millis(20)); }} }}
+  if *id=="slow" {{ if dir.join("hold-slow").exists() {{ let deadline=Instant::now()+Duration::from_secs(20); while !dir.join("release-slow").exists() {{ assert!(Instant::now()<deadline,"routing attention did not release worker");thread::sleep(Duration::from_millis(20)); }} }} else {{ thread::sleep(Duration::from_millis(4000)); }} }}
  if *id=="review" {{ assert!(std::path::Path::new("one.txt").exists()&&std::path::Path::new("two.txt").exists(),"review ran before integration"); }}
  fs::write(format!("{{}}.txt",id),"done").unwrap();
  if args.iter().any(|a|a=="--session-id") {{ let session=&args[args.iter().position(|a|a=="--session-id").unwrap()+1]; println!("{{{{\"type\":\"system\",\"subtype\":\"init\",\"session_id\":\"{{}}\",\"model\":\"fake-model\"}}}}",session);println!("{{{{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":false,\"permission_denials\":[],\"session_id\":\"{{}}\"}}}}",session); }} else {{ println!("{{{{\"type\":\"thread.started\",\"thread_id\":\"test\"}}}}");println!("{{{{\"type\":\"turn.started\"}}}}");println!("{{{{\"type\":\"turn.completed\"}}}}"); }}
@@ -302,6 +303,7 @@ fn judge_fails_on_third_route(
 #[test]
 fn background_routing_failure_stops_after_active_host_job_settles() {
     let (tmp, repo, exe, _) = fixture();
+    fs::write(tmp.path().join("markers/hold-slow"), b"").unwrap();
     let req = request(
         &repo,
         &exe,
@@ -322,6 +324,9 @@ fn background_routing_failure_stops_after_active_host_job_settles() {
     let deadline = Instant::now() + Duration::from_secs(30);
     loop {
         let state = interface.status(run).unwrap();
+        if state["attention"].is_object() {
+            fs::write(tmp.path().join("markers/release-slow"), b"").unwrap();
+        }
         if state["attention"].is_object() && state["driver"]["background"] == false {
             assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 3);
             assert!(tmp.path().join("markers/slow").exists());
@@ -332,6 +337,7 @@ fn background_routing_failure_stops_after_active_host_job_settles() {
                 .find(|t| t["id"] == "slow")
                 .unwrap();
             assert_eq!(slow["status"], "verifying", "{state}");
+            assert!(!tmp.path().join("markers/followup").exists());
             break;
         }
         assert!(
@@ -342,6 +348,7 @@ fn background_routing_failure_stops_after_active_host_job_settles() {
     }
     thread::sleep(Duration::from_millis(750));
     assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 3);
+    assert!(!tmp.path().join("markers/followup").exists());
 }
 #[test]
 fn synchronous_routing_failure_waits_for_active_job_without_retry() {
