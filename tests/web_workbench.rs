@@ -483,3 +483,150 @@ fn web_submission_runs_real_workflow_with_isolated_fake_provider() {
         json!(["codex", "claude"])
     );
 }
+
+fn make_route_review_fake(dir: &Path) {
+    let source = dir.join("route_fake.rs");
+    fs::write(&source, r###"use std::{env,fs,io::Write};
+fn main() {
+ let args:Vec<String>=env::args().collect();
+ if args.iter().any(|s|s=="--version") { println!("codex fixture 1.0"); return; }
+ assert!(env::var_os("CODEX_HOME").is_some());
+ let prompt=args.last().unwrap();
+ let log=env::var("FAKE_LOG").unwrap();
+ let mut out=fs::OpenOptions::new().create(true).append(true).open(log).unwrap();
+ println!("{{\"type\":\"thread.started\",\"thread_id\":\"fixture\"}}");
+ println!("{{\"type\":\"turn.started\"}}");
+ if prompt.contains("switchbite-observation.json") && prompt.contains("\"kind\":\"review_route\"") {
+  let snapshot=prompt.split("\"candidate_snapshot\":[").nth(1).expect("snapshot");
+  let build=snapshot.find("\"model\":\"fake-build\"").expect("build candidate");
+  let before=&snapshot[..build];
+  let id=before.rsplit("\"id\":\"").next().unwrap().split('"').next().unwrap();
+  writeln!(out,"review_route:{id}").unwrap();
+  fs::write("switchbite-observation.json",format!(r#"{{"status":"ready","candidate_id":"{}","reason_codes":["coordinator_review"],"summary":"Eligible candidate"}}"#,id)).unwrap();
+ } else if prompt.contains("switchbite-observation.json") {
+  writeln!(out,"plan").unwrap();
+  fs::write("switchbite-observation.json",r#"{"plan":{"nodes":[{"id":"build","objective":"Create result","role":"implementation","outputs":["result.txt"],"write_paths":["result.txt"],"acceptance":["result exists"]},{"id":"review","objective":"Review result","role":"review","depends_on":["build"],"outputs":["review.md"],"write_paths":["review.md"],"acceptance":["report exists"],"routing":{"provider":"codex","model":"fake-review","effort":"high"}}]}}"#).unwrap();
+ } else if args.iter().any(|s|s=="fake-build") {
+  writeln!(out,"build").unwrap(); fs::write("result.txt","built").unwrap();
+ } else if args.iter().any(|s|s=="fake-review") {
+  writeln!(out,"review").unwrap(); assert_eq!(fs::read_to_string("result.txt").unwrap(),"built"); fs::write("review.md","reviewed").unwrap();
+ } else { panic!("unexpected model"); }
+ println!("{{\"type\":\"turn.completed\"}}");
+}"###).unwrap();
+    assert!(Command::new("rustc").arg(source).arg("-o").arg(dir.join("codex.exe")).status().unwrap().success());
+}
+
+fn low_confidence_judge() -> (u16, thread::JoinHandle<()>) {
+    let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let handle = thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        stream.set_read_timeout(Some(Duration::from_secs(15))).unwrap();
+        let mut bytes = Vec::new();
+        let (body_start, content_length) = loop {
+            let mut chunk = [0u8; 4096];
+            let n = stream.read(&mut chunk).unwrap();
+            assert!(n > 0);
+            bytes.extend_from_slice(&chunk[..n]);
+            if let Some(pos) = bytes.windows(4).position(|w| w == b"\r\n\r\n") {
+                let headers = String::from_utf8_lossy(&bytes[..pos]);
+                let length = headers.lines().find_map(|line| {
+                    let (name, value) = line.split_once(':')?;
+                    name.eq_ignore_ascii_case("content-length").then(|| value.trim().parse::<usize>().unwrap())
+                }).unwrap();
+                break (pos + 4, length);
+            }
+        };
+        while bytes.len() < body_start + content_length {
+            let mut chunk = [0u8; 4096];
+            let n = stream.read(&mut chunk).unwrap();
+            assert!(n > 0);
+            bytes.extend_from_slice(&chunk[..n]);
+        }
+        let request: Value = serde_json::from_slice(&bytes[body_start..body_start + content_length]).unwrap();
+        let mut answers = serde_json::Map::new();
+        for (key, question) in request["questions"].as_object().unwrap() {
+            let answer = if question["type"] == "noul" {
+                json!({"type":"noul","noul":1.0})
+            } else if key.starts_with("fit_") {
+                json!({"type":"score","score":1.5,"probabilities":{"0":0.25,"1":0.25,"2":0.25,"3":0.25}})
+            } else {
+                json!({"type":"score","score":1.0,"probabilities":{"0":0.0,"1":1.0,"2":0.0}})
+            };
+            answers.insert(key.clone(), answer);
+        }
+        let body = json!({"model":"laya:fixture","answers":answers}).to_string();
+        write!(stream, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}", body.len(), body).unwrap();
+    });
+    (port, handle)
+}
+
+#[test]
+fn held_route_is_reviewed_by_native_coordinator_and_workflow_completes() {
+    let tmp = tempfile::tempdir().unwrap();
+    let repo = tmp.path().join("project");
+    fs::create_dir(&repo).unwrap();
+    git(&repo, &["init", "-q"]);
+    git(&repo, &["config", "user.name", "Fixture"]);
+    git(&repo, &["config", "user.email", "fixture@localhost"]);
+    git(&repo, &["commit", "--allow-empty", "-q", "-m", "base"]);
+    let bin = tmp.path().join("bin");
+    fs::create_dir(&bin).unwrap();
+    make_route_review_fake(&bin);
+    let home = tmp.path().join("home");
+    let codex = home.join("codex");
+    let appdata = home.join("appdata");
+    let local = home.join("local");
+    for p in [&home, &codex, &appdata, &local] { fs::create_dir_all(p).unwrap(); }
+    fs::write(codex.join("models_cache.json"),json!({"models":[{"slug":"fake-build","visibility":"list","supported_reasoning_levels":[{"effort":"high"}]},{"slug":"fake-review","visibility":"list","supported_reasoning_levels":[{"effort":"high"}]}]}).to_string()).unwrap();
+    let git_dir = env::split_paths(&env::var_os("PATH").unwrap()).find(|p| p.join("git.exe").is_file()).unwrap();
+    let system = PathBuf::from(env::var_os("SystemRoot").unwrap());
+    let path = env::join_paths([bin, git_dir, system.join("System32"), system.join("System32/WindowsPowerShell/v1.0")]).unwrap();
+    let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+    let port = listener.local_addr().unwrap().port();
+    drop(listener);
+    let (judge_port, judge) = low_confidence_judge();
+    let log = tmp.path().join("calls.txt");
+    let mut server = Server(Command::new(env!("CARGO_BIN_EXE_switchbite"))
+        .args(["workflow", "app", "--port", &port.to_string(), "--judge", "laya", "--endpoint", &format!("http://127.0.0.1:{judge_port}"), "--model", "laya:fixture"])
+        .current_dir(&repo).env_clear().env("PATH", path).env("SystemRoot", &system).env("WINDIR", &system)
+        .env("TEMP", tmp.path()).env("TMP", tmp.path()).env("USERPROFILE", &home).env("HOME", &home)
+        .env("CODEX_HOME", &codex).env("APPDATA", &appdata).env("LOCALAPPDATA", &local).env("FAKE_LOG", &log)
+        .stdout(Stdio::null()).stderr(Stdio::null()).spawn().unwrap());
+    let deadline = Instant::now() + Duration::from_secs(20);
+    while TcpStream::connect(("127.0.0.1", port)).is_err() {
+        assert!(Instant::now() < deadline && server.0.try_wait().unwrap().is_none(), "server did not start");
+        thread::sleep(Duration::from_millis(50));
+    }
+    let origin = format!("http://127.0.0.1:{port}");
+    let (_, html) = http(port, "GET", "/", "", "", "");
+    let token = html.split("const token='").nth(1).unwrap().split('\'').next().unwrap();
+    let (_, info) = http(port, "GET", "/api/app", "", "", "");
+    let info: Value = serde_json::from_str(&info).unwrap();
+    let coordinator = info["coordinators"].as_array().unwrap().iter()
+        .find(|c| c["model"] == "fake-build" && c["effort"] == "high").unwrap()["id"].clone();
+    let body = json!({"workspace":repo,"goal":"Create a result and independent review","coordinator_id":coordinator,"tools":["codex"]}).to_string();
+    assert_eq!(http(port, "POST", "/api/start", token, &origin, &body).0, 202);
+    let deadline = Instant::now() + Duration::from_secs(90);
+    loop {
+        let (_, body) = http(port, "GET", "/api/state", "", "", "");
+        let state: Value = serde_json::from_str(&body).unwrap();
+        if state["status"] == "completed" {
+            assert_eq!(state["progress"]["done"], 2);
+            assert_eq!(state["tools"], json!(["codex"]));
+            let stored = switchbite::workflow::Workflow::new(repo.join(".switchbite/workflow")).request(state["run_id"].as_str().unwrap()).unwrap();
+            assert_eq!(stored["catalog"]["providers"], json!(["codex"]));
+            let result = Path::new(state["result"]["workspace"].as_str().unwrap());
+            assert_eq!(fs::read_to_string(result.join("result.txt")).unwrap(), "built");
+            assert_eq!(fs::read_to_string(result.join("review.md")).unwrap(), "reviewed");
+            break;
+        }
+        assert!(Instant::now() < deadline && state.get("attention").is_none(), "workflow did not complete: {state}");
+        thread::sleep(Duration::from_millis(250));
+    }
+    judge.join().unwrap();
+    let calls = fs::read_to_string(log).unwrap();
+    assert_eq!(calls.lines().filter(|line| line.starts_with("review_route:")).count(), 1, "{calls}");
+    assert_eq!(calls.lines().filter(|line| *line == "build").count(), 1, "{calls}");
+    assert_eq!(calls.lines().filter(|line| *line == "review").count(), 1, "{calls}");
+}
