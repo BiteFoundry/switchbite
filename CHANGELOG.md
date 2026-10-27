@@ -11,6 +11,12 @@
 - Windows job-owned process trees, cancellation and stopped-owner restart recovery.
 - Bounded context gathering and repair handoff, plan observations and resumable runs.
 - Loopback workflow graph with progress, assignment, evidence and run controls.
+Validation on 2026-10-27 used one synthetic three-task project with live Jev
+routing and real Claude and Codex workers on Windows. Two implementation tasks ran independently; a
+Codex review followed their integration. One task failed its first check and was
+retried after a coordinator-supplied repair and shell fix. All three tasks then
+passed the supplied checks and integrated. This is a workflow smoke test, not a
+comparison of model quality or a claim about other projects.
 
 ## 0.6.0-stackbite.1 — 2026-10-25 (branch preview)
 

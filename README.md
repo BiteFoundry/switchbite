@@ -50,14 +50,21 @@ and [workflow guide](docs/workflow.ko.md).
 | `switchbite_next` | Advance or inspect, pause, resume, and cancel a run. |
 | `switchbite_observe` | Record a plan, repair, pool refresh, or host result. |
 
-The local CLI also supports `workflow run --request-file FILE`, `workflow continue
-RUN`, `workflow status RUN`, and `workflow view RUN`. Run these in the project
+The local CLI also supports `workflow run --request-file FILE`, `workflow continue RUN`,
+`workflow status RUN`, and `workflow view RUN`. Run these in the project
 workspace; the viewer listens on loopback and shows the task graph and evidence.
 [한국어 사용 안내](https://github.com/BiteFoundry/switchbite/blob/main/docs/agent-experience.ko.md)
 · [Coordinator guide](https://github.com/BiteFoundry/switchbite/blob/main/docs/coordinator.md)
 · [Policy and snapshots](https://github.com/BiteFoundry/switchbite/blob/main/docs/api-v2.md)
 · [Evaluation](https://github.com/BiteFoundry/switchbite/blob/main/docs/evaluation.md)
 
+## Preview validation
+
+On 2026-10-27, one synthetic three-task project ran on Windows using live Jev
+routing and real Claude and Codex workers. Two independent tasks were followed by a dependent Codex
+review; all three eventually passed the supplied checks and integrated. One task
+needed a coordinator-supplied repair and a shell fix before its retry. This smoke
+test checks the workflow path and does not establish model quality across projects.
 ## Connect once
 
 Download the ZIP and SHA256SUMS from [Releases](https://github.com/BiteFoundry/switchbite/releases), verify and extract.

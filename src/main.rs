@@ -574,13 +574,13 @@ fn main() {
         )
     {
         eprintln!(
-            "Use switchbite stackbite to install local Laya, or select it on serve, route, invoke, doctor or probe."
+            "Use switchbite stackbite to install local Laya, or select it on serve, workflow, route, invoke, doctor or probe."
         );
         std::process::exit(1);
     }
     if args == ["--help"] || args == ["-h"] {
         println!(
-            "Switchbite — the decision layer for your agents\nConnect once: switchbite codex | claude | cursor | grok | antigravity | opencode\nConnection options: --dry-run --json --offline --config-file FILE\nCopies a stable executable and merges user-level MCP settings; judge choice stays separate.\nPrint-only setup: setup --client NAME [--offline]\nWorkflow MCP: serve --profile workflow [--workspace DIR] [--offline]\nworkflow start --request-file FILE | next/status/pause/resume/cancel RUN | observe RUN --request-file FILE\nLegacy MCP: serve --profile agent [--offline]\nLocal Laya: --judge laya [--endpoint http://127.0.0.1:11435] [--model laya:multilingual]\nStackbite plugin: stackbite [--workspace ABS] [--client codex|claude|both] [--judge jev|laya] [--endpoint URL] [--model NAME] [--dry-run] [--json] (default Jev; project server switchbite-stackbite)\nLocal synthetic check: probe --judge laya [--endpoint URL] [--model NAME]\nAdvanced server options: --max-concurrent N --max-queued N --queue-timeout-ms N --decision-timeout-ms N\nroute | snapshot | evaluate --request-file FILE\nguide | doctor | config --client NAME [--executable ABS] [--offline]\nCompatibility: no args = docking API1; serve --profile cli = original typed tools; invoke OP --request-file FILE"
+            "Switchbite — the decision layer for your agents\nConnect once: switchbite codex | claude | cursor | grok | antigravity | opencode\nConnection options: --dry-run --json --offline --config-file FILE\nCopies a stable executable and merges user-level MCP settings; judge choice stays separate.\nPrint-only setup: setup --client NAME [--offline]\nWorkflow MCP: serve --profile workflow [--workspace DIR] [--offline]\nWorkflow CLI: workflow run|start --request-file FILE\nworkflow next|continue|status|pause|resume|cancel RUN\nworkflow observe RUN --request-file FILE | workflow view RUN [--port PORT]\nLegacy MCP: serve --profile agent [--offline]\nLocal Laya: --judge laya [--endpoint http://127.0.0.1:11435] [--model laya:multilingual]\nStackbite plugin: stackbite [--workspace ABS] [--client codex|claude|both] [--judge jev|laya] [--endpoint URL] [--model NAME] [--dry-run] [--json] (default Jev; project server switchbite-stackbite)\nLocal synthetic check: probe --judge laya [--endpoint URL] [--model NAME]\nAdvanced server options: --max-concurrent N --max-queued N --queue-timeout-ms N --decision-timeout-ms N\nroute | snapshot | evaluate --request-file FILE\nguide | doctor | config --client NAME [--executable ABS] [--offline]\nCompatibility: no args = docking API1; serve --profile cli = original typed tools; invoke OP --request-file FILE"
         );
         return;
     }
