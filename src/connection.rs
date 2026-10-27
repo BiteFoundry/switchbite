@@ -34,7 +34,7 @@ impl Error for ConfigError {}
 /// Codex/Grok use TOML; Claude/Cursor/Antigravity/generic use `mcpServers` JSON;
 /// OpenCode uses the version 2 `mcp.servers` JSON structure.
 pub fn render(client: &str, executable: &Path, offline: bool) -> Result<String, ConfigError> {
-    let mut args = vec!["serve", "--profile", "agent"];
+    let mut args = vec!["serve", "--profile", "workflow"];
     if offline {
         args.push("--offline");
     }

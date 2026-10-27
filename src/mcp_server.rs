@@ -70,13 +70,13 @@ impl McpServer {
         Ok(server)
     }
     pub fn workflow(
-        workspace: std::path::PathBuf,
+        workspace: impl Into<Option<std::path::PathBuf>>,
         judge: Option<Arc<crate::agent::ConfiguredJudge>>,
         config: crate::runtime::RuntimeConfig,
     ) -> Result<Self, crate::runtime::RuntimeError> {
         let mut server = Self::with_profile(Plugin::default(), Profile::Workflow);
         server.runtime = Arc::new(crate::runtime::DecisionRuntime::new(config)?);
-        server.workflow_workspace = Some(workspace);
+        server.workflow_workspace = workspace.into();
         server.agent_judge = judge;
         Ok(server)
     }
@@ -90,12 +90,12 @@ impl McpServer {
             "switchbite_next" => {
                 object
                     .keys()
-                    .all(|key| ["run_id", "operation"].contains(&key.as_str()))
+                    .all(|key| ["run_id", "operation", "action_id"].contains(&key.as_str()))
                     && args["run_id"].is_string()
                     && (args.get("operation").is_none()
                         || matches!(
                             args["operation"].as_str(),
-                            Some("next" | "status" | "pause" | "resume" | "cancel")
+                            Some("next" | "status" | "pause" | "resume" | "cancel" | "claim")
                         ))
             }
             _ => false,
@@ -109,10 +109,12 @@ impl McpServer {
             )
             .into();
         };
-        let interface = crate::workflow_interface::Interface::new(
-            self.workflow_workspace.clone().expect("workflow workspace"),
-            self.agent_judge.clone(),
-        );
+        let interface = match self.workflow_workspace.clone() {
+            Some(workspace) => {
+                crate::workflow_interface::Interface::new(workspace, self.agent_judge.clone())
+            }
+            None => crate::workflow_interface::Interface::unbound(self.agent_judge.clone()),
+        };
         let operation = name.to_owned();
         let outcome = tokio::task::spawn_blocking(move || {
             let _permit = permit;
@@ -408,7 +410,7 @@ where
 }
 
 pub async fn serve_workflow<R, W>(
-    workspace: std::path::PathBuf,
+    workspace: impl Into<Option<std::path::PathBuf>>,
     judge: Option<Arc<crate::agent::ConfiguredJudge>>,
     config: crate::runtime::RuntimeConfig,
     reader: R,

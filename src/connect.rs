@@ -193,7 +193,79 @@ pub fn merge(
     executable: &Path,
     offline: bool,
 ) -> Result<String, ConnectError> {
-    let snippet = connection::render(client, executable, offline).map_err(config_error)?;
+    // Only migrate known managed launches. Preserve explicit judge options.
+    let previous = if matches!(client, "codex" | "grok") {
+        let doc = existing
+            .parse::<toml_edit::DocumentMut>()
+            .map_err(|_| ConnectError::InvalidConfig)?;
+        doc.get("mcp_servers")
+            .and_then(|v| v.get("switchbite"))
+            .and_then(|v| v.get("args"))
+            .map(|v| {
+                v.as_array().ok_or(ConnectError::Conflict).and_then(|a| {
+                    a.iter()
+                        .map(|v| v.as_str().map(str::to_owned).ok_or(ConnectError::Conflict))
+                        .collect::<Result<Vec<_>, _>>()
+                })
+            })
+            .transpose()?
+    } else {
+        let root = CstRootNode::parse(existing.trim_start_matches('\u{feff}'), &Default::default())
+            .map_err(|_| ConnectError::InvalidConfig)?;
+        let value = root
+            .value()
+            .and_then(|v| v.to_serde_value())
+            .unwrap_or_else(|| serde_json::json!({}));
+        let server = if client == "opencode" {
+            &value["mcp"]["servers"]["switchbite"]
+        } else {
+            &value["mcpServers"]["switchbite"]
+        };
+        let args = if client == "opencode" {
+            server
+                .get("command")
+                .and_then(Value::as_array)
+                .map(|a| a.iter().skip(1).cloned().collect::<Vec<_>>())
+        } else {
+            server
+                .get("args")
+                .map(|v| v.as_array().cloned().ok_or(ConnectError::Conflict))
+                .transpose()?
+        };
+        args.map(|a| {
+            a.iter()
+                .map(|v| v.as_str().map(str::to_owned).ok_or(ConnectError::Conflict))
+                .collect::<Result<Vec<_>, _>>()
+        })
+        .transpose()?
+    };
+    let mut judge = Vec::<String>::new();
+    if let Some(previous) = previous {
+        let mut i = 0;
+        while i < previous.len() {
+            match previous[i].as_str() {
+                "serve" | "--offline" => i += 1,
+                "--profile"
+                    if i + 1 < previous.len()
+                        && matches!(previous[i + 1].as_str(), "agent" | "workflow") =>
+                {
+                    i += 2
+                }
+                "--judge" | "--endpoint" | "--model" if i + 1 < previous.len() => {
+                    judge.extend_from_slice(&previous[i..i + 2]);
+                    i += 2;
+                }
+                _ => return Err(ConnectError::Conflict),
+            }
+        }
+    }
+    let mut args = vec!["serve", "--profile", "workflow"];
+    if offline {
+        args.push("--offline");
+    }
+    args.extend(judge.iter().map(String::as_str));
+    let snippet =
+        connection::render_launch(client, executable, &args, !offline).map_err(config_error)?;
     merge_snippet(client, existing, &snippet, false, "switchbite")
 }
 

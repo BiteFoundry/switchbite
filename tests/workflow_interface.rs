@@ -35,7 +35,7 @@ fn workflow_schema_explains_plans_observations_and_controls() {
     let items = tools();
     let start = serde_json::to_value(&items[0]).unwrap();
     let request = &start["inputSchema"]["properties"]["request"];
-    assert_eq!(request["required"], json!(["workspace", "pool"]));
+    assert_eq!(request["required"], json!(["workspace"]));
     assert!(
         request["properties"]["plan"]["properties"]["nodes"]["items"]["properties"]["write_paths"]
             .is_object()
@@ -52,4 +52,42 @@ fn workflow_schema_explains_plans_observations_and_controls() {
         json!(["action_id", "event_id", "result"])
     );
     assert!(observe["inputSchema"]["examples"][0]["event"]["result"]["plan"]["nodes"].is_array());
+}
+
+#[test]
+fn unbound_interface_reopens_runs_from_separate_workspaces() {
+    let index = tempfile::tempdir().unwrap();
+    let a = tempfile::tempdir().unwrap();
+    let b = tempfile::tempdir().unwrap();
+    let first = Interface::unbound_with_index(index.path().to_owned(), None);
+    let start = |workspace: &std::path::Path| {
+        first
+            .start(&json!({"workspace":workspace,"goal":"Report","pool":[]}))
+            .unwrap()
+    };
+    let ra = start(a.path())["run_id"].as_str().unwrap().to_owned();
+    let rb = start(b.path())["run_id"].as_str().unwrap().to_owned();
+    let reopened = Interface::unbound_with_index(index.path().to_owned(), None);
+    assert_eq!(reopened.status(&ra).unwrap()["run_id"], ra);
+    assert_eq!(reopened.status(&rb).unwrap()["run_id"], rb);
+    assert_eq!(
+        reopened.status("../missing").unwrap_err()["error"]["code"],
+        "not_found"
+    );
+    std::fs::write(index.path().join(format!("{ra}.json")), b"bad").unwrap();
+    assert_eq!(
+        reopened.status(&ra).unwrap_err()["error"]["code"],
+        "not_found"
+    );
+}
+
+#[test]
+fn bound_interface_rejects_another_workspace() {
+    let a = tempfile::tempdir().unwrap();
+    let b = tempfile::tempdir().unwrap();
+    let interface = Interface::new(a.path().to_owned(), None);
+    let error = interface
+        .start(&json!({"workspace":b.path(),"goal":"Report","pool":[]}))
+        .unwrap_err();
+    assert_eq!(error["error"]["code"], "invalid_request");
 }

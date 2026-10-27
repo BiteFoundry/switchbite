@@ -277,3 +277,26 @@ fn one_command_uses_effective_codex_home_and_never_persists_environment_secrets(
         .unwrap();
     assert!(status.status.success());
 }
+
+#[test]
+fn migration_preserves_explicit_judge_and_rejects_custom_launch() {
+    let input = "[mcp_servers.switchbite]\ncommand='switchbite'\nargs=['serve','--profile','agent','--judge','laya','--model','custom']\n";
+    let output = connect::merge("codex", input, &executable(), false).unwrap();
+    let doc = output.parse::<toml_edit::DocumentMut>().unwrap();
+    let args = doc["mcp_servers"]["switchbite"]["args"].as_array().unwrap();
+    let args: Vec<_> = args.iter().map(|v| v.as_str().unwrap()).collect();
+    assert_eq!(
+        args,
+        [
+            "serve",
+            "--profile",
+            "workflow",
+            "--judge",
+            "laya",
+            "--model",
+            "custom"
+        ]
+    );
+    let custom = "[mcp_servers.switchbite]\ncommand='switchbite'\nargs=['custom-command']\n";
+    assert!(connect::merge("codex", custom, &executable(), false).is_err());
+}
