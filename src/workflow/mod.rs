@@ -83,6 +83,8 @@ struct State {
     tasks: Vec<Task>,
     actions: Vec<Value>,
     events: BTreeMap<String, Value>,
+    #[serde(default)]
+    recent_events: Vec<Value>,
     sequence: u64,
     revision: u64,
 }
@@ -149,11 +151,26 @@ impl Workflow {
                 .and_then(|_| file.sync_all())
                 .map_err(|_| err("storage_error"))?;
         }
-        fs::rename(tmp, dest).map_err(|_| err("storage_error"))
+        fs::rename(tmp, dest).map_err(|_| err("storage_error"))?;
+        // Keep one prior recovery snapshot; retaining every cumulative state would grow quadratically.
+        if let Ok(entries) = fs::read_dir(&dir) {
+            for entry in entries.flatten() {
+                let name = entry.file_name().to_string_lossy().into_owned();
+                if let Some(n) = name
+                    .strip_suffix(".json")
+                    .and_then(|n| n.parse::<u64>().ok())
+                {
+                    if n.saturating_add(1) < s.revision {
+                        let _ = fs::remove_file(entry.path());
+                    }
+                }
+            }
+        }
+        Ok(())
     }
     fn response(s: &State) -> Value {
         let done = s.tasks.iter().filter(|t| t.state == "done").count();
-        json!({"run_id":s.run_id,"status":s.status,"summary":format!("{done}/{} tasks completed",s.tasks.len()),"tasks":s.tasks.iter().map(|t|json!({"task":t.node,"id":t.node["id"],"status":t.state,"candidate":t.candidate,"prepared":t.prepared,"execution_id":t.execution_id,"repair_rounds":t.attempts,"evidence":t.evidence,"next_inspect_at_ms":t.next_inspect_at_ms})).collect::<Vec<_>>(),"actions":s.actions,"events":s.events.values().collect::<Vec<_>>(),"revision":s.revision,"progress":{"done":done,"total":s.tasks.len(),"blocked":s.tasks.iter().filter(|t| ["held","blocked"].contains(&t.state.as_str())).count()}})
+        json!({"run_id":s.run_id,"status":s.status,"summary":format!("{done}/{} tasks completed",s.tasks.len()),"tasks":s.tasks.iter().map(|t|json!({"task":t.node,"id":t.node["id"],"status":t.state,"candidate":t.candidate,"prepared":t.prepared,"execution_id":t.execution_id,"repair_rounds":t.attempts,"evidence":t.evidence,"next_inspect_at_ms":t.next_inspect_at_ms})).collect::<Vec<_>>(),"actions":s.actions,"events":s.recent_events,"event_count":s.events.len(),"event_cursor":{"first":s.events.len().saturating_sub(s.recent_events.len())+if s.recent_events.is_empty(){0}else{1},"last":s.events.len()},"revision":s.revision,"progress":{"done":done,"total":s.tasks.len(),"blocked":s.tasks.iter().filter(|t| ["held","blocked"].contains(&t.state.as_str())).count()}})
     }
     pub fn start(&self, request: &Value) -> Result<Value, WorkflowError> {
         let _g = MUTATION.lock().map_err(|_| err("storage_error"))?;
@@ -284,6 +301,7 @@ impl Workflow {
             tasks,
             actions: vec![],
             events: BTreeMap::new(),
+            recent_events: vec![],
             sequence: 0,
             revision: 0,
         };
@@ -390,12 +408,17 @@ impl Workflow {
             return Err(err("invalid_request"));
         }
         let mut s = self.load(run_id)?;
+        let digest =
+            crate::core::sha256(&serde_json::to_vec(event).map_err(|_| err("invalid_request"))?);
         if let Some(old) = s.events.get(eid) {
-            return if old == event {
+            return if old.as_str() == Some(digest.as_str()) || old == event {
                 Ok(Self::response(&s))
             } else {
                 Err(err("event_conflict"))
             };
+        }
+        if s.events.len() >= 4096 {
+            return Err(err("event_limit"));
         }
         let pos = s
             .actions
@@ -612,8 +635,18 @@ impl Workflow {
             }
             s.tasks[i].evidence.push(summary);
         }
+        let mut summary = evidence_summary(kind, result);
+        summary["sequence"] = json!(s.events.len() + 1);
+        summary["event_id"] = json!(eid);
+        summary["action_id"] = json!(aid);
+        summary["kind"] = json!(kind);
+        summary["task_id"] = a["task_id"].clone();
+        if s.recent_events.len() >= 32 {
+            s.recent_events.remove(0);
+        }
+        s.recent_events.push(summary);
         s.actions.remove(pos);
-        s.events.insert(eid.to_string(), event.clone());
+        s.events.insert(eid.to_string(), json!(digest));
         self.schedule(&mut s);
         self.save(&mut s)?;
         Ok(Self::response(&s))

@@ -351,3 +351,57 @@ fn claim_observes_pause_resume_and_cancellation() {
     w.control(run, "cancel").unwrap();
     assert!(!w.claim(run, id).unwrap());
 }
+#[test]
+fn compact_events_preserve_idempotency_and_bound_snapshots() {
+    let dir = tempfile::tempdir().unwrap();
+    let w = Workflow::new(dir.path().to_path_buf());
+    let nodes=(0..10).map(|i|json!({"id":format!("t{i}"),"objective":"do work","outputs":[format!("src/file{i}")]})).collect::<Vec<_>>();
+    let pool=(0..10).map(|i|json!({"id":format!("c{i}"),"description":"worker","capabilities":[],"available":true})).collect::<Vec<_>>();
+    let mut s = w
+        .start(
+            &json!({"workspace":"workspace","max_parallel":16,"plan":{"nodes":nodes},"pool":pool}),
+        )
+        .unwrap();
+    let run = s["run_id"].as_str().unwrap().to_owned();
+    let mut first = None;
+    while s["status"] != "completed" {
+        let a = s["actions"].as_array().unwrap()[0].clone();
+        let task = a["task_id"].as_str().unwrap();
+        let suffix = &task[1..];
+        let result = match a["kind"].as_str().unwrap() {
+            "route" => json!({"status":"ready","candidate_id":format!("c{suffix}")}),
+            "prepare" => prepared(),
+            "launch" => json!({"status":"completed","completion_verified":true}),
+            "verify" => {
+                json!({"status":"passed","evidence":[{"status":"passed","private":"never expose"}]})
+            }
+            "integrate" => json!({"status":"integrated"}),
+            _ => panic!("unexpected action"),
+        };
+        let event = json!({"event_id":format!("event:{}",a["id"].as_str().unwrap()),"action_id":a["id"],"result":result});
+        if first.is_none() {
+            first = Some(event.clone());
+        }
+        s = w.observe(&run, &event).unwrap();
+    }
+    assert_eq!(s["event_count"], 50);
+    assert_eq!(s["events"].as_array().unwrap().len(), 32);
+    assert_eq!(s["event_cursor"], json!({"first":19,"last":50}));
+    assert!(!s["events"].to_string().contains("never expose"));
+    let event = first.unwrap();
+    assert_eq!(w.observe(&run, &event).unwrap(), s);
+    let mut changed = event.clone();
+    changed["result"]["status"] = json!("hold");
+    assert_eq!(
+        w.observe(&run, &changed).unwrap_err().code,
+        "event_conflict"
+    );
+    let count = std::fs::read_dir(dir.path().join(&run))
+        .unwrap()
+        .filter_map(Result::ok)
+        .filter(|e| e.path().extension().is_some_and(|x| x == "json"))
+        .count();
+    assert!(count <= 2, "snapshot files: {count}");
+    let restarted = Workflow::new(dir.path().to_path_buf());
+    assert_eq!(restarted.observe(&run, &event).unwrap(), s);
+}
