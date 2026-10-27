@@ -1,0 +1,55 @@
+{
+  "verified_at": "2026-10-28T00:47:03.8335969+09:00",
+  "release": {
+    "tag": "v0.9.0-preview.1",
+    "published_at": "2026-10-27T15:44:47Z",
+    "tag_commit": "1d740d52f69c0426a7a771ff16cc15efac37ba43",
+    "draft": false,
+    "url": "https://github.com/BiteFoundry/switchbite/releases/tag/v0.9.0-preview.1",
+    "prerelease": true,
+    "runtime_source_commit": "53efb2644cf29d3399a3cb4b7872e89806a6a63c"
+  },
+  "channel": {
+    "bundle_id": "v0.9.0-preview.1-windows-x64",
+    "url": "https://github.com/BiteFoundry/switchbite/releases/download/runtime-preview/channel-windows-x64.json",
+    "published_at": "2026-10-27T15:44:50Z",
+    "release_url": "https://github.com/BiteFoundry/switchbite/releases/tag/runtime-preview"
+  },
+  "ci": {
+    "run_id": 40532800043,
+    "url": "https://github.com/BiteFoundry/switchbite/actions/runs/40532800043",
+    "conclusion": "success",
+    "checks": [
+      "minimum-rust",
+      "Windows format",
+      "Windows clippy",
+      "Windows tests",
+      "release build",
+      "package verification",
+      "publish"
+    ]
+  },
+  "verified": {
+    "stackbite_app_version": "0.5.54",
+    "protocol_version": 1,
+    "uploaded_asset_digests": 8,
+    "fresh_public_channel_install": "passed",
+    "switchbite_version": "0.9.0-preview.1",
+    "installed_executable_hashes": "matched",
+    "providers": [
+      "codex",
+      "claude",
+      "cursor",
+      "opencode",
+      "antigravity"
+    ],
+    "unauthenticated_version_manifest_http": 200,
+    "active_web_runtime_channel": "GitHub runtime-preview"
+  },
+  "runtime_assets": {
+    "switchbite_sha256": "45fa5a56b6c0f423ebd04fc959d653c9466cd67f0099a8230a0808968a5a426f",
+    "stackbite_sha256": "7037569e3f2eb73e9bd8a39e2dc763398e5c5d2a83a56973baf75b6700d7b170",
+    "manifest_sha256": "545caa7f1b53c5b86d6dfd720ba495552c98d3907b4802e78452bcbe0d779843",
+    "archive_sha256": "bc6df316035c82b7bfe94f5fa944ca4c7bc010ace2ea37797a0df36a700d501c"
+  }
+}

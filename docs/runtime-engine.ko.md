@@ -61,3 +61,5 @@ switchbite workflow app
 ```
 
 채널의 매니페스트는 버전별 릴리스의 실행 파일을 가리킨다. 새 배포에서도 이전 실행 파일은 유지한다.
+
+[GitHub 채널 게시·설치 검증 기록](releases/runtime-preview-publication-2026-10-28.json): 공개 URL에서 새 디렉터리로 설치하고 실행 파일의 해시·버전·프로토콜을 확인했다. 현재 웹 앱도 이 GitHub 채널을 사용하도록 설정했다.
