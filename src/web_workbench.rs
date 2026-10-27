@@ -700,18 +700,54 @@ impl Workbench {
 
 fn drive(run: &Run, judge: Option<Arc<ConfiguredJudge>>) -> Result<(), Value> {
     let workflow = Workflow::new(run.root.clone());
+    let mut coordinator_job: Option<(Value, thread::JoinHandle<Result<Value, Value>>)> = None;
+    let mut attention = None;
     loop {
-        let state = workflow_runner::advance(&run.root, &run.id, judge.clone())
-            .map_err(|e| e.to_value())?;
-        if let Some(detail) = state.get("attention") {
-            return Err(detail.clone());
+        let state =
+            workflow_runner::advance_inner(&run.root, &run.id, judge.clone(), attention.is_some())
+                .map_err(|e| e.to_value())?;
+        if attention.is_none() {
+            attention = state.get("attention").cloned();
         }
         let active = state["driver"]["active_actions"].as_u64().unwrap_or(0);
-        if (state["status"] == "completed" || state["status"] == "cancelled") && active == 0 {
+        if coordinator_job
+            .as_ref()
+            .is_some_and(|(_, job)| job.is_finished())
+            && state["status"] != "paused"
+        {
+            let (action, job) = coordinator_job.take().ok_or_else(lock_error)?;
+            *run.active_action.lock().map_err(|_| lock_error())? = None;
+            if state["status"] != "cancelled" {
+                let id = action["id"].as_str().ok_or_else(lock_error)?;
+                let result = job
+                    .join()
+                    .map_err(|_| error("coordinator_panic", "조율자 작업이 중단되었습니다."))??;
+                workflow
+                    .observe(
+                        &run.id,
+                        &json!({"action_id":id,"event_id":format!("web:{id}"),"result":result}),
+                    )
+                    .map_err(|e| e.to_value())?;
+                *run.coordinator.lock().map_err(|_| lock_error())? =
+                    json!({"status":"coordinating"});
+            } else {
+                let _ = job.join();
+            }
+            continue;
+        }
+        if coordinator_job.is_none() && active == 0 && state["status"] != "cancelled" {
+            if let Some(detail) = attention.take() {
+                return Err(detail);
+            }
+        }
+        if (state["status"] == "completed" || state["status"] == "cancelled")
+            && active == 0
+            && coordinator_job.is_none()
+        {
             *run.coordinator.lock().map_err(|_| lock_error())? = json!({"status":state["status"]});
             return Ok(());
         }
-        if state["status"] == "running" {
+        if state["status"] == "running" && coordinator_job.is_none() && attention.is_none() {
             if let Some(mut action) = state["actions"]
                 .as_array()
                 .into_iter()
@@ -733,32 +769,20 @@ fn drive(run: &Run, judge: Option<Arc<ConfiguredJudge>>) -> Result<(), Value> {
                     *run.coordinator.lock().map_err(|_| lock_error())? = json!({"status":if action["kind"] == "plan" {"planning"} else if action["kind"] == "review_route" {"routing"} else {"repairing"}});
                     run.checkpoint()?;
                     // Recheck after publishing the cancellation target.
-                    let result = if workflow.status(&run.id).map_err(|e| e.to_value())?["status"]
-                        == "cancelled"
-                    {
-                        None
-                    } else {
-                        Some(web_coordinator::fulfill(
-                            &run.root,
-                            &run.id,
-                            &action,
-                            &run.candidate,
-                        ))
-                    };
-                    *run.active_action.lock().map_err(|_| lock_error())? = None;
-                    loop {
-                        let status = workflow.status(&run.id).map_err(|e| e.to_value())?;
-                        if status["status"] != "paused" {
-                            break;
-                        }
-                        thread::sleep(Duration::from_millis(250));
-                    }
                     if workflow.status(&run.id).map_err(|e| e.to_value())?["status"] != "cancelled"
                     {
-                        let result = result.ok_or_else(lock_error)??;
-                        workflow.observe(&run.id, &json!({"action_id":id,"event_id":format!("web:{id}"),"result":result})).map_err(|e| e.to_value())?;
-                        *run.coordinator.lock().map_err(|_| lock_error())? =
-                            json!({"status":"coordinating"});
+                        let root = run.root.clone();
+                        let run_id = run.id.clone();
+                        let candidate = run.candidate.clone();
+                        let job_action = action.clone();
+                        coordinator_job = Some((
+                            action,
+                            thread::spawn(move || {
+                                web_coordinator::fulfill(&root, &run_id, &job_action, &candidate)
+                            }),
+                        ));
+                    } else {
+                        *run.active_action.lock().map_err(|_| lock_error())? = None;
                     }
                 }
             } else if active == 0
@@ -785,5 +809,123 @@ fn drive(run: &Run, judge: Option<Arc<ConfiguredJudge>>) -> Result<(), Value> {
             }
         }
         thread::sleep(Duration::from_millis(250));
+    }
+}
+
+#[cfg(test)]
+mod parallel_tests {
+    use super::*;
+    use std::{
+        fs, thread,
+        time::{Duration, Instant},
+    };
+
+    #[test]
+    fn coordinator_review_does_not_block_independent_worker() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = tmp.path().join("repo");
+        fs::create_dir(&repo).unwrap();
+        for args in [
+            vec!["init", "-q"],
+            vec![
+                "-c",
+                "user.name=Test",
+                "-c",
+                "user.email=test@localhost",
+                "commit",
+                "-q",
+                "--allow-empty",
+                "-m",
+                "base",
+            ],
+        ] {
+            assert!(
+                Command::new("git")
+                    .current_dir(&repo)
+                    .args(args)
+                    .status()
+                    .unwrap()
+                    .success()
+            );
+        }
+        let source = tmp.path().join("fake.rs");
+        let exe = tmp
+            .path()
+            .join(if cfg!(windows) { "fake.exe" } else { "fake" });
+        let coordinator_started = tmp.path().join("coordinator-started");
+        let worker_started = tmp.path().join("worker-started");
+        let release = tmp.path().join("release");
+        fs::write(&source, format!(r##"use std::{{fs,thread,time::Duration}};
+fn main() {{
+ let args:Vec<String>=std::env::args().collect();
+ let mut input=String::new();
+ let prompt=if args.last().map(String::as_str)==Some("-") {{ use std::io::Read; std::io::stdin().read_to_string(&mut input).unwrap(); input }} else {{args.join(" ")}};
+ println!("{{{{\"type\":\"thread.started\",\"thread_id\":\"test\"}}}}"); println!("{{{{\"type\":\"turn.started\"}}}}");
+ if prompt.contains("Review the proposed worker assignment") {{
+  fs::write({coordinator_started:?}, "started").unwrap();
+  while !std::path::Path::new({release:?}).exists() {{thread::sleep(Duration::from_millis(20));}}
+  fs::write("switchbite-observation.json",r#"{{"status":"ready","candidate_id":"worker","reason_codes":["coordinator_review"],"summary":"Eligible"}}"#).unwrap();
+ }} else {{ fs::write({worker_started:?}, "started").unwrap(); fs::write("two.txt","done").unwrap(); }}
+ println!("{{{{\"type\":\"turn.completed\"}}}}");
+}}"##, coordinator_started=coordinator_started.to_str().unwrap(), worker_started=worker_started.to_str().unwrap(), release=release.to_str().unwrap())).unwrap();
+        assert!(
+            Command::new("rustc")
+                .arg(&source)
+                .arg("-o")
+                .arg(&exe)
+                .status()
+                .unwrap()
+                .success()
+        );
+        let candidate = json!({"id":"worker","description":"worker","capabilities":[],"available":true,"provider":"codex","executable":exe,"model":"test","effort":"high"});
+        let root = tmp.path().join("state");
+        let workflow = Workflow::new(root.clone());
+        let state = workflow.start(&json!({"workspace":repo,"goal":"parallel test","pool":[candidate],"max_parallel":2,"plan":{"nodes":[
+            {"id":"one","objective":"one","role":"implementation","depends_on":[],"acceptance":["done"],"write_paths":["one.txt"]},
+            {"id":"two","objective":"two","role":"implementation","depends_on":[],"acceptance":["done"],"write_paths":["two.txt"],"routing":{"provider":"codex","model":"test","effort":"high"}}
+        ]}})).unwrap();
+        let id = state["run_id"].as_str().unwrap().to_owned();
+        let route = state["actions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|a| a["kind"] == "route" && a["task_id"] == "one")
+            .unwrap();
+        workflow.observe(&id, &json!({"action_id":route["id"],"event_id":"held","result":{"status":"hold","reason_codes":["low_confidence"],"next_action":"request_review"}})).unwrap();
+        let run = Arc::new(Run {
+            root,
+            id: id.clone(),
+            candidate,
+            coordinator: Mutex::new(json!({})),
+            active_action: Mutex::new(None),
+            latest_coordinator_action: Mutex::new(None),
+            alive: AtomicBool::new(true),
+            attempt: AtomicU64::new(0),
+            tools: vec![],
+        });
+        let task = run.clone();
+        let driver = thread::spawn(move || drive(&task, None));
+        let deadline = Instant::now() + Duration::from_secs(20);
+        let mut completed = false;
+        while Instant::now() < deadline {
+            let state = workflow.status(&id).unwrap();
+            completed = state["tasks"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|task| task["id"] == "two" && task["status"] == "done");
+            if coordinator_started.exists() && completed {
+                break;
+            }
+            thread::sleep(Duration::from_millis(25));
+        }
+        let overlapped = coordinator_started.exists() && worker_started.exists() && completed;
+        fs::write(&release, "release").unwrap();
+        workflow.control(&id, "cancel").unwrap();
+        let _ = driver.join();
+        assert!(
+            overlapped,
+            "independent worker did not complete while coordinator was blocked"
+        );
     }
 }

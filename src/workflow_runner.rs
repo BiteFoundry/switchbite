@@ -24,7 +24,11 @@ impl RunnerError {
     }
 }
 
-type Job = JoinHandle<Result<Value, Value>>;
+struct Job {
+    handle: JoinHandle<Result<Value, Value>>,
+    route: bool,
+}
+const MAX_ROUTE_JOBS: usize = 4;
 static JOBS: OnceLock<Mutex<BTreeMap<String, Job>>> = OnceLock::new();
 static ADVANCE: Mutex<()> = Mutex::new(());
 struct Supervisor {
@@ -161,7 +165,7 @@ pub fn advance(
 }
 
 // Once a routing error needs attention, only settle work already in flight.
-fn advance_inner(
+pub(crate) fn advance_inner(
     root: &Path,
     run_id: &str,
     judge: Option<Arc<agent::ConfiguredJudge>>,
@@ -174,10 +178,11 @@ fn advance_inner(
     let finished: Vec<_> = {
         let map = jobs().lock().map_err(|_| error("driver_busy"))?;
         map.iter()
-            .filter(|(key, job)| key.starts_with(&key_prefix) && job.is_finished())
+            .filter(|(key, job)| key.starts_with(&key_prefix) && job.handle.is_finished())
             .map(|(key, _)| key.clone())
             .collect()
     };
+    let mut route_attention = None;
     for key in finished {
         let job = jobs()
             .lock()
@@ -199,7 +204,23 @@ fn advance_inner(
             .as_str()
             .unwrap_or("launch")
             .to_owned();
-        let result = match job.join() {
+        let outcome = job.handle.join();
+        if job.route {
+            match outcome {
+                Ok(Ok(result)) => {
+                    if let Err(e) = engine.observe(run_id, &json!({"action_id":action_id,"event_id":format!("route:{action_id}"),"result":result})) {
+                        let state = engine.status(run_id).map_err(map_core)?;
+                        if !(state["status"] == "cancelled" && e.code == "action_not_found") {
+                            return Err(map_core(e));
+                        }
+                    }
+                }
+                Ok(Err(failure)) => route_attention = Some(failure),
+                Err(_) => route_attention = Some(json!({"code":"route_panic"})),
+            }
+            continue;
+        }
+        let result = match outcome {
             Ok(Ok(result)) => result,
             Ok(Err(failure))
                 if action_kind == "inspect"
@@ -250,6 +271,10 @@ fn advance_inner(
         Ok(state)
     };
     let mut state = engine.next(run_id).map_err(map_core)?;
+    if let Some(attention) = route_attention {
+        state["attention"] = attention;
+        return annotate(state);
+    }
     if (settle_only && state["status"] != "cancelled")
         || state["status"] == "paused"
         || state["status"] == "completed"
@@ -257,42 +282,44 @@ fn advance_inner(
         return annotate(state);
     }
     let actions = state["actions"].as_array().cloned().unwrap_or_default();
-    // One bounded provider request per advance keeps the compact MCP call inside
-    // its client deadline while independent host work runs on owned threads.
     for action in actions
         .iter()
         .filter(|a| !settle_only && a["kind"] == "route")
-        .take(1)
     {
         let id = action["id"]
             .as_str()
             .ok_or_else(|| error("invalid_action"))?;
+        let key = format!("{key_prefix}{id}");
+        let mut map = jobs().lock().map_err(|_| error("driver_busy"))?;
+        if map.contains_key(&key) {
+            continue;
+        }
+        if map.values().filter(|job| job.route).count() >= MAX_ROUTE_JOBS {
+            break;
+        }
         if !engine.claim(run_id, id).map_err(map_core)? {
             continue;
         }
-        let decision = crate::route_context::explicit_route(action)
-            .map(Ok)
-            .unwrap_or_else(|| {
-                agent::route_with_judge(
-                    &action["payload"]["route_input"],
-                    judge.clone(),
-                    agent::now_ms(),
-                )
-            });
-        match decision {
-            Ok(result) => {
-                engine
-                    .observe(
-                        run_id,
-                        &json!({"action_id":id,"event_id":format!("route:{id}"),"result":result}),
-                    )
-                    .map_err(map_core)?;
-            }
-            Err(e) => {
-                state["attention"] = e.to_value();
-                return annotate(state);
-            }
-        }
+        let action = action.clone();
+        let judge = judge.clone();
+        map.insert(
+            key,
+            Job {
+                route: true,
+                handle: thread::spawn(move || {
+                    crate::route_context::explicit_route(&action)
+                        .map(Ok)
+                        .unwrap_or_else(|| {
+                            agent::route_with_judge(
+                                &action["payload"]["route_input"],
+                                judge,
+                                agent::now_ms(),
+                            )
+                            .map_err(|e| e.to_value())
+                        })
+                }),
+            },
+        );
     }
     state = engine.next(run_id).map_err(map_core)?;
     if (settle_only && state["status"] != "cancelled")
@@ -346,7 +373,10 @@ fn advance_inner(
         .map_err(|e| RunnerError(e.to_value()))?;
         map.insert(
             key,
-            thread::spawn(move || host.perform(&action).map_err(|e| e.to_value())),
+            Job {
+                route: false,
+                handle: thread::spawn(move || host.perform(&action).map_err(|e| e.to_value())),
+            },
         );
     }
     annotate(state)
