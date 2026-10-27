@@ -365,17 +365,18 @@ pub(crate) fn advance_inner(
         if !engine.claim(run_id, id).map_err(map_core)? {
             continue;
         }
-        let host = LocalHost::new(
-            Path::new(workspace),
-            &host_state,
-            &request.get("host").cloned().unwrap_or(json!({})),
-        )
-        .map_err(|e| RunnerError(e.to_value()))?;
+        let workspace = workspace.to_owned();
+        let host_state = host_state.clone();
+        let config = request.get("host").cloned().unwrap_or(json!({}));
         map.insert(
             key,
             Job {
                 route: false,
-                handle: thread::spawn(move || host.perform(&action).map_err(|e| e.to_value())),
+                handle: thread::spawn(move || {
+                    let host = LocalHost::new(Path::new(&workspace), &host_state, &config)
+                        .map_err(|e| e.to_value())?;
+                    host.perform(&action).map_err(|e| e.to_value())
+                }),
             },
         );
     }
