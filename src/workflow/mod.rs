@@ -1454,6 +1454,9 @@ fn evidence_summary(kind: &str, result: &Value) -> Value {
     if let Some(code) = host_error(result) {
         summary["error_code"] = json!(code);
     }
+    if let Some(count) = result["permission_denial_count"].as_u64() {
+        summary["permission_denial_count"] = json!(count);
+    }
     if let Some(evidence) = result.get("evidence").and_then(Value::as_array) {
         summary["checks_passed"] =
             json!(evidence.iter().filter(|e| e["status"] == "passed").count());

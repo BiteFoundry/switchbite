@@ -208,9 +208,15 @@ mod tests {
         let path = dir.path().join("switchbite-observation.json");
         let action = json!({"payload":{"candidate_snapshot":[{"id":"valid","available":true}]}});
         for (kind, value) in [
-            ("plan", json!({"plan":{"nodes":[{"id":"build","objective":"Build"}]}})),
+            (
+                "plan",
+                json!({"plan":{"nodes":[{"id":"build","objective":"Build"}]}}),
+            ),
             ("repair", json!({"task":{"id":"build","objective":"Fix"}})),
-            ("review_route", json!({"status":"ready","candidate_id":"valid","reason_codes":["coordinator_review"],"summary":"Eligible"})),
+            (
+                "review_route",
+                json!({"status":"ready","candidate_id":"valid","reason_codes":["coordinator_review"],"summary":"Eligible"}),
+            ),
         ] {
             let plain = serde_json::to_vec(&value).unwrap();
             fs::write(&path, &plain).unwrap();
@@ -220,9 +226,17 @@ mod tests {
             fs::write(&path, bom).unwrap();
             assert_eq!(observation(dir.path(), kind, &action).unwrap(), expected);
         }
-        for bytes in [b"\xef\xbb\xbf{".as_slice(), b"\xef\xbb\xbf\xef\xbb\xbf{}".as_slice(), b"\xff\xfe{\0}\0".as_slice(), b"\xef\xbb\xbf{}".as_slice()] {
+        for bytes in [
+            b"\xef\xbb\xbf{".as_slice(),
+            b"\xef\xbb\xbf\xef\xbb\xbf{}".as_slice(),
+            b"\xff\xfe{\0}\0".as_slice(),
+            b"\xef\xbb\xbf{}".as_slice(),
+        ] {
             fs::write(&path, bytes).unwrap();
-            assert_eq!(observation(dir.path(), "plan", &action).unwrap_err()["code"], "coordinator_artifact_invalid");
+            assert_eq!(
+                observation(dir.path(), "plan", &action).unwrap_err()["code"],
+                "coordinator_artifact_invalid"
+            );
         }
     }
 

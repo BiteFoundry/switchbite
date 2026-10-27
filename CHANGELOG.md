@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.8.6-review.3 — 2026-10-27 (branch preview)
+
+- Coordinator observations accept a leading UTF-8 BOM produced by Windows
+  PowerShell while preserving JSON and artifact validation.
+- A successful Claude result can contain recovered tool-denial records.
+  Denial counts remain in execution evidence; output verification and scoped
+  integration determine whether the produced work can advance.
+
 ## 0.8.6-review.2 — 2026-10-27 (branch preview)
 
 - Codex launch reads its full UTF-8 task from an owned stdin file, avoiding
