@@ -7,6 +7,7 @@ use std::{
     fs::{self, File},
     io::{Read, Seek, SeekFrom},
     path::{Path, PathBuf},
+    sync::LazyLock,
     time::UNIX_EPOCH,
 };
 
@@ -25,26 +26,26 @@ fn safe_run(s: &str) -> bool {
         && s.bytes()
             .all(|b| b.is_ascii_alphanumeric() || b"-_.:".contains(&b))
 }
+static ANSI: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\x1b\[[0-?]*[ -/]*[@-~]").unwrap());
+static BEARER: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"(?i)\b(bearer\s+)[a-z0-9._~+/-]{8,}").unwrap());
+static ASSIGNMENT: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r#"(?i)\b((?:api[_-]?key|token|password|secret)\s*[:=]\s*['\"]?)[^\s'\",;]{4,}"#)
+        .unwrap()
+});
+static KEY: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\b(sk-[A-Za-z0-9_-]{12,})\b").unwrap());
 fn clean(s: &str) -> String {
-    let ansi = Regex::new(r"\x1b\[[0-?]*[ -/]*[@-~]").unwrap();
-    let mut v: String = ansi
+    let v: String = ANSI
         .replace_all(s, "")
         .chars()
         .filter(|c| !c.is_control() || *c == '\t')
         .collect();
-    for pattern in [
-        r"(?i)\b(bearer\s+)[a-z0-9._~+/-]{8,}",
-        r#"(?i)\b((?:api[_-]?key|token|password|secret)\s*[:=]\s*['\"]?)[^\s'\",;]{4,}"#,
-        r"\b(sk-[A-Za-z0-9_-]{12,})\b",
-    ] {
-        let re = Regex::new(pattern).unwrap();
-        v = if pattern.contains("sk-") {
-            re.replace_all(&v, "[REDACTED]").into_owned()
-        } else {
-            re.replace_all(&v, "${1}[REDACTED]").into_owned()
-        };
-    }
-    v.chars().take(1000).collect()
+    let v = BEARER.replace_all(&v, "${1}[REDACTED]");
+    let v = ASSIGNMENT.replace_all(&v, "${1}[REDACTED]");
+    KEY.replace_all(&v, "[REDACTED]")
+        .chars()
+        .take(1000)
+        .collect()
 }
 fn get<'a>(v: &'a Value, path: &[&str]) -> Option<&'a str> {
     let mut p = v;
@@ -53,60 +54,70 @@ fn get<'a>(v: &'a Value, path: &[&str]) -> Option<&'a str> {
     }
     p.as_str()
 }
-fn event(v: &Value) -> Option<(&'static str, String)> {
-    let typ = v["type"].as_str().unwrap_or("");
+fn event(v: &Value) -> Vec<(&'static str, String)> {
+    let typ = v["type"]
+        .as_str()
+        .or_else(|| v["event"].as_str())
+        .unwrap_or("");
     if typ.contains("thinking")
         || typ.contains("reasoning")
         || typ.contains("init")
         || typ.contains("config")
     {
-        return None;
+        return vec![];
     }
-    if typ == "item.completed" || typ == "item.updated" || typ == "item.started" {
+    let mut visible = Vec::new();
+    if ["item.completed", "item.updated", "item.started"].contains(&typ) {
         let item = &v["item"];
         match item["type"].as_str().unwrap_or("") {
-            "agent_message" => return get(item, &["text"]).map(|s| ("text", s.to_owned())),
-            "command_execution" => {
-                return get(item, &["command"]).map(|s| ("tool", format!("Command: {s}")));
+            "agent_message" => {
+                if let Some(s) = get(item, &["text"]) {
+                    visible.push(("text", s.to_owned()));
+                }
             }
-            "file_change" => return Some(("tool", "File changes".into())),
-            "reasoning" => return None,
+            "command_execution" => {
+                if let Some(s) = get(item, &["command"]) {
+                    visible.push(("tool", format!("Command: {s}")));
+                }
+                if let Some(s) = get(item, &["aggregated_output"]) {
+                    visible.push(("tool", s.to_owned()));
+                }
+            }
+            "file_change" => visible.push(("tool", "File changes".into())),
             _ => {}
         }
+        return visible;
     }
     if typ == "assistant" || typ == "user" {
         if let Some(content) = v["message"]["content"].as_array() {
-            for c in content {
+            for c in content.iter().take(MAX_ENTRIES) {
                 match c["type"].as_str().unwrap_or("") {
                     "text" if typ == "assistant" => {
                         if let Some(s) = c["text"].as_str() {
-                            return Some(("text", s.into()));
+                            visible.push(("text", s.into()));
                         }
                     }
-                    "tool_use" => {
-                        return Some((
-                            "tool",
-                            format!("Tool: {}", c["name"].as_str().unwrap_or("tool")),
-                        ));
-                    }
+                    "tool_use" => visible.push((
+                        "tool",
+                        format!("Tool: {}", c["name"].as_str().unwrap_or("tool")),
+                    )),
                     "tool_result" => {
                         if let Some(s) = c["content"].as_str() {
-                            return Some(("tool", s.into()));
+                            visible.push(("tool", s.into()));
                         }
                     }
                     _ => {}
                 }
             }
         }
-        return None;
+        return visible;
     }
     if typ == "text" {
-        return get(v, &["part", "text"])
-            .or_else(|| get(v, &["text"]))
-            .map(|s| ("text", s.to_owned()));
-    }
-    if typ == "tool_use" {
-        return Some((
+        if let Some(s) = get(v, &["part", "text"]).or_else(|| get(v, &["text"])) {
+            visible.push(("text", s.into()));
+        }
+    } else if typ == "tool_use" {
+        visible.push((
             "tool",
             format!(
                 "Tool: {}",
@@ -115,30 +126,30 @@ fn event(v: &Value) -> Option<(&'static str, String)> {
                     .unwrap_or("tool")
             ),
         ));
-    }
-    if typ == "step_update" {
-        return get(v, &["step_update", "agent_response", "text_delta"])
-            .or_else(|| get(v, &["agent_response", "text_delta"]))
-            .map(|s| ("text", s.into()));
-    }
-    if typ == "result" {
-        return get(v, &["result", "response"]).map(|s| ("text", s.into()));
-    }
-    if typ == "error" {
-        return Some((
+    } else if typ == "step_update" {
+        if v["step_update"]["step_type"] == "agent_response" {
+            if let Some(s) = get(v, &["step_update", "text_delta"]) {
+                visible.push(("text", s.into()));
+            }
+        }
+    } else if typ == "result" {
+        if let Some(s) = get(v, &["result", "response"]) {
+            visible.push(("text", s.into()));
+        }
+    } else if typ == "error" {
+        visible.push((
             "error",
-            clean(get(v, &["message"]).unwrap_or("Provider error")),
+            get(v, &["message"]).unwrap_or("Provider error").into(),
         ));
-    }
-    if !typ.is_empty()
+    } else if !typ.is_empty()
         && typ.len() <= 64
         && typ
             .bytes()
             .all(|b| b.is_ascii_alphanumeric() || b"._-".contains(&b))
     {
-        return Some(("event", format!("Event: {typ}")));
+        visible.push(("event", format!("Event: {typ}")));
     }
-    None
+    visible
 }
 fn file(path: &Path) -> Option<File> {
     if !fs::symlink_metadata(path).ok()?.file_type().is_file() {
@@ -187,19 +198,20 @@ fn tail(path: &Path, id: &str, source: &str) -> (Vec<Value>, bool, Option<u64>, 
             let parsed = if trimmed.starts_with('{') || trimmed.starts_with('[') {
                 serde_json::from_str::<Value>(trimmed)
                     .ok()
-                    .and_then(|v| event(&v))
+                    .map(|v| event(&v))
+                    .unwrap_or_default()
             } else if !trimmed.is_empty() {
-                Some((
+                vec![(
                     if source == "stderr" { "error" } else { "text" },
                     line.to_owned(),
-                ))
+                )]
             } else {
-                None
+                vec![]
             };
-            if let Some((kind, text)) = parsed {
+            for (index, (kind, text)) in parsed.into_iter().enumerate() {
                 let text = clean(&text);
                 if !text.is_empty() {
-                    entries.push(json!({"id":format!("{id}:{source}:{}",start + offset as u64),"source":source,"kind":kind,"text":text}));
+                    entries.push(json!({"id":format!("{id}:{source}:{}:{index}",start + offset as u64),"source":source,"kind":kind,"text":text}));
                 }
             }
         }
@@ -335,7 +347,23 @@ pub fn snapshot(
             );
         }
     }
-    let tasks = state["tasks"].as_array().cloned().unwrap_or_default();
+    let mut tasks = state["tasks"].as_array().cloned().unwrap_or_default();
+    tasks.sort_by_key(|task| {
+        let active = state["actions"].as_array().and_then(|a| {
+            a.iter()
+                .rposition(|a| a["kind"] == "integrate" && a["task_id"] == task["id"])
+        });
+        let recent = state["events"].as_array().and_then(|a| {
+            a.iter()
+                .rposition(|e| e["stage"] == "integrate" && e["task_id"] == task["id"])
+        });
+        std::cmp::Reverse((
+            active.is_some(),
+            active.unwrap_or(0),
+            recent.is_some(),
+            recent.unwrap_or(0),
+        ))
+    });
     for task in &tasks {
         let tid = task["id"].as_str();
         let provider = task["candidate"]["provider"].as_str();

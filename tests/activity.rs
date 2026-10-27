@@ -76,3 +76,37 @@ fn limits_tail_and_entries_without_exposing_invalid_json() {
     );
     assert!(!value.to_string().contains("secret"));
 }
+
+#[test]
+fn parses_actual_antigravity_and_multiple_provider_content_items() {
+    let (root, run, state, hash) = setup();
+    let output = root.path().join(&run).join("host/output");
+    fs::write(output.join(format!("{hash}.out")), concat!(
+        "{\"event\":\"step_update\",\"step_update\":{\"step_type\":\"agent_response\",\"text_delta\":\"AGY delta\"}}\n",
+        "{\"event\":\"step_update\",\"step_update\":{\"step_type\":\"thinking\",\"text_delta\":\"hidden reasoning\"}}\n",
+        "{\"event\":\"result\",\"result\":{\"response\":\"AGY done\"}}\n",
+        "{\"type\":\"item.completed\",\"item\":{\"type\":\"command_execution\",\"command\":\"cargo test\",\"aggregated_output\":\"test passed\"}}\n",
+        "{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"text\",\"text\":\"first\"},{\"type\":\"thinking\",\"thinking\":\"secret\"},{\"type\":\"tool_use\",\"name\":\"Read\"},{\"type\":\"text\",\"text\":\"last\"}]}}\n"
+    )).unwrap();
+    let value = snapshot(root.path(), &run, &state, None, None, 10_000).unwrap();
+    let entries = value["selected_stream"]["entries"].as_array().unwrap();
+    let texts: Vec<_> = entries
+        .iter()
+        .map(|e| e["text"].as_str().unwrap())
+        .collect();
+    assert_eq!(
+        texts,
+        [
+            "AGY delta",
+            "AGY done",
+            "Command: cargo test",
+            "test passed",
+            "first",
+            "Tool: Read",
+            "last"
+        ]
+    );
+    assert_ne!(entries[2]["id"], entries[3]["id"]);
+    assert!(!value.to_string().contains("hidden reasoning"));
+    assert!(!value.to_string().contains("secret"));
+}
