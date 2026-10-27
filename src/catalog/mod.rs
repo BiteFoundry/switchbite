@@ -181,9 +181,36 @@ fn configured_model(provider: &str) -> Option<String> {
             let doc = text.parse::<toml_edit::DocumentMut>().ok()?;
             doc.get("model")?.as_str()?.to_owned()
         }
+        "opencode" => {
+            let base = std::env::var_os("XDG_CONFIG_HOME")
+                .map(PathBuf::from)
+                .unwrap_or_else(|| h.join(".config"))
+                .join("opencode");
+            let default = opencode_model_file(&base.join("opencode.jsonc"))
+                .or_else(|| opencode_model_file(&base.join("opencode.json")));
+            std::env::var_os("OPENCODE_CONFIG")
+                .filter(|p| !p.is_empty())
+                .and_then(|p| opencode_model_file(Path::new(&p)))
+                .or(default)?
+        }
         _ => return None,
     };
     valid_model(&value).then_some(value)
+}
+fn opencode_model_file(path: &Path) -> Option<String> {
+    // Bound local configuration reads and retain only the model field.
+    if fs::metadata(path).ok()?.len() > 4 * 1024 * 1024 {
+        return None;
+    }
+    let input = fs::read_to_string(path).ok()?;
+    let value = jsonc_parser::parse_to_value(&input, &Default::default()).ok()??;
+    let jsonc_parser::JsonValue::Object(object) = value else {
+        return None;
+    };
+    object
+        .get_string("model")
+        .map(|s| s.to_string())
+        .filter(|s| valid_model(s))
 }
 fn candidate(
     provider: &str,
@@ -484,7 +511,11 @@ pub fn snapshot(workspace: &Path, selection: &Value) -> Result<Value, CatalogErr
                 models.push((m, if fresh { "cached_cli" } else { "cli" }.into()));
             }
         }
-        models.sort();
+        models.sort_by(|a, b| {
+            a.0.cmp(&b.0)
+                .then_with(|| (a.1 != "user_config").cmp(&(b.1 != "user_config")))
+                .then_with(|| a.1.cmp(&b.1))
+        });
         models.dedup_by(|a, b| a.0 == b.0);
         if models.is_empty() {
             diagnostics.push(json!({"provider":provider,"code":"no_models_discovered"}));
@@ -751,6 +782,39 @@ pub fn shortlist(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn opencode_jsonc_model_is_validated_and_user_config_prioritized() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("opencode.jsonc");
+        fs::write(
+            &path,
+            "{ // comment\n \"model\": \"anthropic/claude-opus-5-5\",\n}",
+        )
+        .unwrap();
+        let model = opencode_model_file(&path).unwrap();
+        assert_eq!(model, "anthropic/claude-opus-5-5");
+        let configured = candidate(
+            "opencode",
+            Path::new("opencode"),
+            &model,
+            "default",
+            "user_config",
+            0,
+            "host",
+        );
+        let other = candidate(
+            "opencode",
+            Path::new("opencode"),
+            "anthropic/claude-fable-5",
+            "default",
+            "cli",
+            0,
+            "host",
+        );
+        assert!(candidate_order(&configured, &other).is_lt());
+        fs::write(&path, "{\"model\":\"invalid model\"}").unwrap();
+        assert!(opencode_model_file(&path).is_none());
+    }
     #[test]
     fn antigravity_effort_options_come_from_help() {
         assert_eq!(
