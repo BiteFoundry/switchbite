@@ -176,7 +176,12 @@ pub fn sync_from(source: &str) -> Result<Value> {
                 use std::os::unix::fs::PermissionsExt;
                 fs::set_permissions(&staging, fs::Permissions::from_mode(0o700))?;
             }
-            fs::rename(&staging, &destination)?;
+            if let Err(error) = fs::rename(&staging, &destination) {
+                if !destination.exists() || digest(&destination)? != hash {
+                    return Err(error.into());
+                }
+                fs::remove_file(&staging)?;
+            }
         }
         installed[name]["executable"] = json!(destination);
     }
@@ -294,12 +299,6 @@ pub fn handoff_new_run(body: &Value, workspace: &Path) -> Result<Option<Value>> 
         .current_dir(workspace)
         .env("SWITCHBITE_INITIAL_SUBMISSION", &submission)
         .env("SWITCHBITE_WEB_READY", &readiness)
-        .env(
-            "SWITCHBITE_STACKBITE_ENGINE",
-            bundle["stackbite"]["executable"]
-                .as_str()
-                .ok_or("invalid_bundle")?,
-        )
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::from(fs::File::create(dir.join("app.log"))?))
@@ -354,15 +353,7 @@ pub fn launch_current(args: &[String]) -> Result<Option<std::process::ExitStatus
     let executable = bundle["switchbite"]["executable"]
         .as_str()
         .ok_or("invalid_bundle")?;
-    let status = Command::new(executable)
-        .args(args)
-        .env(
-            "SWITCHBITE_STACKBITE_ENGINE",
-            bundle["stackbite"]["executable"]
-                .as_str()
-                .ok_or("invalid_bundle")?,
-        )
-        .status()?;
+    let status = Command::new(executable).args(args).status()?;
     Ok(Some(status))
 }
 

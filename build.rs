@@ -2,9 +2,25 @@ use std::process::Command;
 
 fn main() {
     println!("cargo:rerun-if-changed=.git");
-    if let Ok(out)=Command::new("git").args(["rev-parse","--git-path","HEAD"]).output() && out.status.success() && let Ok(path)=String::from_utf8(out.stdout) { println!("cargo:rerun-if-changed={}",path.trim()); }
-    if let Ok(out)=Command::new("git").args(["symbolic-ref","HEAD"]).output() && out.status.success() && let Ok(reference)=String::from_utf8(out.stdout)
-        && let Ok(out)=Command::new("git").args(["rev-parse","--git-path",reference.trim()]).output() && out.status.success() && let Ok(path)=String::from_utf8(out.stdout) { println!("cargo:rerun-if-changed={}",path.trim()); }
+    if let Ok(out) = Command::new("git")
+        .args(["rev-parse", "--git-path", "HEAD"])
+        .output()
+        && out.status.success()
+        && let Ok(path) = String::from_utf8(out.stdout)
+    {
+        println!("cargo:rerun-if-changed={}", path.trim());
+    }
+    if let Ok(out) = Command::new("git").args(["symbolic-ref", "HEAD"]).output()
+        && out.status.success()
+        && let Ok(reference) = String::from_utf8(out.stdout)
+        && let Ok(out) = Command::new("git")
+            .args(["rev-parse", "--git-path", reference.trim()])
+            .output()
+        && out.status.success()
+        && let Ok(path) = String::from_utf8(out.stdout)
+    {
+        println!("cargo:rerun-if-changed={}", path.trim());
+    }
     println!("cargo:rerun-if-env-changed=SWITCHBITE_BUILD_COMMIT");
     let commit = std::env::var("SWITCHBITE_BUILD_COMMIT")
         .ok()
