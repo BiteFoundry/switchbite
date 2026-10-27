@@ -15,9 +15,7 @@ async fn installed_orchestrator_plugin_discovers_and_routes_with_real_local_laya
     );
     let config: Value =
         serde_json::from_slice(&std::fs::read(workspace.join(".mcp.json")).unwrap()).unwrap();
-    let server = config["mcpServers"]
-        .get(switchbite::stackbite_plugin::SERVER_NAME)
-        .unwrap_or(&config["mcpServers"]["switchbite"]);
+    let server = &config["mcpServers"][switchbite::stackbite_plugin::SERVER_NAME];
     let command = server["command"].as_str().unwrap();
     let args = server["args"]
         .as_array()
@@ -27,6 +25,15 @@ async fn installed_orchestrator_plugin_discovers_and_routes_with_real_local_laya
         .collect::<Vec<_>>();
     assert!(PathBuf::from(command).is_absolute());
     assert!(args.windows(2).any(|a| a == ["--judge", "laya"]));
+    assert!(args.windows(2).any(|a| a == ["--profile", "workflow"]));
+    assert!(
+        args.windows(2)
+            .any(|a| a[0] == "--workspace" && PathBuf::from(a[1]) == workspace)
+    );
+    let model = args
+        .windows(2)
+        .find(|a| a[0] == "--model")
+        .expect("configured Laya model")[1];
     let mut child = Command::new(command)
         .args(&args)
         .current_dir(&workspace)
@@ -58,7 +65,7 @@ async fn installed_orchestrator_plugin_discovers_and_routes_with_real_local_laya
         initialized["result"]["instructions"]
             .as_str()
             .unwrap()
-            .contains("newly ready")
+            .contains("plan")
     );
     writer
         .write_all(b"{\"jsonrpc\":\"2.0\",\"method\":\"notifications/initialized\"}\n")
@@ -69,36 +76,60 @@ async fn installed_orchestrator_plugin_discovers_and_routes_with_real_local_laya
         .await
         .unwrap();
     let listed = recv(&mut reader).await;
-    assert_eq!(listed["result"]["tools"].as_array().unwrap().len(), 4);
-    writer.write_all(b"{\"jsonrpc\":\"2.0\",\"id\":3,\"method\":\"tools/call\",\"params\":{\"name\":\"switchbite_status\",\"arguments\":{}}}\n").await.unwrap();
-    let status = recv(&mut reader).await;
+    let mut names: Vec<_> = listed["result"]["tools"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|t| t["name"].as_str().unwrap())
+        .collect();
+    names.sort_unstable();
     assert_eq!(
-        status["result"]["structuredContent"]["model"],
-        "laya:multilingual"
+        names,
+        ["switchbite_next", "switchbite_observe", "switchbite_start"]
     );
-    assert_eq!(
-        status["result"]["structuredContent"]["judge_configured"],
-        true
-    );
-    let request = json!({"task":{"id":"local-html","objective":"Create one self-contained HTML mockup page with inline CSS in the supplied project. Requirements and acceptance are fully specified: a title, three status cards, and responsive layout. No external research, packages, shell commands or other files are needed.","requirements":["html.write"],"context_refs":["The coordinator supplies the exact output path and full page contract in the worker assignment. This routing call performs no file edits."]},"pool":[{"id":"claude:html-writer","description":"Claude Code implementation worker with Read, Write and Edit tools for building complete self-contained HTML and CSS mockups. This declared profile is available for the bounded synthetic routing probe.","capabilities":["html.write"],"available":true}],"policy":{"profile":"mockup"}});
-    let call = json!({"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"switchbite_route","arguments":request}});
+
+    // No executable or host: routing cannot launch the synthetic worker.
+    let request = json!({"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"switchbite_start","arguments":{"request":{"workspace":workspace.to_str().unwrap(),"plan":{"nodes":[{"id":"local-html","objective":"Create a self-contained HTML page with inline CSS, a title, three status cards and responsive layout.","role":"mockup","requirements":["html.write"],"write_paths":["synthetic.html"]}]},"pool":[{"id":"synthetic-writer","description":"Available worker for self-contained HTML and CSS mockups","capabilities":["html.write"],"available":true}]}}}});
     writer
-        .write_all(format!("{call}\n").as_bytes())
+        .write_all(format!("{request}\n").as_bytes())
+        .await
+        .unwrap();
+    let started = recv(&mut reader).await;
+    assert_ne!(started["result"]["isError"], true);
+    let run = started["result"]["structuredContent"]["run_id"]
+        .as_str()
+        .unwrap();
+    let next = json!({"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"switchbite_next","arguments":{"run_id":run}}});
+    writer
+        .write_all(format!("{next}\n").as_bytes())
         .await
         .unwrap();
     let routed = recv(&mut reader).await;
-    assert_ne!(routed["result"]["isError"], true);
-    let decision = &routed["result"]["structuredContent"];
-    switchbite::contracts::validate(decision, &switchbite::routing::output_schema()).unwrap();
-    assert!(matches!(
-        decision["status"].as_str(),
-        Some("ready" | "hold")
-    ));
-    assert_eq!(decision["snapshot"]["judge_model"], "laya:multilingual");
-    if decision["status"] == "ready" {
-        assert_eq!(decision["candidate_id"], "claude:html-writer");
-    }
-    let proof = json!({"synthetic_only":true,"installed_executable":command,"tools_discovered":4,"status":status["result"]["structuredContent"],"route":decision,"cloud_api_key_removed":true,"worker_execution":false});
+    assert_ne!(
+        routed["result"]["isError"], true,
+        "local routing failed: {}",
+        routed["result"]["structuredContent"]
+    );
+    let event = routed["result"]["structuredContent"]["events"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|e| e["stage"] == "route")
+        .expect("route receipt");
+    assert!(matches!(event["status"].as_str(), Some("ready" | "hold")));
+    assert!(!workspace.join("synthetic.html").exists());
+    let cancel = json!({"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"switchbite_next","arguments":{"run_id":run,"operation":"cancel"}}});
+    writer
+        .write_all(format!("{cancel}\n").as_bytes())
+        .await
+        .unwrap();
+    let cancelled = recv(&mut reader).await;
+    assert_ne!(cancelled["result"]["isError"], true);
+    assert_eq!(
+        cancelled["result"]["structuredContent"]["status"],
+        "cancelled"
+    );
+    let proof = json!({"synthetic_only":true,"configured_judge":"laya","configured_model":model,"tools_discovered":names,"routing":{"status":event["status"],"reason_code":event["reason_code"],"next_action":event["next_action"]},"cloud_api_key_removed":true,"worker_execution":false});
     std::fs::write(
         workspace.join("mcp-live-verification.json"),
         serde_json::to_vec_pretty(&proof).unwrap(),
