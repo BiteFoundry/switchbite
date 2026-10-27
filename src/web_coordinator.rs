@@ -9,7 +9,7 @@ const OBJECTIVE: &str = "Plan or repair the authorized workflow. Write only swit
 const INSTRUCTIONS: &str = "Return JSON only in switchbite-observation.json. For plan use {\"plan\":{\"nodes\":[...]}}; for repair use {\"task\":{...}} or {\"plan\":{\"nodes\":[...]}}. Create a bounded, actionable DAG, usually at most 8 nodes. Each node has id, objective, role (exploration, implementation, mockup, integration, or review), depends_on, acceptance, outputs, and write_paths. Use relative project paths; coordinate dependencies and avoid conflicting write paths. Preserve the user's complete goal. Include an independent review node after implementation that writes a useful report. Honor model settings explicitly requested in the user goal; otherwise omit routing/model pins so Jev chooses workers. For repair preserve existing task IDs and completed or active work. You may add smaller subtasks, replace the targeted task and other pending or blocked tasks, and update their dependencies. If restating a completed or active node, copy it unchanged. Use the supplied state, evidence and integrated workspace references. Do not implement, modify project files, or launch other agents.";
 const REVIEW_OBJECTIVE: &str = "Review the proposed worker assignment. Write only switchbite-observation.json; do not implement the project or change the plan.";
 const REVIEW_INSTRUCTIONS: &str = "Choose one eligible existing candidate ID from action.payload.candidate_snapshot. Use the supplied route input, task, dependencies and route result or scores when available. Resolve the uncertain router scores with your assessment of task fit and candidate capabilities. Treat explicit model pins, required capabilities, selected providers, current availability and reviewer exclusions as binding constraints. Return JSON like {\"status\":\"ready\",\"candidate_id\":\"existing-id\",\"reason_codes\":[\"coordinator_review\"],\"summary\":\"Reason for choice\"}. Do not invent candidates, replan, implement, modify project files, or launch other agents.";
-const NODE_FORMAT: &str = r#"id, objective and role are strings. depends_on, requirements, acceptance, outputs, write_paths and context_refs are arrays of strings, even for one value. Example node: {"id":"build","objective":"Implement the requested change","role":"implementation","depends_on":[],"acceptance":["The requested behavior works"],"outputs":["src/feature.rs"],"write_paths":["src/feature.rs"]}."#;
+const NODE_FORMAT: &str = r#"id, objective and role are strings. depends_on, requirements, acceptance, outputs, write_paths and context_refs are arrays of strings, even for one value. Example node: {"id":"build","objective":"Implement the requested change","role":"implementation","depends_on":[],"acceptance":["The requested behavior works"],"outputs":["src/feature.rs"],"write_paths":["src/feature.rs"]}. Optional routing example: {"provider":"codex","model":"gpt-6.1-terra","effort":"high"}."#;
 
 fn error(code: &str) -> Value {
     json!({"code":code})
@@ -104,10 +104,12 @@ fn observation(dir: &Path, kind: &str, action_value: &Value) -> Result<Value, Va
     if let Some(nodes) = result["plan"]["nodes"].as_array_mut() {
         for node in nodes {
             normalize_acceptance(node);
+            normalize_routing_effort(node)?;
         }
     }
     if let Some(task) = result.get_mut("task") {
         normalize_acceptance(task);
+        normalize_routing_effort(task)?;
     }
     Ok(result)
 }
@@ -116,6 +118,21 @@ fn normalize_acceptance(node: &mut Value) {
     if let Some(condition) = node["acceptance"].as_str() {
         node["acceptance"] = json!([condition]);
     }
+}
+
+fn normalize_routing_effort(node: &mut Value) -> Result<(), Value> {
+    if let Some(routing) = node.get_mut("routing").and_then(Value::as_object_mut)
+        && let Some(alias) = routing.remove("reasoning_effort")
+    {
+        if let Some(effort) = routing.get("effort") {
+            if effort != &alias {
+                return Err(error("coordinator_artifact_invalid"));
+            }
+        } else {
+            routing.insert("effort".to_owned(), alias);
+        }
+    }
+    Ok(())
 }
 
 /// Execute one coordinator action; the caller owns the workflow claim and observation.
@@ -275,5 +292,46 @@ mod tests {
         let mut invalid = json!({"acceptance":{"unexpected":"shape"}});
         normalize_acceptance(&mut invalid);
         assert!(invalid["acceptance"].is_object());
+    }
+    #[test]
+    fn routing_effort_alias_is_canonicalized_for_plans_and_repairs() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("switchbite-observation.json");
+        for (kind, original) in [
+            (
+                "plan",
+                json!({"plan":{"nodes":[{"id":"one","routing":{"provider":"codex","model":"gpt-6.1-terra","reasoning_effort":"high"}}]}}),
+            ),
+            (
+                "repair",
+                json!({"task":{"id":"one","routing":{"effort":"high","reasoning_effort":"high"}}}),
+            ),
+        ] {
+            fs::write(&path, serde_json::to_vec(&original).unwrap()).unwrap();
+            let result = observation(dir.path(), kind, &Value::Null).unwrap();
+            let node = if kind == "plan" {
+                &result["plan"]["nodes"][0]
+            } else {
+                &result["task"]
+            };
+            assert_eq!(node["routing"]["effort"], "high");
+            assert!(node["routing"].get("reasoning_effort").is_none());
+        }
+        for (kind, original) in [
+            (
+                "plan",
+                json!({"plan":{"nodes":[{"routing":{"effort":"low","reasoning_effort":"high"}}]}}),
+            ),
+            (
+                "repair",
+                json!({"task":{"routing":{"effort":"high","reasoning_effort":"low"}}}),
+            ),
+        ] {
+            fs::write(&path, serde_json::to_vec(&original).unwrap()).unwrap();
+            assert_eq!(
+                observation(dir.path(), kind, &Value::Null).unwrap_err()["code"],
+                "coordinator_artifact_invalid"
+            );
+        }
     }
 }
