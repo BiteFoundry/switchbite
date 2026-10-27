@@ -345,7 +345,6 @@ fn native_receipt(provider: &str, output: &[u8]) -> (bool, Option<String>) {
     let mut model = None;
     let mut valid = true;
     let mut projected_text = false;
-    let mut saw_step = false;
     for line in output.split(|b| *b == b'\n').filter(|l| !l.is_empty()) {
         let Ok(v) = serde_json::from_slice::<Value>(line) else {
             return (false, None);
@@ -399,7 +398,7 @@ fn native_receipt(provider: &str, output: &[u8]) -> (bool, Option<String>) {
             match kind {
                 "step_start" => {
                     init = true;
-                    saw_step = true;
+                    projected_text = false;
                     terminal = false;
                 }
                 "step_finish" => {
@@ -408,6 +407,9 @@ fn native_receipt(provider: &str, output: &[u8]) -> (bool, Option<String>) {
                     }
                     // Tool-call steps can be followed by another step; only a stop completes the turn.
                     terminal = v["part"]["reason"] == "stop";
+                    if !terminal {
+                        projected_text = false;
+                    }
                 }
                 "error" => valid = false,
                 "text" => {
@@ -418,6 +420,8 @@ fn native_receipt(provider: &str, output: &[u8]) -> (bool, Option<String>) {
                     }
                 }
                 "tool_use" => {
+                    projected_text = false;
+                    terminal = false;
                     if !v["part"].is_object() {
                         valid = false;
                     }
@@ -430,8 +434,8 @@ fn native_receipt(provider: &str, output: &[u8]) -> (bool, Option<String>) {
             }
         }
     }
-    let completed = if provider == "opencode" && !saw_step {
-        projected_text
+    let completed = if provider == "opencode" {
+        projected_text || (init && terminal)
     } else {
         init && terminal
     };
@@ -577,5 +581,17 @@ mod tests {
         )
         .unwrap();
         assert_eq!(cmd.get_program(), dir.join("node.exe"));
+    }
+    #[test]
+    fn opencode_final_text_after_tool_steps_completes_successful_process() {
+        let stream = b"{\"type\":\"step_start\",\"sessionID\":\"s\"}\n{\"type\":\"tool_use\",\"sessionID\":\"s\",\"part\":{}}\n{\"type\":\"step_finish\",\"sessionID\":\"s\",\"part\":{\"reason\":\"tool-calls\"}}\n{\"type\":\"step_start\",\"sessionID\":\"s\"}\n{\"type\":\"tool_use\",\"sessionID\":\"s\",\"part\":{}}\n{\"type\":\"step_finish\",\"sessionID\":\"s\",\"part\":{\"reason\":\"tool-calls\"}}\n{\"type\":\"step_start\",\"sessionID\":\"s\"}\n{\"type\":\"text\",\"sessionID\":\"s\",\"part\":{\"text\":\"Created artifact.\"}}\n";
+        assert!(verified_receipt("opencode", stream, "unused").0);
+        let mut followed_by_tool = stream.to_vec();
+        followed_by_tool
+            .extend_from_slice(b"{\"type\":\"tool_use\",\"sessionID\":\"s\",\"part\":{}}\n");
+        assert!(!verified_receipt("opencode", &followed_by_tool, "unused").0);
+        let mut error = stream.to_vec();
+        error.extend_from_slice(b"{\"type\":\"error\",\"sessionID\":\"s\"}\n");
+        assert!(!verified_receipt("opencode", &error, "unused").0);
     }
 }
