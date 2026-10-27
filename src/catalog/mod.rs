@@ -629,7 +629,7 @@ pub fn inventory(workspace: &Path, refresh: bool) -> Result<Value, CatalogError>
             } else if login_required {
                 ("login_required", "로그인 필요")
             } else if !runnable {
-                ("adapter_unavailable", "설치됨·실행 시 인증 확인")
+                ("adapter_unavailable", "실행 연결 준비 중")
             } else if models.is_empty() {
                 ("no_models", "모델을 찾을 수 없음")
             } else {

@@ -66,7 +66,15 @@ fn view(state: &Value) -> Value {
         json!({"id":id,"objective":safe_string(&t["task"]["objective"], 500),"role":safe_string(&t["task"]["role"],64),"status":safe_string(&t["status"],64),"model":safe_string(&candidate["model"],128),"provider":safe_string(&candidate["provider"],128),"candidate_id":safe_string(&candidate["id"],128),"depends_on":t["task"]["depends_on"].as_array().into_iter().flatten().map(|v| safe_string(v,128)).collect::<Vec<_>>(),"next_action":action.map(|a| safe_string(&a["kind"],64)).unwrap_or_default(),"repair_rounds":t["repair_rounds"].as_u64().unwrap_or(0),"acceptance_count":t["task"]["acceptance"].as_array().map_or(0,Vec::len),"evidence":t["evidence"].as_array().into_iter().flatten().take(64).map(|e| { let stage=e["stage"].as_str().filter(|s| ["route","prepare","launch","inspect","verify","integrate","gather_context","repair"].contains(s)).unwrap_or("other"); let status=e["status"].as_str().filter(|s| ["ready","hold","prepared","running","unknown","completed","failed","cancelled","passed","integrated","gathered","accepted"].contains(s)).unwrap_or("accepted"); let code=safe_string(&e["error_code"],128); let commit=safe_string(&e["commit"],64); json!({"stage":stage,"status":status,"error_code":if code.bytes().all(|b|b.is_ascii_alphanumeric()||b"_-".contains(&b)){code}else{String::new()},"checks_passed":e["checks_passed"].as_u64(),"checks_failed":e["checks_failed"].as_u64(),"evidence_count":e["evidence_count"].as_u64(),"commit":if (commit.len()==40||commit.len()==64)&&commit.bytes().all(|b|b.is_ascii_hexdigit()){commit}else{String::new()}}) }).collect::<Vec<_>>()})
     }).collect();
     let mut result = json!({"run_id":safe_string(&state["run_id"],128),"status":safe_string(&state["status"],64),"summary":safe_string(&state["summary"],200),"progress":{"done":state["progress"]["done"].as_u64().unwrap_or(0),"total":state["progress"]["total"].as_u64().unwrap_or(0)},"tasks":tasks,"actions":actions.iter().map(|a|json!({"kind":safe_string(&a["kind"],64),"task_id":safe_string(&a["task_id"],128)})).collect::<Vec<_>>(),"event_count":state["event_count"].as_u64().unwrap_or_else(|| state["events"].as_array().map_or(0, Vec::len) as u64)});
-    for field in ["workspace", "goal", "coordinator", "attention", "result"] {
+    for field in [
+        "workspace",
+        "goal",
+        "coordinator",
+        "attention",
+        "result",
+        "tools",
+        "connection",
+    ] {
         if let Some(value) = state.get(field) {
             result[field] = value.clone();
         }
@@ -252,6 +260,60 @@ fn handle(
                 Err(error) => response(
                     &mut stream,
                     "400 Bad Request",
+                    "application/json",
+                    &json!({"error":error}).to_string(),
+                ),
+            }
+        }
+        "POST /api/tools HTTP/1.1" if app.is_some() => {
+            let body =
+                serde_json::from_slice(&data[head_end..head_end + length]).unwrap_or(Value::Null);
+            match app.unwrap().select_tools(&body) {
+                Ok(mut value) => {
+                    if !value["current"].is_null() {
+                        value["current"] = view(&value["current"]);
+                    }
+                    response(
+                        &mut stream,
+                        "200 OK",
+                        "application/json",
+                        &value.to_string(),
+                    )
+                }
+                Err(error) => response(
+                    &mut stream,
+                    "400 Bad Request",
+                    "application/json",
+                    &json!({"error":error}).to_string(),
+                ),
+            }
+        }
+        "POST /api/tools/refresh HTTP/1.1" if app.is_some() => {
+            if serde_json::from_slice::<Value>(&data[head_end..head_end + length]).ok()
+                != Some(json!({}))
+            {
+                return response(
+                    &mut stream,
+                    "400 Bad Request",
+                    "application/json",
+                    "{\"error\":\"Invalid refresh\"}",
+                );
+            }
+            match app.unwrap().refresh_tools() {
+                Ok(mut value) => {
+                    if !value["current"].is_null() {
+                        value["current"] = view(&value["current"]);
+                    }
+                    response(
+                        &mut stream,
+                        "200 OK",
+                        "application/json",
+                        &value.to_string(),
+                    )
+                }
+                Err(error) => response(
+                    &mut stream,
+                    "409 Conflict",
                     "application/json",
                     &json!({"error":error}).to_string(),
                 ),

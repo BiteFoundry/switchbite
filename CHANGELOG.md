@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.8.2-tools.1 — 2026-10-27 (branch preview)
+
+- Six-tool inventory and checkbox selection in the web composer, with automatic
+  saving, refresh and preservation of temporarily unavailable preferences.
+- The run captures selected providers for both coordination and worker routing;
+  later catalog refreshes retain that scope. Any supported selected CLI can plan.
+- Native sandboxed Antigravity (`agy`) execution with matching conversation and
+  terminal receipt validation; a real file-contract task passed and integrated.
+- Grok discovery reports installation and model information; its execution
+  adapter is pending qualification. The web uses existing CLI authentication to
+  create new task sessions.
+
 ## 0.8.1-web.1 — 2026-10-27 (branch preview)
 
 - `workflow app` accepts a project and goal in the browser, runs a native

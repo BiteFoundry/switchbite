@@ -23,11 +23,18 @@ struct Run {
     active_action: Mutex<Option<Value>>,
     alive: AtomicBool,
     attempt: AtomicU64,
+    tools: Vec<String>,
+}
+
+struct ToolState {
+    inventory: Value,
+    selected: Vec<String>,
 }
 
 pub struct Workbench {
     workspace: PathBuf,
-    candidates: Vec<Value>,
+    tools: Mutex<ToolState>,
+    preferences: PathBuf,
     judge: Option<Arc<ConfiguredJudge>>,
     current: Mutex<Option<Arc<Run>>>,
 }
@@ -37,6 +44,32 @@ fn error(code: &str, message: &str) -> Value {
 }
 fn lock_error() -> Value {
     error("workbench_busy", "잠시 후 다시 시도하세요.")
+}
+fn selection(inventory: &Value, value: &Value, nonempty: bool) -> Result<Vec<String>, Value> {
+    let input = value
+        .as_array()
+        .filter(|list| list.len() <= 6 && (!nonempty || !list.is_empty()))
+        .ok_or_else(|| error("invalid_tools", "사용할 AI 도구를 하나 이상 선택하세요."))?;
+    let mut selected = Vec::new();
+    for item in input {
+        let id = item
+            .as_str()
+            .ok_or_else(|| error("invalid_tools", "도구 목록을 확인하세요."))?;
+        if selected.iter().any(|s| s == id)
+            || !inventory["tools"].as_array().is_some_and(|tools| {
+                tools
+                    .iter()
+                    .any(|tool| tool["id"] == id && (!nonempty || tool["selectable"] == true))
+            })
+        {
+            return Err(error(
+                "tool_unavailable",
+                "선택한 도구를 실행할 수 없습니다. 도구를 다시 감지하고 선택을 확인하세요.",
+            ));
+        }
+        selected.push(id.to_owned());
+    }
+    Ok(selected)
 }
 fn friendly(value: &Value) -> Value {
     let code = value["code"]
@@ -61,42 +94,74 @@ fn friendly(value: &Value) -> Value {
 
 impl Workbench {
     pub fn new(workspace: &Path, judge: Option<Arc<ConfiguredJudge>>) -> Result<Self, Value> {
-        let snapshot = catalog::snapshot(workspace, &json!({"providers":["codex","claude"]}))
-            .map_err(|e| e.to_value())?;
-        Self::with_candidates(
-            workspace,
-            snapshot["candidates"]
-                .as_array()
-                .cloned()
-                .unwrap_or_default(),
-            judge,
-        )
+        let inventory = catalog::inventory(workspace, false).map_err(|e| e.to_value())?;
+        Self::from_inventory(workspace, inventory, judge)
     }
 
     pub fn with_candidates(
         workspace: &Path,
-        mut candidates: Vec<Value>,
+        candidates: Vec<Value>,
+        judge: Option<Arc<ConfiguredJudge>>,
+    ) -> Result<Self, Value> {
+        let tools = ["codex","claude","cursor","opencode","grok","antigravity"].iter().map(|provider| {
+            let models: std::collections::BTreeSet<_> = candidates.iter().filter(|c|c["provider"]==*provider).filter_map(|c|c["model"].as_str()).collect();
+            let selectable = candidates.iter().any(|c|c["provider"]==*provider && c["available"]==true);
+            json!({"id":provider,"name":provider,"installed":!models.is_empty(),"selectable":selectable,"model_count":models.len(),"connection_mode":"cli","status":{"code":"unverified","label":"실행 시 인증 확인"},"session_capabilities":{"new_session":selectable,"resume":false,"attach":false}})
+        }).collect::<Vec<_>>();
+        Self::from_inventory(
+            workspace,
+            json!({"snapshot":{"candidates":candidates},"tools":tools}),
+            judge,
+        )
+    }
+
+    fn from_inventory(
+        workspace: &Path,
+        inventory: Value,
         judge: Option<Arc<ConfiguredJudge>>,
     ) -> Result<Self, Value> {
         let workspace = std::fs::canonicalize(workspace)
             .map_err(|_| error("invalid_workspace", "존재하는 프로젝트 폴더를 선택하세요."))?;
-        candidates.retain(|c| {
-            c["available"] == true
-                && ["codex", "claude"].contains(&c["provider"].as_str().unwrap_or(""))
-        });
-        candidates.sort_by_key(|c| {
-            let preferred =
-                c["provider"] == "codex" && c["model"] == "gpt-6.1-terra" && c["effort"] == "high";
-            (
-                !preferred,
-                c["provider"].as_str().unwrap_or("").to_owned(),
-                c["model"].as_str().unwrap_or("").to_owned(),
-                c["effort"].as_str().unwrap_or("").to_owned(),
-            )
-        });
+        let preferences = std::env::var_os("LOCALAPPDATA")
+            .map(PathBuf::from)
+            .map(|path| path.join("Switchbite/web-tools.json"))
+            .unwrap_or_else(|| workspace.join(".switchbite/web-tools.json"));
+        let selected = if preferences.exists() {
+            // An unreadable saved choice never broadens the set of allowed tools.
+            std::fs::read(&preferences)
+                .ok()
+                .filter(|bytes| bytes.len() <= 4096)
+                .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok())
+                .and_then(|value| value["tools"].as_array().cloned())
+                .map(|tools| {
+                    tools
+                        .iter()
+                        .filter_map(Value::as_str)
+                        .filter(|id| {
+                            inventory["tools"]
+                                .as_array()
+                                .is_some_and(|rows| rows.iter().any(|row| row["id"] == *id))
+                        })
+                        .map(str::to_owned)
+                        .collect()
+                })
+                .unwrap_or_default()
+        } else {
+            inventory["tools"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter(|tool| tool["selectable"] == true)
+                .filter_map(|tool| tool["id"].as_str().map(str::to_owned))
+                .collect()
+        };
         Ok(Self {
             workspace,
-            candidates,
+            tools: Mutex::new(ToolState {
+                inventory,
+                selected,
+            }),
+            preferences,
             judge,
             current: Mutex::new(None),
         })
@@ -109,9 +174,63 @@ impl Workbench {
         } else {
             state
         };
+        let tools = self.tools.lock().map_err(|_| lock_error())?;
+        let mut candidates = tools.inventory["snapshot"]["candidates"]
+            .as_array()
+            .cloned()
+            .unwrap_or_default();
+        candidates.retain(|candidate| candidate["available"] == true);
+        candidates.sort_by_key(|candidate| {
+            let preferred = candidate["provider"] == "codex"
+                && candidate["model"] == "gpt-6.1-terra"
+                && candidate["effort"] == "high";
+            let order = match candidate["provider"].as_str() {
+                Some("codex") => 0,
+                Some("claude") => 1,
+                Some("opencode") => 2,
+                Some("antigravity") => 3,
+                _ => 4,
+            };
+            (!preferred, order)
+        });
         Ok(
-            json!({"workspace":self.workspace,"judge":self.judge.as_ref().map(|j|j.model()).unwrap_or("Offline"),"coordinators":self.candidates.iter().map(|c| json!({"id":c["id"],"provider":c["provider"],"model":c["model"],"effort":c["effort"],"label":format!("{} / {} / {}",c["provider"].as_str().unwrap_or(""),c["model"].as_str().unwrap_or(""),c["effort"].as_str().unwrap_or(""))})).collect::<Vec<_>>(),"current":current}),
+            json!({"workspace":self.workspace,"judge":self.judge.as_ref().map(|j|j.model()).unwrap_or("Offline"),"tools":tools.inventory["tools"],"selected_tools":tools.selected,"connection":{"mode":"native_cli_new_session","label":"기존 CLI 로그인으로 새 작업 세션 실행"},"coordinators":candidates.iter().map(|c| json!({"id":c["id"],"provider":c["provider"],"model":c["model"],"effort":c["effort"],"label":format!("{} / {} / {}",c["provider"].as_str().unwrap_or(""),c["model"].as_str().unwrap_or(""),c["effort"].as_str().unwrap_or(""))})).collect::<Vec<_>>(),"current":current}),
         )
+    }
+
+    pub fn select_tools(&self, body: &Value) -> Result<Value, Value> {
+        if body
+            .as_object()
+            .is_none_or(|o| o.len() != 1 || !o.contains_key("tools"))
+        {
+            return Err(error("invalid_request", "사용할 도구 목록을 입력하세요."));
+        }
+        let mut state = self.tools.lock().map_err(|_| lock_error())?;
+        let selected = selection(&state.inventory, &body["tools"], false)?;
+        let bytes =
+            serde_json::to_vec(&json!({"version":1,"tools":selected})).map_err(|_| lock_error())?;
+        let parent = self.preferences.parent().ok_or_else(lock_error)?;
+        std::fs::create_dir_all(parent).map_err(|_| {
+            error(
+                "preferences_unwritable",
+                "도구 선택을 저장할 수 없습니다. 폴더 접근 권한을 확인하세요.",
+            )
+        })?;
+        catalog::write_cache(&self.preferences, &bytes).map_err(|_| {
+            error(
+                "preferences_unwritable",
+                "도구 선택을 저장할 수 없습니다. 폴더 접근 권한을 확인하세요.",
+            )
+        })?;
+        state.selected = selected;
+        drop(state);
+        self.info()
+    }
+
+    pub fn refresh_tools(&self) -> Result<Value, Value> {
+        let inventory = catalog::inventory(&self.workspace, true).map_err(|e| e.to_value())?;
+        self.tools.lock().map_err(|_| lock_error())?.inventory = inventory;
+        self.info()
     }
 
     pub fn start(&self, body: &Value) -> Result<Value, Value> {
@@ -120,7 +239,7 @@ impl Workbench {
             .ok_or_else(|| error("invalid_request", "프로젝트와 업무 내용을 입력하세요."))?;
         if object
             .keys()
-            .any(|k| !["workspace", "goal", "coordinator_id"].contains(&k.as_str()))
+            .any(|k| !["workspace", "goal", "coordinator_id", "tools"].contains(&k.as_str()))
         {
             return Err(error("invalid_request", "지원하지 않는 입력입니다."));
         }
@@ -133,10 +252,23 @@ impl Workbench {
                     "업무 내용을 24,000 바이트 이내로 입력하세요.",
                 )
             })?;
-        let candidate = self
-            .candidates
-            .iter()
+        let inventory = self.tools.lock().map_err(|_| lock_error())?;
+        let chosen = body
+            .get("tools")
+            .cloned()
+            .unwrap_or_else(|| json!(inventory.selected));
+        let selected = selection(&inventory.inventory, &chosen, true)?;
+        let candidate = inventory.inventory["snapshot"]["candidates"]
+            .as_array()
+            .into_iter()
+            .flatten()
             .find(|c| c["id"] == body["coordinator_id"])
+            .filter(|c| {
+                c["available"] == true
+                    && c["provider"]
+                        .as_str()
+                        .is_some_and(|id| selected.iter().any(|tool| tool == id))
+            })
             .cloned()
             .ok_or_else(|| {
                 error(
@@ -144,6 +276,7 @@ impl Workbench {
                     "설치된 조율자 CLI와 모델을 선택하세요.",
                 )
             })?;
+        drop(inventory);
         let workspace = body["workspace"]
             .as_str()
             .map(Path::new)
@@ -189,7 +322,7 @@ impl Workbench {
                 "커밋이 있는 Git 프로젝트 폴더를 선택하세요.",
             )
         })?;
-        let state = Workflow::new(root.clone()).start(&json!({"workspace":workspace,"goal":goal,"catalog":{},"max_parallel":2,"host":{"timeout_seconds":900}})).map_err(|e| e.to_value())?;
+        let state = Workflow::new(root.clone()).start(&json!({"workspace":workspace,"goal":goal,"catalog":{"providers":selected},"max_parallel":2,"host":{"timeout_seconds":900}})).map_err(|e| e.to_value())?;
         let run = Arc::new(Run {
             root,
             id: state["run_id"].as_str().unwrap().to_owned(),
@@ -198,6 +331,7 @@ impl Workbench {
             active_action: Mutex::new(None),
             alive: AtomicBool::new(false),
             attempt: AtomicU64::new(0),
+            tools: selected,
         });
         *current = Some(run.clone());
         drop(current);
@@ -222,6 +356,8 @@ impl Workbench {
         state["coordinator"] = coordinator.clone();
         state["workspace"] = request["workspace"].clone();
         state["goal"] = request["goal"].clone();
+        state["tools"] = json!(run.tools);
+        state["connection"] = json!({"mode":"native_cli_new_session","label":"기존 CLI 로그인으로 새 작업 세션 실행"});
         if let Some(detail) = coordinator.get("error") {
             state["attention"] = detail.clone();
         }

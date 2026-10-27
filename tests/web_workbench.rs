@@ -55,6 +55,7 @@ fn make_fake(dir: &Path) -> PathBuf {
 fn main() {
  let args:Vec<String>=env::args().collect();
  if args.iter().any(|s|s=="--version") { println!("codex fixture 1.0"); return; }
+ assert!(env::var_os("CODEX_HOME").is_some(),"native CLI auth directory was not preserved");
  let prompt=args.last().unwrap();
  let log=env::var("FAKE_LOG").unwrap();
  writeln!(fs::OpenOptions::new().create(true).append(true).open(log).unwrap(),"launch").unwrap();
@@ -153,6 +154,8 @@ fn web_submission_runs_real_workflow_with_isolated_fake_provider() {
         .unwrap();
     let (_, info) = http(port, "GET", "/api/app", "", "", "");
     let info: Value = serde_json::from_str(&info).unwrap();
+    assert_eq!(info["tools"].as_array().unwrap().len(), 6);
+    assert_eq!(info["connection"]["mode"], "native_cli_new_session");
     let coordinator = info["coordinators"]
         .as_array()
         .unwrap()
@@ -160,7 +163,82 @@ fn web_submission_runs_real_workflow_with_isolated_fake_provider() {
         .find(|c| c["model"] == "fake-build" && c["effort"] == "high")
         .expect("fixture candidate")["id"]
         .clone();
-    let body=json!({"workspace":repo,"goal":"Create a result and independent review","coordinator_id":coordinator}).to_string();
+    let body=json!({"workspace":repo,"goal":"Create a result and independent review","coordinator_id":coordinator,"tools":["codex"]}).to_string();
+    assert_eq!(
+        http(
+            port,
+            "POST",
+            "/api/tools",
+            token,
+            "http://evil.invalid",
+            r#"{"tools":["codex","claude"]}"#
+        )
+        .0,
+        403
+    );
+    assert_eq!(
+        http(
+            port,
+            "POST",
+            "/api/tools",
+            token,
+            &origin,
+            r#"{"tools":["unknown"]}"#
+        )
+        .0,
+        400
+    );
+    assert_eq!(
+        http(
+            port,
+            "POST",
+            "/api/tools",
+            token,
+            &origin,
+            r#"{"tools":[]}"#
+        )
+        .0,
+        200
+    );
+    let no_tools =
+        json!({"workspace":repo,"goal":"goal","coordinator_id":coordinator,"tools":[]}).to_string();
+    assert_eq!(
+        http(port, "POST", "/api/start", token, &origin, &no_tools).0,
+        400
+    );
+    assert_eq!(
+        http(
+            port,
+            "POST",
+            "/api/tools",
+            token,
+            &origin,
+            r#"{"tools":["codex","claude"]}"#
+        )
+        .0,
+        200
+    );
+    let unchecked_coordinator =
+        json!({"workspace":repo,"goal":"goal","coordinator_id":coordinator,"tools":["claude"]})
+            .to_string();
+    assert_eq!(
+        http(
+            port,
+            "POST",
+            "/api/start",
+            token,
+            &origin,
+            &unchecked_coordinator
+        )
+        .0,
+        400
+    );
+    let (status, refreshed) = http(port, "POST", "/api/tools/refresh", token, &origin, "{}");
+    assert_eq!(status, 200);
+    assert_eq!(
+        serde_json::from_str::<Value>(&refreshed).unwrap()["selected_tools"],
+        json!(["codex", "claude"])
+    );
     assert_eq!(
         http(
             port,
@@ -197,9 +275,18 @@ fn web_submission_runs_real_workflow_with_isolated_fake_provider() {
         let (_, body) = http(port, "GET", "/api/state", "", "", "");
         let state: Value = serde_json::from_str(&body).unwrap();
         if state["status"] == "completed" {
+            assert_eq!(state["tools"], json!(["codex"]));
+            let stored = switchbite::workflow::Workflow::new(repo.join(".switchbite/workflow"))
+                .request(state["run_id"].as_str().unwrap())
+                .unwrap();
+            assert_eq!(stored["catalog"]["providers"], json!(["codex"]));
             assert_eq!(state["progress"]["done"], 2);
             assert_eq!(state["progress"]["total"], 2);
             let result = Path::new(state["result"]["workspace"].as_str().unwrap());
+            assert_eq!(
+                state["result"]["commit"].as_str().unwrap(),
+                git(result, &["rev-parse", "HEAD"]).trim()
+            );
             assert_eq!(
                 fs::read_to_string(result.join("result.txt")).unwrap(),
                 "built"
@@ -222,4 +309,17 @@ fn web_submission_runs_real_workflow_with_isolated_fake_provider() {
         "unchanged"
     );
     assert!(!repo.join("result.txt").exists());
+    server.0.kill().unwrap();
+    server.0.wait().unwrap();
+    server = Server(command.spawn().unwrap());
+    let deadline = Instant::now() + Duration::from_secs(20);
+    while TcpStream::connect(("127.0.0.1", port)).is_err() {
+        assert!(Instant::now() < deadline && server.0.try_wait().unwrap().is_none());
+        thread::sleep(Duration::from_millis(50));
+    }
+    let (_, info) = http(port, "GET", "/api/app", "", "", "");
+    assert_eq!(
+        serde_json::from_str::<Value>(&info).unwrap()["selected_tools"],
+        json!(["codex", "claude"])
+    );
 }
