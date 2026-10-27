@@ -1,0 +1,63 @@
+{
+  "date": "2026-10-27",
+  "version": "0.8.3-live.1",
+  "branch": "feature/automatic-model-pool",
+  "runtime_commit": "05fae8fa000da1199e320b4d0b4bd0245f95d732",
+  "checks": {
+    "default_suite": { "passed": 208, "failed": 0, "ignored": 2 },
+    "format": "passed",
+    "clippy_all_targets_deny_warnings": "passed",
+    "release_build": "passed",
+    "package_readback_and_payload_hashes": "passed"
+  },
+  "producer": {
+    "worker_and_check_records": "atomic running checkpoints and terminal receipts",
+    "process_liveness": "owned Windows Job including descendants",
+    "retention": "stdout/stderr retained after success, failure, timeout and cancellation; output-limit keeps bounded tails",
+    "attribution": "action-specific verification and integration check tags"
+  },
+  "reader": {
+    "output": "provider-visible messages, commands, command results, file changes and errors",
+    "providers": ["codex", "claude", "cursor", "opencode", "antigravity"],
+    "limits": { "tail_bytes_per_source": 65536, "entries": 128, "characters_per_entry": 1000 },
+    "privacy": "owned filenames only; selected recognized output fields; credentials masked; raw initialization/configuration and reasoning omitted",
+    "quiet_seconds": 30,
+    "attention_seconds": 120,
+    "health": "timestamps and process facts; quiet periods do not prove a hang",
+    "attempts": "current task attempt in UI; retained native files remain local",
+    "legacy": "completed owned messages/*.jsonl supported; output already removed by old versions cannot be recovered"
+  },
+  "intervention_qualification": {
+    "provider": "isolated fake native CLI; no paid model call",
+    "observed": ["live output", "input-needed signal", "credential masking", "owned worker cancellation", "one repair round", "fresh successful worker", "dependent review completed", "original project HEAD preserved"],
+    "completion": "2/2 tasks",
+    "access_checks": ["activity requires session nonce", "retry rejects foreign origin"],
+    "standalone_viewer": "does not advertise task retry without the Workbench repair driver"
+  },
+  "browser": {
+    "tool": "Aside MCP",
+    "desktop": "current real execution shows retained Codex command/output, last activity time, completed worker process state and separate blocked overall state; screenshot inspected",
+    "new_app": "tool checkboxes, project/task form and idle output panel inspected",
+    "mobile_runtime_capture": false
+  },
+  "deployment": {
+    "new_app": "http://127.0.0.1:58422/",
+    "existing_run_monitor": "http://127.0.0.1:58423/",
+    "previous_app": "http://127.0.0.1:58421/",
+    "previous_app_preserved": true,
+    "existing_run_observed": "2/7 complete, blocked task has output_limit evidence, coordinator reports routing_held; no execution restarted or cancelled for deployment",
+    "project_mcp": "Jev-Router Codex and Claude project configuration updated to content-addressed native 0.8.3 binary; existing processes preserved"
+  },
+  "package": {
+    "filename": "switchbite-0.8.3-live.1-windows-x64.zip",
+    "payload_files": 22,
+    "sha256": "7df900464facf0d47b5416a57cbc08e603dac5af567df78c82f2df2bf6bbf0ec",
+    "binary_sha256": "623e063633c873d905920d46297e7db73d17be071fd9dce22f2bccf4a069a5c2"
+  },
+  "boundaries": {
+    "original_stackbite_modified": false,
+    "original_switchbite_main_and_private_clone_changes": "preserved",
+    "existing_cli_authentication": "new task sessions; no historical terminal attachment",
+    "storage_guardian": "existing paths preserved; no verified WorkBite binding and no automatic enrollment"
+  }
+}
