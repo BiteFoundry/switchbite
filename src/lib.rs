@@ -11,6 +11,7 @@ pub mod package;
 pub use contracts::{ContractError, MODEL, describe, parse_request};
 pub use core::{Judge, Plugin, candidate_key, judgment_body};
 
+pub mod adapters;
 pub mod agent;
 pub mod evaluation;
 pub mod local_laya;
@@ -18,4 +19,6 @@ pub mod routing;
 pub mod runtime;
 pub mod stackbite_plugin;
 pub mod workflow;
-pub mod adapters;
+pub mod workflow_interface;
+pub mod workflow_runner;
+pub mod workflow_ui;

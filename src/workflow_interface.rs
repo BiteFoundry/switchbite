@@ -16,12 +16,15 @@ pub fn tools() -> Vec<Tool> {
 
 pub struct Interface {
     workflow: Workflow,
+    root: PathBuf,
     judge: Option<Arc<agent::ConfiguredJudge>>,
 }
 impl Interface {
     pub fn new(workspace: PathBuf, judge: Option<Arc<agent::ConfiguredJudge>>) -> Self {
+        let root = workspace.join(".switchbite").join("workflow");
         Self {
-            workflow: Workflow::new(workspace.join(".switchbite").join("workflow")),
+            workflow: Workflow::new(root.clone()),
+            root,
             judge,
         }
     }
@@ -38,6 +41,20 @@ impl Interface {
         self.workflow.control(run, action).map_err(|e| e.to_value())
     }
     pub fn next(&self, run: &str) -> Result<Value, Value> {
+        let request = self.workflow.request(run).map_err(|e| e.to_value())?;
+        let local = request.get("host").is_some_and(Value::is_object)
+            || request["pool"].as_array().is_some_and(|pool| {
+                !pool.is_empty()
+                    && pool.iter().all(|c| {
+                        ["provider", "executable", "model", "effort"]
+                            .iter()
+                            .all(|k| c.get(k).is_some_and(Value::is_string))
+                    })
+            });
+        if local {
+            return crate::workflow_runner::advance(&self.root, run, self.judge.clone())
+                .map_err(|e| e.to_value());
+        }
         let state = self.workflow.next(run).map_err(|e| e.to_value())?;
         let routes: Vec<Value> = state["actions"]
             .as_array()
