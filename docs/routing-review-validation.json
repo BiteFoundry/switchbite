@@ -1,0 +1,62 @@
+{
+  "date": "2026-10-27",
+  "version": "0.8.6-review.2",
+  "runtime_commit": "6d7ad990042c1444f10e27cdef7ff5dcbcb31a31",
+  "reported_block": {
+    "progress": "4/7 integrated",
+    "task": "report_draft",
+    "router_result": "low_confidence with next_action=request_review",
+    "old_behavior": "non-context holds became refresh_pool; web driver returned input_needed"
+  },
+  "changes": {
+    "handoff": "review_route preserves task routing input, candidate snapshot and original result for the selected native coordinator",
+    "selection": "ready choice is checked against snapshot, current availability, capabilities, model pins and independent-review exclusions",
+    "policy": "probabilistic route thresholds unchanged; coordinator resolves the uncertain assignment",
+    "reconnect": "old running refresh_pool waits refresh the catalog once before execution resumes",
+    "model_display": "current run shows coordinator model; cards show assigned worker model and effort",
+    "codex_input": "full UTF-8 prompt stored under the owned execution ID and read from file-backed stdin; command argument is '-'",
+    "windows_diagnostic": "error 206 is reported as cli_input_too_long"
+  },
+  "checks": {
+    "default_suite": { "passed": 231, "failed": 0, "ignored": 2 },
+    "format": "passed",
+    "clippy_all_targets_deny_warnings": "passed",
+    "ui_javascript_syntax": "passed",
+    "release_build": "passed",
+    "package_readback_and_payload_hashes": "passed",
+    "fake_end_to_end": "forced low-confidence judge result -> native coordinator chooses an actual snapshot ID -> build -> dependent review -> completed, without manual refresh or resume",
+    "large_input": "owned Windows process reads 70KB UTF-8 stdin; coordinator test receives over 40,000 characters and a final sentinel intact",
+    "rejections": ["foreign snapshot candidate", "stale or unavailable choice", "excluded review producer", "invalid coordinator review artifact"]
+  },
+  "live_qualification": {
+    "first_deployment_observation": "full coordinator context exceeded 62,000 characters before command quoting; launch failed before a PID was recorded",
+    "stdin_cli_support": "installed codex exec --help confirms '-' reads instructions from stdin",
+    "coordinator": { "provider": "codex", "requested_model": "gpt-6.1-terra", "effort": "high", "completion_verified": true },
+    "review_observation": { "action_id": "run-1793100449736752900-37172-action-38", "stage": "review_route", "status": "ready", "reason_code": "coordinator_review" },
+    "chosen_worker": { "provider": "claude", "model": "opus", "effort": "high" },
+    "report_worker": "alive with fresh output; 379933 stdout bytes at observation",
+    "coordinator_error": null,
+    "historical_research_workers": "gpt-6.1-sol requests preserved; cards are not relabeled as Terra",
+    "completed_report_claim": false,
+    "browser": "Aside confirmed coordinator label codex / gpt-6.1-terra / high, report card claude / opus / high, and live report output"
+  },
+  "deployment": {
+    "current_app": "http://127.0.0.1:58422/",
+    "viewer": "http://127.0.0.1:58424/",
+    "new_tasks": "http://127.0.0.1:58425/",
+    "same_run_preserved": true,
+    "prior_completed_tasks_preserved": 4,
+    "project_mcp": "Codex and Claude project settings updated to content-addressed review.2 binary"
+  },
+  "package": {
+    "filename": "switchbite-0.8.6-review.2-windows-x64.zip",
+    "payload_files": 22,
+    "sha256": "31e2da1db004e8ee1b8cf131e52ad01f3c7b146f2b9b533f17d1be2483f73f45",
+    "binary_sha256": "467f09aab8639fb49f4e75fd1af0618929b6769141d4217e8ae085dd89764375"
+  },
+  "boundaries": {
+    "original_stackbite_modified": false,
+    "existing_main_and_private_clone_changes": "preserved",
+    "storage": "existing Rust target reused; worker build output creation disabled; no inferred WorkBite binding"
+  }
+}

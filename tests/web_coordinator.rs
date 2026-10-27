@@ -152,7 +152,10 @@ fn coordinator_reviews_low_confidence_route_and_core_accepts_the_choice() {
         .find(|a| a["kind"] == "review_route")
         .unwrap()
         .clone();
-    review["payload"]["long_context"] = json!(format!("LONG_CONTEXT_BEGIN{}LONG_CONTEXT_END", "x".repeat(40000)));
+    review["payload"]["long_context"] = json!(format!(
+        "LONG_CONTEXT_BEGIN{}LONG_CONTEXT_END",
+        "x".repeat(40000)
+    ));
     let result = web_coordinator::fulfill(&root, &run, &review, &fake_worker(tmp.path())).unwrap();
     assert_eq!(result["candidate_id"], "worker");
     let state = workflow
