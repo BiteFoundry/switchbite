@@ -106,6 +106,7 @@ impl Workflow {
             .read(true)
             .write(true)
             .create(true)
+            .truncate(false)
             .open(self.root.join(".lock"))
             .map_err(|_| err("storage_error"))?;
         lock_file(&file)?;
@@ -163,10 +164,9 @@ impl Workflow {
                 if let Some(n) = name
                     .strip_suffix(".json")
                     .and_then(|n| n.parse::<u64>().ok())
+                    && n.saturating_add(1) < s.revision
                 {
-                    if n.saturating_add(1) < s.revision {
-                        let _ = fs::remove_file(entry.path());
-                    }
+                    let _ = fs::remove_file(entry.path());
                 }
             }
         }
@@ -226,13 +226,12 @@ impl Workflow {
         }
         validate_pool(&request["pool"])?;
         for (k, default, max) in [("max_parallel", 2, 16), ("repair_rounds", 2, 10)] {
-            if let Some(v) = request.get(k) {
-                if v.as_u64()
+            if let Some(v) = request.get(k)
+                && v.as_u64()
                     .filter(|n| *n <= max && (k != "max_parallel" || *n > 0))
                     .is_none()
-                {
-                    return Err(err("invalid_request"));
-                }
+            {
+                return Err(err("invalid_request"));
             }
             let _ = default;
         }
@@ -326,11 +325,10 @@ impl Workflow {
                         && a["id"]
                             .as_str()
                             .is_some_and(|id| s.claimed_actions.contains(id))
+                        && let Some(i) = s.tasks.iter().position(|t| t.node["id"] == a["task_id"])
                     {
-                        if let Some(i) = s.tasks.iter().position(|t| t.node["id"] == a["task_id"]) {
-                            s.tasks[i].execution_id = a["id"].as_str().map(str::to_owned);
-                            s.tasks[i].state = "unknown".into();
-                        }
+                        s.tasks[i].execution_id = a["id"].as_str().map(str::to_owned);
+                        s.tasks[i].state = "unknown".into();
                     }
                 }
                 s.actions.retain(|a| {
@@ -481,7 +479,7 @@ impl Workflow {
                             })
                             .ok_or(err("invalid_receipt"))?
                             .clone();
-                        if review_exclusions(&s, i).contains(&cid.to_string()) {
+                        if review_exclusions(&s, i).contains(cid) {
                             return Err(err("invalid_receipt"));
                         }
                         s.tasks[i].candidate = Some(c);
@@ -518,12 +516,10 @@ impl Workflow {
                         "integrating",
                     ]
                     .contains(&task.state.as_str())
+                        && let Some(candidate) = &task.candidate
+                        && !replacement.iter().any(|c| c == candidate)
                     {
-                        if let Some(candidate) = &task.candidate {
-                            if !replacement.iter().any(|c| c == candidate) {
-                                return Err(err("invalid_receipt"));
-                            }
-                        }
+                        return Err(err("invalid_receipt"));
                     }
                 }
                 s.request["pool"] = pool.clone();
@@ -594,10 +590,9 @@ impl Workflow {
                         if let (Some(expected), Some(received)) = (
                             s.tasks[i].execution_id.as_deref(),
                             result.get("execution_id").and_then(Value::as_str),
-                        ) {
-                            if expected != received {
-                                return Err(err("invalid_receipt"));
-                            }
+                        ) && expected != received
+                        {
+                            return Err(err("invalid_receipt"));
                         }
                         s.tasks[i].state = "verifying".into();
                     }
@@ -1182,8 +1177,8 @@ fn validate_plan(plan: &Value) -> Result<Vec<Task>, WorkflowError> {
                 return Err(err("invalid_request"));
             }
         }
-        if let Some(role) = n.get("role") {
-            if ![
+        if let Some(role) = n.get("role")
+            && ![
                 "exploration",
                 "implementation",
                 "mockup",
@@ -1191,9 +1186,8 @@ fn validate_plan(plan: &Value) -> Result<Vec<Task>, WorkflowError> {
                 "review",
             ]
             .contains(&role.as_str().unwrap_or(""))
-            {
-                return Err(err("invalid_request"));
-            }
+        {
+            return Err(err("invalid_request"));
         }
         tasks.push(Task {
             node: n.clone(),

@@ -301,22 +301,23 @@ fn cli(
     if args.first().is_some_and(|s| s == "workflow") {
         let workspace = std::env::current_dir()?;
         let root = workspace.join(".switchbite").join("workflow");
-        if let [_, command, flag, path] = args {
-            if command == "run" && flag == "--request-file" {
-                let request = request_file(path)?;
-                match switchbite::workflow_runner::run_to_completion(
-                    &request,
-                    &root,
-                    agent_judge(selection, false),
-                ) {
-                    Ok(result) => println!("{result}"),
-                    Err(error) => {
-                        println!("{}", error.to_value());
-                        std::process::exit(1);
-                    }
+        if let [_, command, flag, path] = args
+            && command == "run"
+            && flag == "--request-file"
+        {
+            let request = request_file(path)?;
+            match switchbite::workflow_runner::run_to_completion(
+                &request,
+                &root,
+                agent_judge(selection, false),
+            ) {
+                Ok(result) => println!("{result}"),
+                Err(error) => {
+                    println!("{}", error.to_value());
+                    std::process::exit(1);
                 }
-                return Ok(());
             }
+            return Ok(());
         }
         if let [_, command, run] = args {
             if command == "continue" {
@@ -337,10 +338,11 @@ fn cli(
                 return switchbite::workflow_ui::serve(&workspace, run, 58420);
             }
         }
-        if let [_, command, run, flag, port] = args {
-            if command == "view" && flag == "--port" {
-                return switchbite::workflow_ui::serve(&workspace, run, port.parse()?);
-            }
+        if let [_, command, run, flag, port] = args
+            && command == "view"
+            && flag == "--port"
+        {
+            return switchbite::workflow_ui::serve(&workspace, run, port.parse()?);
         }
         let interface = switchbite::workflow_interface::Interface::new(
             workspace,
