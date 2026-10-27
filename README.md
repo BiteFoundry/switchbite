@@ -8,7 +8,7 @@ can run configured local Codex and Claude workers through verification and
 integration. The coordinator supplies plans and handles actions that need its
 judgment or context.
 
-**v0.8.6-review.1 preview · Windows x64 · MIT · No Python runtime.**
+**v0.8.6-review.2 preview · Windows x64 · MIT · No Python runtime.**
 
 Run `switchbite workflow app` to enter a Git project path and goal in the local web
 app. Select which detected CLI tools may participate; the saved selection limits

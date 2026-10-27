@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.8.6-review.2 — 2026-10-27 (branch preview)
+
+- Codex launch reads its full UTF-8 task from an owned stdin file, avoiding
+  Windows command-line limits for coordinator review contexts.
+- Windows error 206 reports CLI input length explicitly. Qualification covers
+  a 70KB owned-process input and a coordinator prompt over 40,000 characters.
+
 ## 0.8.6-review.1 — 2026-10-27 (branch preview)
 
 - Low-confidence and tied routing decisions request a native coordinator review.
