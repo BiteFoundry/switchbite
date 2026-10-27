@@ -55,7 +55,7 @@ pub(super) fn verified_receipt(
                         || !v
                             .get("permission_denials")
                             .and_then(Value::as_array)
-                            .is_some_and(Vec::is_empty)
+                            .is_some()
                     {
                         valid = false;
                     }
@@ -114,6 +114,19 @@ pub(super) fn verified_receipt(
         }
     }
     (valid && init && terminal, model)
+}
+
+pub(super) fn permission_denial_count(output: &[u8]) -> Option<usize> {
+    output
+        .split(|b| *b == b'\n')
+        .filter(|line| !line.is_empty())
+        .find_map(|line| {
+            let value = serde_json::from_slice::<Value>(line).ok()?;
+            if value["type"] != "result" {
+                return None;
+            }
+            value["permission_denials"].as_array().map(Vec::len)
+        })
 }
 
 #[allow(clippy::too_many_arguments)] // Keep native argv construction at one protocol boundary.

@@ -850,6 +850,12 @@ impl LocalHost {
         let stream_path = messages.join(format!("{}.jsonl", hash(id)));
         fs::write(&stream_path, &output).map_err(|_| HostError("io_error"))?;
         let mut result = json!({"status":if ok && verified {"completed"} else {"failed"},"execution_id":id,"completion_verified":ok && verified,"requested_model":model,"resolved_model":resolved_model,"message_ref":if message_path.exists(){Some(message_path)}else{None},"stream_ref":stream_path,"reason":if !ok {Some(stderr_hint.or_else(|| failure_hint(&output)).unwrap_or("provider_exit_failed"))} else if !verified {Some("provider_receipt_invalid")} else {None}});
+        if provider == "claude"
+            && verified
+            && let Some(count) = workers::permission_denial_count(&output)
+        {
+            result["permission_denial_count"] = json!(count);
+        }
         if ok && verified && provider == "antigravity" {
             result["session_id"] = json!(workers::antigravity_session(&output));
         }
@@ -1483,6 +1489,57 @@ mod tests {
         );
         assert!(!verified_receipt("claude", claude, "other").0);
         assert!(!verified_receipt("claude", b"{\"type\":\"system\",\"subtype\":\"init\",\"session_id\":\"s\"}\n{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":false,\"session_id\":\"s\"}\n", "s").0);
+    }
+    #[test]
+    fn claude_recovered_permission_denials_allow_success_but_not_errors_or_refusals() {
+        use super::*;
+        let init =
+            json!({"type":"system","subtype":"init","session_id":"s","model":"claude-opus-5-5"});
+        let result = json!({"type":"result","subtype":"success","is_error":false,"session_id":"s","permission_denials":[{"tool_name":"Read"}]});
+        let stream = |middle: Option<Value>, end: Value| {
+            let mut items = vec![init.clone()];
+            if let Some(item) = middle {
+                items.push(item);
+            }
+            items.push(end);
+            items
+                .iter()
+                .map(|v| format!("{v}\n"))
+                .collect::<String>()
+                .into_bytes()
+        };
+        let success = stream(None, result.clone());
+        assert_eq!(
+            verified_receipt("claude", &success, "s"),
+            (true, Some("claude-opus-5-5".into()))
+        );
+        assert_eq!(super::workers::permission_denial_count(&success), Some(1));
+        assert!(!verified_receipt("claude", &success, "other").0);
+        let mut error = result.clone();
+        error["is_error"] = json!(true);
+        assert!(!verified_receipt("claude", &stream(None, error), "s").0);
+        let mut error = result.clone();
+        error["subtype"] = json!("error_during_execution");
+        assert!(!verified_receipt("claude", &stream(None, error), "s").0);
+        assert!(
+            !verified_receipt(
+                "claude",
+                &stream(Some(json!({"type":"error"})), result.clone()),
+                "s"
+            )
+            .0
+        );
+        assert!(
+            !verified_receipt(
+                "claude",
+                &stream(
+                    Some(json!({"type":"assistant","message":{"content":[{"type":"refusal"}]}})),
+                    result
+                ),
+                "s"
+            )
+            .0
+        );
     }
     #[test]
     fn recovered_tool_failure_keeps_terminal_success_for_artifact_verification() {
