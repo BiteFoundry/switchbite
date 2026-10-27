@@ -6,7 +6,7 @@ use std::{fs, io::Read, path::Path};
 
 const MAX_ARTIFACT: u64 = 128 * 1024;
 const OBJECTIVE: &str = "Plan or repair the authorized workflow. Write only switchbite-observation.json in this worktree; do not implement the project. Follow the instructions and context in this task.";
-const INSTRUCTIONS: &str = "Return JSON only in switchbite-observation.json. For plan use {\"plan\":{\"nodes\":[...]}}; for repair use {\"task\":{...}} or {\"plan\":{\"nodes\":[...]}}. Create a bounded, actionable DAG, usually at most 8 nodes. Each node has id, objective, role (exploration, implementation, mockup, integration, or review), depends_on, acceptance, outputs, and write_paths. Use relative project paths; coordinate dependencies and avoid conflicting write paths. Preserve the user's complete goal. Include an independent review node after implementation that writes a useful report. Do not add routing/model pins: Jev chooses workers. For repair preserve existing task IDs; only replace the targeted task and, if needed, other pending or blocked tasks. Use the supplied state, evidence and integrated workspace references. Do not implement, modify project files, or launch other agents.";
+const INSTRUCTIONS: &str = "Return JSON only in switchbite-observation.json. For plan use {\"plan\":{\"nodes\":[...]}}; for repair use {\"task\":{...}} or {\"plan\":{\"nodes\":[...]}}. Create a bounded, actionable DAG, usually at most 8 nodes. Each node has id, objective, role (exploration, implementation, mockup, integration, or review), depends_on, acceptance, outputs, and write_paths. Use relative project paths; coordinate dependencies and avoid conflicting write paths. Preserve the user's complete goal. Include an independent review node after implementation that writes a useful report. Honor model settings explicitly requested in the user goal; otherwise omit routing/model pins so Jev chooses workers. For repair preserve existing task IDs; only replace the targeted task and, if needed, other pending or blocked tasks. Use the supplied state, evidence and integrated workspace references. Do not implement, modify project files, or launch other agents.";
 
 fn error(code: &str) -> Value {
     json!({"code":code})
@@ -19,7 +19,8 @@ fn key(action_id: &str, attempt: u64, suffix: &str) -> String {
     format!("web-coordinator-{}-{suffix}", &digest[..24])
 }
 fn action(id: String, kind: &str, run: &str, payload: Value) -> Value {
-    json!({"id":id,"kind":kind,"run_id":run,"payload":payload})
+    // Coordinator scratch branches must not reserve the workflow's integration branch.
+    json!({"id":id,"kind":kind,"run_id":format!("{run}-coordinator"),"payload":payload})
 }
 fn host(root: &Path, run: &str) -> Result<(LocalHost, Value), Value> {
     let request = Workflow::new(root.to_path_buf())

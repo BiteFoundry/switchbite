@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.8.1-web.1 — 2026-10-27 (branch preview)
+
+- `workflow app` accepts a project and goal in the browser, runs a native
+  coordinator for planning and repairs, and drives the existing workflow engine.
+- Live graph, pause/resume/cancel, explicit retry and final result worktree,
+  branch and HEAD. Existing single-run viewer remains available.
+- Coordinator scratch branches use a separate namespace from task integration.
+- HTTP end-to-end qualification uses an isolated fake CLI; live routing and native
+  worker qualification from the 0.8 pool preview are recorded separately.
+
 ## 0.8.0-pool.1 — 2026-10-27 (branch preview)
 
 - Automatic Claude, Codex, Cursor and OpenCode model catalogs, per-task shortlists

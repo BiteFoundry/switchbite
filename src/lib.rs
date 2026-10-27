@@ -20,6 +20,8 @@ pub mod route_context;
 pub mod routing;
 pub mod runtime;
 pub mod stackbite_plugin;
+pub mod web_coordinator;
+pub mod web_workbench;
 pub mod workflow;
 pub mod workflow_interface;
 pub mod workflow_runner;

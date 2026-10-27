@@ -8,7 +8,13 @@ can run configured local Codex and Claude workers through verification and
 integration. The coordinator supplies plans and handles actions that need its
 judgment or context.
 
-**v0.8.0-pool.1 preview · Windows x64 · MIT · No Python runtime.**
+**v0.8.1-web.1 preview · Windows x64 · MIT · No Python runtime.**
+
+Run `switchbite workflow app` to enter a Git project path and goal in the local web
+app. A native Codex or Claude coordinator supplies the plan and bounded repairs;
+the existing judge and workflow engine route, execute, verify and integrate the
+tasks. The completed run shows its result worktree, branch and final commit.
+See [the web workflow guide](docs/workflow-ui.ko.md).
 
 Connect a Stackbite coordinator to the project-scoped workflow server:
 

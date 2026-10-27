@@ -325,6 +325,31 @@ fn cli(
     if args.first().is_some_and(|s| s == "workflow") {
         let workspace = std::env::current_dir()?;
         let root = workspace.join(".switchbite").join("workflow");
+        if args.get(1).is_some_and(|command| command == "app") {
+            let mut port = 58420;
+            let mut offline = false;
+            let mut index = 2;
+            while index < args.len() {
+                match args[index].as_str() {
+                    "--port" if index + 1 < args.len() => {
+                        index += 1;
+                        port = args[index].parse()?;
+                    }
+                    "--offline" if !offline => offline = true,
+                    _ => {
+                        return Err(
+                            "Usage: switchbite workflow app [--port PORT] [--offline]".into()
+                        );
+                    }
+                }
+                index += 1;
+            }
+            return switchbite::workflow_ui::serve_app(
+                &workspace,
+                port,
+                agent_judge(selection, offline),
+            );
+        }
         if let [_, command, flag, path] = args
             && command == "run"
             && flag == "--request-file"
@@ -606,7 +631,7 @@ fn main() {
     }
     if args == ["--help"] || args == ["-h"] {
         println!(
-            "Switchbite — the decision layer for your agents\nConnect once: switchbite codex | claude | cursor | grok | antigravity | opencode\nConnection options: --dry-run --json --offline --config-file FILE\nCopies a stable executable and merges user-level MCP settings; judge choice stays separate.\nPrint-only setup: setup --client NAME [--offline]\nModels: models [--refresh]\nWorkflow MCP: serve --profile workflow [--workspace DIR] [--offline]\nWorkflow CLI: workflow run|start --request-file FILE\nworkflow next|continue|status|pause|resume|cancel RUN\nworkflow observe RUN --request-file FILE | workflow view RUN [--port PORT]\nLegacy MCP: serve --profile agent [--offline]\nLocal Laya: --judge laya [--endpoint http://127.0.0.1:11435] [--model laya:multilingual]\nStackbite plugin: stackbite [--workspace ABS] [--client codex|claude|both] [--judge jev|laya] [--endpoint URL] [--model NAME] [--dry-run] [--json] (default Jev; project server switchbite-stackbite)\nLocal synthetic check: probe --judge laya [--endpoint URL] [--model NAME]\nAdvanced server options: --max-concurrent N --max-queued N --queue-timeout-ms N --decision-timeout-ms N\nroute | snapshot | evaluate --request-file FILE\nguide | doctor | config --client NAME [--executable ABS] [--offline]\nCompatibility: no args = docking API1; serve --profile cli = original typed tools; invoke OP --request-file FILE"
+            "Switchbite — the decision layer for your agents\nConnect once: switchbite codex | claude | cursor | grok | antigravity | opencode\nConnection options: --dry-run --json --offline --config-file FILE\nCopies a stable executable and merges user-level MCP settings; judge choice stays separate.\nPrint-only setup: setup --client NAME [--offline]\nModels: models [--refresh]\nWorkflow MCP: serve --profile workflow [--workspace DIR] [--offline]\nWeb app: workflow app [--port PORT] [--offline]\nWorkflow CLI: workflow run|start --request-file FILE\nworkflow next|continue|status|pause|resume|cancel RUN\nworkflow observe RUN --request-file FILE | workflow view RUN [--port PORT]\nLegacy MCP: serve --profile agent [--offline]\nLocal Laya: --judge laya [--endpoint http://127.0.0.1:11435] [--model laya:multilingual]\nStackbite plugin: stackbite [--workspace ABS] [--client codex|claude|both] [--judge jev|laya] [--endpoint URL] [--model NAME] [--dry-run] [--json] (default Jev; project server switchbite-stackbite)\nLocal synthetic check: probe --judge laya [--endpoint URL] [--model NAME]\nAdvanced server options: --max-concurrent N --max-queued N --queue-timeout-ms N --decision-timeout-ms N\nroute | snapshot | evaluate --request-file FILE\nguide | doctor | config --client NAME [--executable ABS] [--offline]\nCompatibility: no args = docking API1; serve --profile cli = original typed tools; invoke OP --request-file FILE"
         );
         return;
     }
