@@ -266,6 +266,25 @@ fn read_bounded(path: &Path) -> Result<Vec<u8>, HostError> {
     }
     Ok(b)
 }
+fn failure_hint(bytes: &[u8]) -> Option<&'static str> {
+    let message = String::from_utf8_lossy(bytes).to_ascii_lowercase();
+    if message.contains("authentication")
+        || message.contains("unauthorized")
+        || message.contains("login required")
+    {
+        Some("authentication_failed")
+    } else if message.contains("quota") || message.contains("rate limit") {
+        Some("quota_or_rate_limit")
+    } else if message.contains("model")
+        && (message.contains("not found") || message.contains("unsupported"))
+    {
+        Some("model_unavailable")
+    } else if message.contains("permission denied") {
+        Some("permission_denied")
+    } else {
+        None
+    }
+}
 fn value_file(path: &Path) -> Result<Value, HostError> {
     serde_json::from_slice(&read_bounded(path)?).map_err(|_| HostError("invalid_state"))
 }
@@ -355,6 +374,14 @@ impl LocalHost {
         let _action_lock = lock_at(&dir.join(format!("{key}.lock")))?;
         let record = dir.join(format!("{key}.json"));
         let claim = dir.join(format!("{key}.claim"));
+        let _integration_lock = if kind == "integrate" {
+            let target = self.owned(payload, "integration_workspace")?;
+            Some(git_lock(
+                target.parent().ok_or(HostError("invalid_workspace"))?,
+            )?)
+        } else {
+            None
+        };
         let fingerprint =
             hash(&serde_json::to_string(action).map_err(|_| HostError("invalid_action"))?);
         if record.exists() {
@@ -399,7 +426,7 @@ impl LocalHost {
             "inspect" => self.inspect(payload),
             "verify" => self.verify(payload),
             "integrate" => self.integrate(action, payload),
-            "gather_context" => self.gather(payload),
+            "gather_context" => self.gather(action, payload),
             _ => Err(HostError("unsupported_action")),
         };
         match result {
@@ -428,7 +455,13 @@ impl LocalHost {
     fn prepare(&self, action: &Value, p: &Value) -> Result<Value, HostError> {
         let run = hash(string(action, "run_id")?);
         let task = p.get("task").ok_or(HostError("invalid_action"))?;
-        let taskid = hash(string(task, "id")?);
+        let task_name = string(task, "id")?;
+        let attempt = p.get("attempt").and_then(Value::as_u64).unwrap_or(0);
+        let taskid = if attempt == 0 {
+            hash(task_name)
+        } else {
+            hash(&format!("{task_name}:attempt:{attempt}"))
+        };
         let root = self.state.join("worktrees").join(&run);
         fs::create_dir_all(&root).map_err(|_| HostError("io_error"))?;
         let _lock = git_lock(&root)?;
@@ -505,7 +538,7 @@ impl LocalHost {
         dir: &Path,
         tag: &str,
         launch: bool,
-    ) -> Result<(bool, Vec<u8>), HostError> {
+    ) -> Result<(bool, Vec<u8>, Option<&'static str>), HostError> {
         let logs = self.state.join("output");
         fs::create_dir_all(&logs).map_err(|_| HostError("io_error"))?;
         let execution_dir = self.state.join("executions");
@@ -547,9 +580,15 @@ impl LocalHost {
                     let _ = fs::remove_file(&err);
                     return Err(HostError("output_limit"));
                 }
+                let stderr = read_bounded(&err)?;
+                let hint = if status.success() {
+                    None
+                } else {
+                    failure_hint(&stderr)
+                };
                 let _ = fs::remove_file(&out);
                 let _ = fs::remove_file(&err);
-                return Ok((status.success(), bytes));
+                return Ok((status.success(), bytes, hint));
             }
             if launch && cancel.exists() {
                 tree.terminate()
@@ -682,7 +721,7 @@ impl LocalHost {
                 cmd.env_remove(key);
             }
         }
-        let (ok, output) = match self.execute(cmd, &dir, id, true) {
+        let (ok, output, stderr_hint) = match self.execute(cmd, &dir, id, true) {
             Ok(result) => result,
             Err(HostError("cancelled")) => {
                 return Ok(
@@ -693,7 +732,7 @@ impl LocalHost {
         };
         let (verified, resolved_model) = verified_receipt(provider, &output, &session);
         Ok(
-            json!({"status":if ok && verified {"completed"} else {"failed"},"execution_id":id,"completion_verified":ok && verified,"requested_model":model,"resolved_model":resolved_model}),
+            json!({"status":if ok && verified {"completed"} else {"failed"},"execution_id":id,"completion_verified":ok && verified,"requested_model":model,"resolved_model":resolved_model,"reason":if !ok {Some(stderr_hint.unwrap_or("provider_exit_failed"))} else if !verified {Some("provider_receipt_invalid")} else {None}}),
         )
     }
     fn inspect(&self, p: &Value) -> Result<Value, HostError> {
@@ -724,6 +763,31 @@ impl LocalHost {
         }
         let mut evidence = Vec::new();
         let mut passed = true;
+        if let Some(outputs) = p["task"]["outputs"].as_array() {
+            for output in outputs {
+                let name = output.as_str().ok_or(HostError("invalid_action"))?;
+                if name.starts_with("artifact:")
+                    || name.contains("://")
+                    || name.contains('*')
+                    || name.contains('?')
+                {
+                    continue;
+                }
+                let relative = Path::new(name);
+                if name != "."
+                    && (relative.is_absolute()
+                        || relative
+                            .components()
+                            .any(|c| !matches!(c, std::path::Component::Normal(_))))
+                {
+                    return Err(HostError("invalid_output_path"));
+                }
+                let exists =
+                    fs::canonicalize(dir.join(relative)).is_ok_and(|p| p.starts_with(&dir));
+                passed &= exists;
+                evidence.push(json!({"output":name,"status":if exists {"passed"} else {"failed"},"reason":if exists {None} else {Some("output_missing")}}));
+            }
+        }
         for (i, c) in checks.iter().enumerate() {
             let program = string(c, "program")?;
             let args = c
@@ -741,12 +805,16 @@ impl LocalHost {
                         .ok_or(HostError("invalid_action"))?,
                 );
             }
-            let ok = self
-                .execute(cmd, &dir, &format!("check-{}-{i}", dir.display()), false)
-                .map(|(ok, _)| ok)
-                .unwrap_or(false);
+            let outcome = self.execute(cmd, &dir, &format!("check-{}-{i}", dir.display()), false);
+            let ok = matches!(&outcome, Ok((true, _, _)));
             passed &= ok;
-            evidence.push(json!({"check":i,"status":if ok {"passed"} else {"failed"}}));
+            let reason = match outcome {
+                Ok((true, _, _)) => None,
+                Ok((false, _, hint)) => Some(hint.unwrap_or("check_exit_failed")),
+                Err(error) => Some(error.0),
+            };
+            evidence
+                .push(json!({"check":i,"status":if ok {"passed"} else {"failed"},"reason":reason}));
         }
         Ok(json!({"status":if passed {"passed"} else {"failed"},"evidence":evidence}))
     }
@@ -756,7 +824,6 @@ impl LocalHost {
         if task.parent() != target.parent() || task == target {
             return Err(HostError("invalid_workspace"));
         }
-        let _lock = git_lock(target.parent().ok_or(HostError("invalid_workspace"))?)?;
         let action_id = string(action, "id")?;
         let journal = target
             .parent()
@@ -901,7 +968,7 @@ impl LocalHost {
         }
         Ok(json!({"status":"integrated","commit":commit,"evidence":checked["evidence"]}))
     }
-    fn gather(&self, p: &Value) -> Result<Value, HostError> {
+    fn gather(&self, action: &Value, p: &Value) -> Result<Value, HostError> {
         let task = p.get("task").ok_or(HostError("invalid_action"))?;
         let refs = task
             .get("context_refs")
@@ -911,15 +978,35 @@ impl LocalHost {
         if refs.len() > 64 || refs.iter().any(|r| !r.is_string()) {
             return Err(HostError("invalid_action"));
         }
+        let run = hash(string(action, "run_id")?);
+        let integrated = self.state.join("worktrees").join(&run).join("integration");
+        let integration_root = if integrated.exists() {
+            validate_worktree(
+                &integrated,
+                &format!("switchbite/{run}/integration"),
+                &self.workspace,
+            )?;
+            Some(fs::canonicalize(&integrated).map_err(|_| HostError("context_missing"))?)
+        } else {
+            None
+        };
         for r in &refs {
             let reference = r.as_str().ok_or(HostError("invalid_action"))?;
             if reference.starts_with("artifact:") {
                 continue;
             }
             let rel = Path::new(reference);
-            let resolved = fs::canonicalize(self.workspace.join(rel))
-                .map_err(|_| HostError("context_missing"))?;
-            if !resolved.starts_with(&self.workspace) || !resolved.is_file() {
+            let in_integration = integration_root.as_ref().and_then(|root| {
+                fs::canonicalize(root.join(rel))
+                    .ok()
+                    .filter(|p| p.starts_with(root) && p.is_file())
+            });
+            let in_original = || {
+                fs::canonicalize(self.workspace.join(rel))
+                    .ok()
+                    .filter(|p| p.starts_with(&self.workspace) && p.is_file())
+            };
+            if in_integration.or_else(in_original).is_none() {
                 return Err(HostError("context_missing"));
             }
         }

@@ -181,6 +181,9 @@ fn incomplete_receipt_and_failed_check_do_not_advance() {
         host.perform(&action("v", "verify", payload)).unwrap()["status"],
         "failed"
     );
+    let missing = host.perform(&action("missing-output", "verify", json!({"task":{"outputs":["missing.txt","artifact:optional"]},"prepared":prepared,"checks":[]}))).unwrap();
+    assert_eq!(missing["status"], "failed");
+    assert_eq!(missing["evidence"][0]["reason"], "output_missing");
 }
 #[test]
 fn cancel_from_another_host_signals_only_owned_child() {
@@ -323,4 +326,116 @@ fn integration_enforces_outputs_and_checks_the_merged_tree() {
             .exists()
     );
     assert!(dir.join("allowed.txt").exists());
+}
+#[test]
+fn repair_uses_fresh_worktree_and_gathers_integrated_context() {
+    let tmp = tempfile::tempdir().unwrap();
+    let repo = tmp.path().join("repo");
+    fs::create_dir(&repo).unwrap();
+    git(&repo, &["init"]);
+    git(
+        &repo,
+        &[
+            "-c",
+            "user.name=Test",
+            "-c",
+            "user.email=test@localhost",
+            "commit",
+            "--allow-empty",
+            "-m",
+            "base",
+        ],
+    );
+    let host = LocalHost::new(&repo, &tmp.path().join("state"), &json!({})).unwrap();
+    let task = json!({"id":"t","objective":"work","write_paths":["."]});
+    let first = host
+        .perform(&action("p0", "prepare", json!({"task":task,"attempt":0})))
+        .unwrap();
+    let first_dir = Path::new(first["workspace"].as_str().unwrap());
+    fs::write(first_dir.join("failed-dirty"), "bad").unwrap();
+    let fresh = host
+        .perform(&action("p1", "prepare", json!({"task":task,"attempt":1})))
+        .unwrap();
+    let fresh_dir = Path::new(fresh["workspace"].as_str().unwrap());
+    assert_ne!(first_dir, fresh_dir);
+    assert!(!fresh_dir.join("failed-dirty").exists());
+    fs::write(fresh_dir.join("new-context"), "ok").unwrap();
+    assert_eq!(
+        host.perform(&action(
+            "i1",
+            "integrate",
+            json!({"task":task,"prepared":fresh,"checks":[]})
+        ))
+        .unwrap()["status"],
+        "integrated"
+    );
+    let context = host
+        .perform(&action(
+            "g1",
+            "gather_context",
+            json!({"task":{"context_refs":["new-context"]}}),
+        ))
+        .unwrap();
+    assert_eq!(context["status"], "gathered");
+    assert!(!repo.join("new-context").exists());
+}
+#[test]
+fn concurrent_integrations_are_serialized_through_receipts() {
+    let tmp = tempfile::tempdir().unwrap();
+    let repo = tmp.path().join("repo");
+    fs::create_dir(&repo).unwrap();
+    git(&repo, &["init"]);
+    git(
+        &repo,
+        &[
+            "-c",
+            "user.name=Test",
+            "-c",
+            "user.email=test@localhost",
+            "commit",
+            "--allow-empty",
+            "-m",
+            "base",
+        ],
+    );
+    let state = tmp.path().join("state");
+    let host = LocalHost::new(&repo, &state, &json!({})).unwrap();
+    let a = json!({"id":"a","objective":"a","write_paths":["a.txt"]});
+    let b = json!({"id":"b","objective":"b","write_paths":["b.txt"]});
+    let pa = host
+        .perform(&action("pa", "prepare", json!({"task":a})))
+        .unwrap();
+    let pb = host
+        .perform(&action("pb", "prepare", json!({"task":b})))
+        .unwrap();
+    fs::write(
+        Path::new(pa["workspace"].as_str().unwrap()).join("a.txt"),
+        "a",
+    )
+    .unwrap();
+    fs::write(
+        Path::new(pb["workspace"].as_str().unwrap()).join("b.txt"),
+        "b",
+    )
+    .unwrap();
+    let host2 = LocalHost::new(&repo, &state, &json!({})).unwrap();
+    let first = std::thread::spawn(move || {
+        host.perform(&action(
+            "ia",
+            "integrate",
+            json!({"task":a,"prepared":pa,"checks":[]}),
+        ))
+        .unwrap()
+    });
+    let second = std::thread::spawn(move || {
+        host2
+            .perform(&action(
+                "ib",
+                "integrate",
+                json!({"task":b,"prepared":pb,"checks":[]}),
+            ))
+            .unwrap()
+    });
+    assert_eq!(first.join().unwrap()["status"], "integrated");
+    assert_eq!(second.join().unwrap()["status"], "integrated");
 }
