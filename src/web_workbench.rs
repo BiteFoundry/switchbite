@@ -280,17 +280,29 @@ impl Workbench {
         let object = body
             .as_object()
             .ok_or_else(|| error("invalid_request", "프로젝트와 업무 내용을 입력하세요."))?;
-        if object
-            .keys()
-            .any(|k| !["workspace", "goal", "coordinator_id", "tools", "max_parallel"].contains(&k.as_str()))
-        {
+        if object.keys().any(|k| {
+            ![
+                "workspace",
+                "goal",
+                "coordinator_id",
+                "tools",
+                "max_parallel",
+            ]
+            .contains(&k.as_str())
+        }) {
             return Err(error("invalid_request", "지원하지 않는 입력입니다."));
         }
         let max_parallel = match body.get("max_parallel") {
             None => 3,
-            Some(value) => value.as_u64().filter(|n| (1..=16).contains(n)).ok_or_else(|| {
-                error("invalid_max_parallel", "동시 작업 수는 1부터 16까지 입력하세요.")
-            })?,
+            Some(value) => value
+                .as_u64()
+                .filter(|n| (1..=16).contains(n))
+                .ok_or_else(|| {
+                    error(
+                        "invalid_max_parallel",
+                        "동시 작업 수는 1부터 16까지 입력하세요.",
+                    )
+                })?,
         };
         let goal = body["goal"]
             .as_str()
@@ -597,9 +609,14 @@ impl Workbench {
     }
 
     pub fn set_parallelism(&self, limit: u64) -> Result<Value, Value> {
-        let run = self.current.lock().map_err(|_| lock_error())?.clone()
+        let run = self
+            .current
+            .lock()
+            .map_err(|_| lock_error())?
+            .clone()
             .ok_or_else(|| error("run_missing", "먼저 업무를 시작하세요."))?;
-        Workflow::new(run.root.clone()).set_parallelism(&run.id, limit)
+        Workflow::new(run.root.clone())
+            .set_parallelism(&run.id, limit)
             .map_err(|e| e.to_value())?;
         self.status()
     }

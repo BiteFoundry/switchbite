@@ -279,14 +279,42 @@ fn web_submission_runs_real_workflow_with_isolated_fake_provider() {
     );
     for invalid in [json!(0), json!(17), json!(1.5), json!("3"), Value::Null] {
         let invalid_body = json!({"workspace":repo,"goal":"goal","coordinator_id":coordinator,"tools":["codex"],"max_parallel":invalid}).to_string();
-        assert_eq!(http(port, "POST", "/api/start", token, &origin, &invalid_body).0, 400);
+        assert_eq!(
+            http(port, "POST", "/api/start", token, &origin, &invalid_body).0,
+            400
+        );
     }
     assert!(!log.exists());
     let (status, started) = http(port, "POST", "/api/start", token, &origin, &body);
     assert_eq!(status, 202);
-    assert_eq!(serde_json::from_str::<Value>(&started).unwrap()["max_parallel"], 3);
-    assert_eq!(http(port, "POST", "/api/parallelism", token, &origin, r#"{"max_parallel":0}"#).0, 400);
-    assert_eq!(http(port, "POST", "/api/parallelism", token, "http://evil.invalid", r#"{"max_parallel":3}"#).0, 403);
+    assert_eq!(
+        serde_json::from_str::<Value>(&started).unwrap()["max_parallel"],
+        3
+    );
+    assert_eq!(
+        http(
+            port,
+            "POST",
+            "/api/parallelism",
+            token,
+            &origin,
+            r#"{"max_parallel":0}"#
+        )
+        .0,
+        400
+    );
+    assert_eq!(
+        http(
+            port,
+            "POST",
+            "/api/parallelism",
+            token,
+            "http://evil.invalid",
+            r#"{"max_parallel":3}"#
+        )
+        .0,
+        403
+    );
     let deadline = Instant::now() + Duration::from_secs(120);
     let mut retried = false;
     loop {

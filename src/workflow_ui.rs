@@ -58,9 +58,10 @@ fn safe_string(value: &Value, max: usize) -> String {
         .collect()
 }
 fn safe_wait_reason(value: &Value) -> Value {
-    let Some(code) = value["code"].as_str().filter(|code| {
-        ["resource_capacity", "write_conflict", "parallel_limit"].contains(code)
-    }) else {
+    let Some(code) = value["code"]
+        .as_str()
+        .filter(|code| ["resource_capacity", "write_conflict", "parallel_limit"].contains(code))
+    else {
         return Value::Null;
     };
     let mut reason = json!({"code": code});
@@ -363,15 +364,28 @@ fn handle(
             }
         }
         "POST /api/parallelism HTTP/1.1" if app.is_some() => {
-            let body: Value = serde_json::from_slice(&data[head_end..head_end + length]).unwrap_or(Value::Null);
-            let limit = body["max_parallel"].as_u64().filter(|n| (1..=16).contains(n));
+            let body: Value =
+                serde_json::from_slice(&data[head_end..head_end + length]).unwrap_or(Value::Null);
+            let limit = body["max_parallel"]
+                .as_u64()
+                .filter(|n| (1..=16).contains(n));
             if body.as_object().is_none_or(|o| o.len() != 1) || limit.is_none() {
                 return response(&mut stream, "400 Bad Request", "application/json",
                     &json!({"error":{"code":"invalid_max_parallel","message":"동시 작업 수는 1부터 16까지 입력하세요."}}).to_string());
             }
             match app.unwrap().set_parallelism(limit.unwrap()) {
-                Ok(state) => response(&mut stream, "200 OK", "application/json", &view(&state).to_string()),
-                Err(error) => response(&mut stream, "409 Conflict", "application/json", &json!({"error":error}).to_string()),
+                Ok(state) => response(
+                    &mut stream,
+                    "200 OK",
+                    "application/json",
+                    &view(&state).to_string(),
+                ),
+                Err(error) => response(
+                    &mut stream,
+                    "409 Conflict",
+                    "application/json",
+                    &json!({"error":error}).to_string(),
+                ),
             }
         }
         "POST /api/task/retry HTTP/1.1" if app.is_some() => {
@@ -571,7 +585,10 @@ mod summary_tests {
         let state = json!({"max_parallel":3,"tasks":[{"id":"a","wait_reason":{"code":"resource_capacity","resource_key":"codex","limit":3,"secret":"hidden"}},{"id":"b","wait_reason":{"code":"unexpected"}}]});
         let result = view(&state);
         assert_eq!(result["max_parallel"], 3);
-        assert_eq!(result["tasks"][0]["wait_reason"], json!({"code":"resource_capacity","resource_key":"codex","limit":3}));
+        assert_eq!(
+            result["tasks"][0]["wait_reason"],
+            json!({"code":"resource_capacity","resource_key":"codex","limit":3})
+        );
         assert!(result["tasks"][1]["wait_reason"].is_null());
     }
 }

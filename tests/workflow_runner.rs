@@ -161,9 +161,14 @@ fn three_same_resource_workers_run_concurrently_and_release_review() {
         directories.insert(lines.next().unwrap().to_owned());
     }
     assert_eq!(processes.len(), 3, "workers must be separate processes");
-    assert_eq!(directories.len(), 3, "workers must have separate workspaces");
+    assert_eq!(
+        directories.len(),
+        3,
+        "workers must have separate workspaces"
+    );
     let integration = result["tasks"][3]["prepared"]["integration_workspace"]
-        .as_str().unwrap();
+        .as_str()
+        .unwrap();
     for name in ["p1.txt", "p2.txt", "p3.txt", "review3.txt"] {
         assert!(Path::new(integration).join(name).exists(), "missing {name}");
     }
