@@ -27,6 +27,61 @@ impl RunnerError {
 type Job = JoinHandle<Result<Value, Value>>;
 static JOBS: OnceLock<Mutex<BTreeMap<String, Job>>> = OnceLock::new();
 static ADVANCE: Mutex<()> = Mutex::new(());
+struct Supervisor {
+    handle: JoinHandle<()>,
+    latest: Arc<Mutex<Option<Value>>>,
+}
+static SUPERVISORS: OnceLock<Mutex<BTreeMap<String, Supervisor>>> = OnceLock::new();
+fn supervisors() -> &'static Mutex<BTreeMap<String, Supervisor>> {
+    SUPERVISORS.get_or_init(|| Mutex::new(BTreeMap::new()))
+}
+fn supervisor_key(root:&Path,run:&str)->String {format!("{}:{run}",root.display())}
+
+pub fn local_execution(request:&Value)->bool {
+    request.get("host").is_some_and(Value::is_object)
+        || request["pool"].as_array().is_some_and(|pool|!pool.is_empty()&&pool.iter().all(|c|
+            ["provider","executable","model","effort"].iter().all(|k|c.get(k).is_some_and(Value::is_string))))
+}
+
+/// A persistent MCP process owns one lightweight supervisor per run. The known
+/// DAG advances without repeated model/tool calls; coordinator actions wait in
+/// the durable queue until the coordinator supplies their observations.
+pub fn start_background(root:&Path,run:&str,judge:Option<Arc<agent::ConfiguredJudge>>)->Result<Value,RunnerError> {
+    let engine=Workflow::new(root.to_path_buf());
+    let state=engine.status(run).map_err(map_core)?;
+    let key=supervisor_key(root,run);
+    let mut map=supervisors().lock().map_err(|_|error("driver_busy"))?;
+    let live=map.get(&key).is_some_and(|s|!s.handle.is_finished());
+    if !live&&state["status"]!="completed" {
+        let path=root.to_path_buf(); let run=run.to_owned();
+        let latest=Arc::new(Mutex::new(None)); let output=latest.clone();
+        let handle=thread::spawn(move ||loop {
+            let result=advance(&path,&run,judge.clone());
+            let terminal=result.as_ref().is_ok_and(|s|
+                s["status"]=="completed"||(s["status"]=="cancelled"
+                &&s["driver"]["active_actions"].as_u64().unwrap_or(0)==0
+                && !s["tasks"].as_array().is_some_and(|ts|ts.iter().any(|t|t["status"]=="unknown"||t["status"]=="running"))));
+            let failed=result.is_err();
+            if let Ok(mut slot)=output.lock(){*slot=Some(match result{Ok(v)=>v,Err(e)=>json!({"attention":e.to_value()})});}
+            if terminal||failed {break;}
+            thread::sleep(Duration::from_millis(250));
+        });
+        map.insert(key,Supervisor{handle,latest});
+    }
+    drop(map);
+    background_status(root,run)
+}
+
+pub fn background_status(root:&Path,run:&str)->Result<Value,RunnerError> {
+    let mut state=Workflow::new(root.to_path_buf()).status(run).map_err(map_core)?;
+    if let Some(supervisor)=supervisors().lock().map_err(|_|error("driver_busy"))?.get(&supervisor_key(root,run)) {
+        state["driver"]=json!({"background":!supervisor.handle.is_finished(),"next_poll_ms":250});
+        if let Some(latest)=supervisor.latest.lock().map_err(|_|error("driver_busy"))?.as_ref() {
+            for name in ["attention","next_action"] {if let Some(v)=latest.get(name){state[name]=v.clone();}}
+        }
+    }
+    Ok(state)
+}
 fn jobs() -> &'static Mutex<BTreeMap<String, Job>> {
     JOBS.get_or_init(|| Mutex::new(BTreeMap::new()))
 }
@@ -65,19 +120,20 @@ pub fn advance(
             .strip_prefix(&key_prefix)
             .ok_or_else(|| error("invalid_action"))?;
         let current = engine.status(run_id).map_err(map_core)?;
-        let action_kind = current["actions"]
+        let current_action = current["actions"]
             .as_array()
             .into_iter()
             .flatten()
-            .find(|a| a["id"] == action_id)
-            .and_then(|a| a["kind"].as_str())
+            .find(|a| a["id"] == action_id).cloned().unwrap_or(Value::Null);
+        let action_kind = current_action["kind"].as_str()
             .unwrap_or("launch")
             .to_owned();
         let result = match job.join() {
             Ok(Ok(result)) => result,
             Ok(Err(failure)) => json!({"status":"failed","error":failure}),
             Err(_) if action_kind == "launch" || action_kind == "inspect" => {
-                json!({"status":"unknown","execution_id":action_id,"completion_verified":false})
+                let execution_id=current_action["payload"]["execution_id"].as_str().unwrap_or(action_id);
+                json!({"status":"unknown","execution_id":execution_id,"completion_verified":false})
             }
             Err(_) => json!({"status":"failed","error":{"code":"host_panic"}}),
         };
@@ -108,7 +164,9 @@ pub fn advance(
         return annotate(state);
     }
     let actions = state["actions"].as_array().cloned().unwrap_or_default();
-    for action in actions.iter().filter(|a| a["kind"] == "route") {
+    // One bounded provider request per advance keeps the compact MCP call inside
+    // its client deadline while independent host work runs on owned threads.
+    for action in actions.iter().filter(|a| a["kind"] == "route").take(1) {
         let id = action["id"]
             .as_str()
             .ok_or_else(|| error("invalid_action"))?;

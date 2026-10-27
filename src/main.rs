@@ -353,7 +353,15 @@ fn cli(
             [_, command, run, flag, path] if command == "observe" && flag == "--request-file" => {
                 interface.observe(run, &request_file(path)?)
             }
-            [_, command, run] if command == "next" => interface.next(run),
+            [_, command, run] if command == "next" => {
+                let engine=switchbite::workflow::Workflow::new(root.clone());
+                match engine.request(run) {
+                    Ok(request) if switchbite::workflow_runner::local_execution(&request)=>
+                        switchbite::workflow_runner::resume_to_completion(run,&root,agent_judge(selection,false)).map_err(|e|e.to_value()),
+                    Ok(_)=>interface.next(run),
+                    Err(e)=>Err(e.to_value()),
+                }
+            },
             [_, command, run] if command == "status" => interface.status(run),
             [_, command, run] if matches!(command.as_str(), "pause" | "resume" | "cancel") => {
                 interface.control(run, command)

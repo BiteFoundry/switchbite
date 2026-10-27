@@ -70,24 +70,16 @@ impl Interface {
         self.workflow.observe(run, event).map_err(|e| e.to_value())
     }
     pub fn status(&self, run: &str) -> Result<Value, Value> {
-        self.workflow.status(run).map_err(|e| e.to_value())
+        crate::workflow_runner::background_status(&self.root,run).map_err(|e|e.to_value())
     }
     pub fn control(&self, run: &str, action: &str) -> Result<Value, Value> {
         self.workflow.control(run, action).map_err(|e| e.to_value())
     }
     pub fn next(&self, run: &str) -> Result<Value, Value> {
         let request = self.workflow.request(run).map_err(|e| e.to_value())?;
-        let local = request.get("host").is_some_and(Value::is_object)
-            || request["pool"].as_array().is_some_and(|pool| {
-                !pool.is_empty()
-                    && pool.iter().all(|c| {
-                        ["provider", "executable", "model", "effort"]
-                            .iter()
-                            .all(|k| c.get(k).is_some_and(Value::is_string))
-                    })
-            });
+        let local = crate::workflow_runner::local_execution(&request);
         if local {
-            return crate::workflow_runner::advance(&self.root, run, self.judge.clone())
+            return crate::workflow_runner::start_background(&self.root, run, self.judge.clone())
                 .map_err(|e| e.to_value());
         }
         let state = self.workflow.next(run).map_err(|e| e.to_value())?;
