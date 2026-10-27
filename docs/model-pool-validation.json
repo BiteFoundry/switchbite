@@ -1,0 +1,94 @@
+{
+  "date": "2026-10-27",
+  "version": "0.8.0-pool.1",
+  "branch": "feature/automatic-model-pool",
+  "release_candidate_commit": "49aa111497f0862360e110a1414c2b4643d60227",
+  "platform": "Windows x64 MSVC",
+  "rustc": "1.99.1",
+  "minimum_rust": { "declared": "1.88", "locally_tested": false },
+  "checks": {
+    "default_suite": { "passed": 187, "failed": 0, "ignored": 2, "commit": "90120c9" },
+    "final_installer_regression": { "passed": 8, "failed": 0 },
+    "final_installed_workflow_jev_live": { "passed": 1, "failed": 0, "worker_execution": false },
+    "generic_mcp_two_workspaces_restart": "passed in default suite",
+    "release_build": "passed",
+    "format": "passed",
+    "clippy_all_targets_deny_warnings": "passed",
+    "archive_readback_and_payload_hashes": "passed"
+  },
+  "catalog_discovery": {
+    "candidate_profiles": 1007,
+    "counts": { "claude": 12, "codex": 53, "cursor": 270, "opencode": 672 },
+    "sources": {
+      "claude": "official aliases and user settings with installed CLI effort options",
+      "codex": "installed model cache and user configuration",
+      "cursor": "native CLI model listing",
+      "opencode": "native CLI models --standalone"
+    },
+    "readiness": "discovery is unverified; listing is not an authentication or execution test",
+    "shortlist_limit": 16
+  },
+  "native_smoke": {
+    "runtime_candidate_commit": "fdc8e41460700d39129ce46eaeecb25419f47e4b",
+    "run_id": "run-1793090781296289700-53652",
+    "project": "owned synthetic file-contract project",
+    "pool": "automatically discovered; no manual pool supplied",
+    "catalog_candidate_profiles": 737,
+    "selection": "exact per-task pins; explicit_target direct dispatch, not Jev selection",
+    "status": "completed",
+    "completed": 3,
+    "total": 3,
+    "initial_max_parallel": 2,
+    "tasks": [
+      { "id": "claude", "provider": "claude", "requested_model": "opus", "effort": "medium", "reported_model": "claude-opus-5-5" },
+      { "id": "opencode", "provider": "opencode", "requested_model": "openai/gpt-6.1-terra", "effort": "default", "reported_model": null },
+      { "id": "review", "provider": "codex", "requested_model": "gpt-6.1-terra", "effort": "high", "reported_model": null }
+    ],
+    "checks": "all three file contracts verified and integrated; independent host verification passed",
+    "review_artifact": { "sum": 42, "valid": true },
+    "integration_git_status": "clean",
+    "model_identity": "requested model and effort are native launch arguments; resolved identity is recorded only when the CLI reports it"
+  },
+  "jev_automatic_selection_probe": {
+    "judge": "jev-1.14.0",
+    "catalog_candidate_profiles": 65,
+    "providers": ["claude", "codex"],
+    "shortlist": 16,
+    "task_pin": false,
+    "status": "ready",
+    "candidate_id": "claude:1135b318571a783ef0b8cb5a75a42e96",
+    "reason_code": "tie_resolved_stable_id",
+    "worker_execution": false,
+    "run_after_probe": "cancelled",
+    "performance_comparison": "not measured"
+  },
+  "cursor": {
+    "native_adapter": "implemented",
+    "actual_account_attempt": "weekly usage limit reached; workflow cancelled",
+    "successful_completion_qualified": false,
+    "eager_quota_stop": "observed error reproduced in an owned Windows process; Job terminated and private output preserved",
+    "quota_fallback": "normal provider quota and Cursor eager quota codes covered by adapter and automatic workflow tests"
+  },
+  "installation": {
+    "scope": "project MCP configuration and content-addressed Switchbite executable",
+    "codex_project_registration": "enabled and final executable confirmed",
+    "claude_project_registration": "configured; native Claude client reports pending approval",
+    "generic_user_settings_replaced": false,
+    "viewer": "final executable shows completed three-task graph; Aside DOM and desktop screenshot checked"
+  },
+  "package": {
+    "filename": "switchbite-0.8.0-pool.1-windows-x64.zip",
+    "payload_files": 22,
+    "zip_entries": 23,
+    "sha256": "133a5091521306e7dbd64e6e980c0ddb39920f4f3664d2554ff349d31da34eee",
+    "binary_sha256": "965496926b1b41e8567d66085c232ef800d438eeece79c2955abe3655c75c067"
+  },
+  "scope": {
+    "completed": "W0-W6: workflow snapshot integration, routing input, catalog, native workers, connection UX",
+    "subsequent_stages": "W7-W11: ACP/remote orchestrator adapters, richer streaming UI, outcome-based routing, PR/CI loop",
+    "original_stackbite": "not modified",
+    "existing_main_worktree_and_private_clone_changes": "preserved",
+    "python_runtime_added": false,
+    "live_laya_requalification": "not run in this release"
+  }
+}
