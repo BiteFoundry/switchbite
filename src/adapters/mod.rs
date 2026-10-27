@@ -600,6 +600,7 @@ impl LocalHost {
         tag: &str,
         launch: bool,
         cursor: bool,
+        stdin_file: Option<&Path>,
     ) -> Result<(bool, Vec<u8>, Option<&'static str>), HostError> {
         let logs = self.state.join("output");
         let execution_dir = self.state.join("executions");
@@ -639,16 +640,25 @@ impl LocalHost {
             let stdout = fs::File::create(&out).map_err(|_| HostError("io_error"))?;
             let stderr = fs::File::create(&err).map_err(|_| HostError("io_error"))?;
             publish(&mut record, "running", None)?;
+            let stdin = match stdin_file {
+                Some(path) => Stdio::from(fs::File::open(path).map_err(|_| HostError("io_error"))?),
+                None => Stdio::null(),
+            };
             cmd.current_dir(dir)
-                .stdin(Stdio::null())
+                .stdin(stdin)
                 .stdout(Stdio::from(stdout))
                 .stderr(Stdio::from(stderr));
             let job_name = format!(
                 "Local\\Switchbite-{}",
                 hash(&format!("{}:{tag}", self.state.display()))
             );
-            let mut tree = process::Tree::spawn(&mut cmd, &job_name)
-                .map_err(|_| HostError("process_ownership_unavailable"))?;
+            let mut tree = process::Tree::spawn(&mut cmd, &job_name).map_err(|error| {
+                if error.raw_os_error() == Some(206) {
+                    HostError("cli_input_too_long")
+                } else {
+                    HostError("process_ownership_unavailable")
+                }
+            })?;
             let identity = match (process::owner_creation_time(), tree.creation_time()) {
                 (Ok(owner), Ok(worker)) => (owner, worker),
                 _ => {
@@ -770,6 +780,13 @@ impl LocalHost {
         let messages = self.state.join("messages");
         fs::create_dir_all(&messages).map_err(|_| HostError("io_error"))?;
         let message_path = messages.join(format!("{}.txt", hash(id)));
+        let prompt_path = if provider == "codex" {
+            let path = messages.join(format!("{}.prompt", hash(id)));
+            fs::write(&path, prompt.as_bytes()).map_err(|_| HostError("io_error"))?;
+            Some(path)
+        } else {
+            None
+        };
         let mut cmd = workers::command(
             provider,
             executable,
@@ -778,7 +795,7 @@ impl LocalHost {
             &session,
             &message_path,
             &dir,
-            &prompt,
+            if prompt_path.is_some() { "-" } else { &prompt },
         )?;
         for (key, _) in std::env::vars_os() {
             let name = key.to_string_lossy().to_ascii_uppercase();
@@ -812,6 +829,7 @@ impl LocalHost {
             id,
             true,
             provider == "cursor",
+            prompt_path.as_deref(),
         ) {
             Ok(result) => result,
             Err(HostError("cancelled")) => {
@@ -944,7 +962,14 @@ impl LocalHost {
                         .ok_or(HostError("invalid_action"))?,
                 );
             }
-            let outcome = self.execute(cmd, &dir, &format!("check-{action_id}-{i}"), false, false);
+            let outcome = self.execute(
+                cmd,
+                &dir,
+                &format!("check-{action_id}-{i}"),
+                false,
+                false,
+                None,
+            );
             let ok = matches!(&outcome, Ok((true, _, _)));
             passed &= ok;
             let reason = match outcome {
@@ -1199,6 +1224,42 @@ mod tests {
     }
     #[cfg(windows)]
     #[test]
+    fn owned_execution_receives_large_utf8_file_on_stdin() {
+        use super::*;
+        let temp = tempfile::tempdir().unwrap();
+        let host = LocalHost {
+            workspace: temp.path().to_owned(),
+            state: temp.path().to_owned(),
+            worktrees: temp.path().to_owned(),
+            base: String::new(),
+            timeout: 20,
+        };
+        let prompt = format!("{}한글", "x".repeat(70_000));
+        let path = temp.path().join("prompt");
+        fs::write(&path, prompt.as_bytes()).unwrap();
+        let mut cmd = Command::new("powershell.exe");
+        cmd.args([
+            "-NoProfile",
+            "-Command",
+            "[Console]::OpenStandardInput().CopyTo([Console]::OpenStandardOutput())",
+        ]);
+        let (ok, output, _) = host
+            .execute(cmd, temp.path(), "large-stdin", true, false, Some(&path))
+            .unwrap();
+        assert!(ok);
+        assert_eq!(output, prompt.as_bytes());
+        let record = value_file(
+            &temp
+                .path()
+                .join("executions")
+                .join(format!("{}.json", hash("large-stdin"))),
+        )
+        .unwrap();
+        assert!(record["pid"].as_u64().is_some());
+        assert_eq!(record["status"], "completed");
+    }
+    #[cfg(windows)]
+    #[test]
     fn cursor_quota_terminates_owned_job_and_preserves_output() {
         use super::*;
         let temp = tempfile::tempdir().unwrap();
@@ -1213,7 +1274,7 @@ mod tests {
         cmd.args(["-NoProfile", "-Command", "[Console]::Out.WriteLine('partial'); [Console]::Error.WriteLine('ActionRequiredError: Weekly usage limit reached. It resets in 1 day.'); Start-Sleep -Seconds 15"]);
         let start = Instant::now();
         let (ok, output, hint) = host
-            .execute(cmd, temp.path(), "quota-test", true, true)
+            .execute(cmd, temp.path(), "quota-test", true, true, None)
             .unwrap();
         assert!(!ok);
         assert_eq!(hint, Some("rate_limited"));
@@ -1248,7 +1309,7 @@ mod tests {
             "[Console]::Error.WriteLine('rate limit exceeded'); exit 1",
         ]);
         let (ok, output, hint) = host
-            .execute(cmd, temp.path(), "normal-quota-test", true, false)
+            .execute(cmd, temp.path(), "normal-quota-test", true, false, None)
             .unwrap();
         assert!(!ok);
         let reason = hint
@@ -1275,7 +1336,7 @@ mod tests {
             };
             let mut cmd = Command::new("powershell.exe");
             cmd.args(["-NoProfile", "-Command", "[Console]::Out.WriteLine('live'); [Console]::Error.WriteLine('error'); Start-Sleep -Seconds 2"]);
-            host.execute(cmd, &worker_root, "live-check", false, false)
+            host.execute(cmd, &worker_root, "live-check", false, false, None)
                 .unwrap()
         });
         let record_path = root
@@ -1325,7 +1386,7 @@ mod tests {
                 };
                 let mut cmd = Command::new("powershell.exe");
                 cmd.args(["-NoProfile", "-Command", "[Console]::Out.WriteLine('partial'); [Console]::Error.WriteLine('detail'); Start-Sleep -Seconds 15"]);
-                host.execute(cmd, &worker_root, "stopped", true, false)
+                host.execute(cmd, &worker_root, "stopped", true, false, None)
                     .unwrap_err()
                     .0
             });
@@ -1372,7 +1433,7 @@ mod tests {
         let mut cmd = Command::new("powershell.exe");
         cmd.args(["-NoProfile", "-Command", "[Console]::Out.Write(('x' * 3000000)); [Console]::Error.Write(('e' * 3000000)); Start-Sleep -Seconds 5"]);
         assert_eq!(
-            host.execute(cmd, root, "flood", false, false)
+            host.execute(cmd, root, "flood", false, false, None)
                 .unwrap_err()
                 .0,
             "output_limit"
