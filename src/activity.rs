@@ -4,6 +4,7 @@ use regex::Regex;
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use std::{
+    collections::HashMap,
     fs::{self, File},
     io::{Read, Seek, SeekFrom},
     path::{Path, PathBuf},
@@ -89,10 +90,10 @@ fn event(v: &Value) -> Vec<(&'static str, String)> {
             }
             "command_execution" => {
                 if let Some(s) = get(item, &["command"]) {
-                    visible.push(("tool", format!("Command: {s}")));
+                    visible.push(("command", format!("Command: {s}")));
                 }
                 if let Some(s) = get(item, &["aggregated_output"]) {
-                    visible.push(("tool", s.to_owned()));
+                    visible.push(("command_output", s.to_owned()));
                 }
             }
             "file_change" => visible.push(("tool", "File changes".into())),
@@ -187,7 +188,8 @@ fn tail(path: &Path, id: &str, source: &str) -> (Vec<Value>, bool, Option<u64>, 
         .ok()
         .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
         .map(|d| d.as_millis().min(u64::MAX as u128) as u64);
-    let mut entries = Vec::new();
+    let mut entries: Vec<Value> = Vec::new();
+    let mut command_entries: HashMap<(String, &'static str), usize> = HashMap::new();
     let mut offset = 0usize;
     if start > 0 {
         offset = bytes
@@ -207,11 +209,21 @@ fn tail(path: &Path, id: &str, source: &str) -> (Vec<Value>, bool, Option<u64>, 
         if let Ok(line) = std::str::from_utf8(&bytes[offset..end]) {
             let line = line.trim_end_matches('\r');
             let trimmed = line.trim();
-            let parsed = if trimmed.starts_with('{') || trimmed.starts_with('[') {
-                serde_json::from_str::<Value>(trimmed)
-                    .ok()
-                    .map(|v| event(&v))
-                    .unwrap_or_default()
+            let structured = if trimmed.starts_with('{') || trimmed.starts_with('[') {
+                serde_json::from_str::<Value>(trimmed).ok()
+            } else {
+                None
+            };
+            let command_id = structured.as_ref().and_then(|v| {
+                (v["item"]["type"] == "command_execution")
+                    .then(|| v["item"]["id"].as_str())
+                    .flatten()
+                    .filter(|id| !id.is_empty() && id.len() <= 256)
+            });
+            let parsed = if let Some(v) = structured.as_ref() {
+                event(v)
+            } else if trimmed.starts_with('{') || trimmed.starts_with('[') {
+                vec![]
             } else if !trimmed.is_empty() {
                 vec![(
                     if source == "stderr" { "error" } else { "text" },
@@ -223,6 +235,16 @@ fn tail(path: &Path, id: &str, source: &str) -> (Vec<Value>, bool, Option<u64>, 
             for (index, (kind, text)) in parsed.into_iter().enumerate() {
                 let text = clean(&text);
                 if !text.is_empty() {
+                    if let Some(command_id) = command_id
+                        && ["command", "command_output"].contains(&kind)
+                    {
+                        let key = (command_id.to_owned(), kind);
+                        if let Some(&slot) = command_entries.get(&key) {
+                            entries[slot]["text"] = json!(text);
+                            continue;
+                        }
+                        command_entries.insert(key, entries.len());
+                    }
                     entries.push(json!({"id":format!("{id}:{source}:{}:{index}",start + offset as u64),"source":source,"kind":kind,"text":text}));
                 }
             }

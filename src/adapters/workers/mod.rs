@@ -146,6 +146,8 @@ pub(super) fn command(
                 "approval_policy=\"never\"",
                 "-c",
                 "windows.sandbox=\"unelevated\"",
+                "-c",
+                "allow_login_shell=false",
             ]);
             if effort != "default" {
                 if ![

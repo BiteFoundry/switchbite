@@ -204,3 +204,26 @@ fn blocked_run_is_visible_even_when_its_last_worker_finished() {
     assert_eq!(value["health"]["status"], "needs_attention");
     assert_eq!(value["health"]["action"], "resume");
 }
+
+#[test]
+fn command_lifecycle_updates_one_entry_but_keeps_separate_executions() {
+    let (root, run, state, hash) = setup();
+    let output = root.path().join(&run).join("host/output");
+    fs::write(output.join(format!("{hash}.out")), concat!(
+        "{\"type\":\"item.started\",\"item\":{\"id\":\"one\",\"type\":\"command_execution\",\"command\":\"cargo test\",\"aggregated_output\":\"\"}}\n",
+        "{\"type\":\"item.updated\",\"item\":{\"id\":\"one\",\"type\":\"command_execution\",\"command\":\"cargo test\",\"aggregated_output\":\"running\"}}\n",
+        "{\"type\":\"item.completed\",\"item\":{\"id\":\"one\",\"type\":\"command_execution\",\"command\":\"cargo test\",\"aggregated_output\":\"all passed\"}}\n",
+        "{\"type\":\"item.started\",\"item\":{\"id\":\"two\",\"type\":\"command_execution\",\"command\":\"cargo test\"}}\n"
+    )).unwrap();
+    let value = snapshot(root.path(), &run, &state, None, None, 10_000).unwrap();
+    let entries = value["selected_stream"]["entries"].as_array().unwrap();
+    let texts: Vec<_> = entries
+        .iter()
+        .map(|e| e["text"].as_str().unwrap())
+        .collect();
+    assert_eq!(
+        texts,
+        ["Command: cargo test", "all passed", "Command: cargo test"]
+    );
+    assert_ne!(entries[0]["id"], entries[2]["id"]);
+}

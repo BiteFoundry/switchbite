@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.8.3-live.2 — 2026-10-27 (branch preview)
+
+- Coordinator instructions specify node field types and an executable example.
+  A single acceptance string is canonicalized to one list item before registration.
+- Codex workers use non-login shells, avoiding PowerShell profile side effects.
+- Command start, update and completion events update the same visible entry;
+  separate executions of the same command remain separate.
+
 ## 0.8.3-live.1 — 2026-10-27 (branch preview)
 
 - Live output for coordinator, worker and check processes, with last activity,

@@ -7,6 +7,7 @@ use std::{fs, io::Read, path::Path};
 const MAX_ARTIFACT: u64 = 128 * 1024;
 const OBJECTIVE: &str = "Plan or repair the authorized workflow. Write only switchbite-observation.json in this worktree; do not implement the project. Follow the instructions and context in this task.";
 const INSTRUCTIONS: &str = "Return JSON only in switchbite-observation.json. For plan use {\"plan\":{\"nodes\":[...]}}; for repair use {\"task\":{...}} or {\"plan\":{\"nodes\":[...]}}. Create a bounded, actionable DAG, usually at most 8 nodes. Each node has id, objective, role (exploration, implementation, mockup, integration, or review), depends_on, acceptance, outputs, and write_paths. Use relative project paths; coordinate dependencies and avoid conflicting write paths. Preserve the user's complete goal. Include an independent review node after implementation that writes a useful report. Honor model settings explicitly requested in the user goal; otherwise omit routing/model pins so Jev chooses workers. For repair preserve existing task IDs; only replace the targeted task and, if needed, other pending or blocked tasks. Use the supplied state, evidence and integrated workspace references. Do not implement, modify project files, or launch other agents.";
+const NODE_FORMAT: &str = r#"id, objective and role are strings. depends_on, requirements, acceptance, outputs, write_paths and context_refs are arrays of strings, even for one value. Example node: {"id":"build","objective":"Implement the requested change","role":"implementation","depends_on":[],"acceptance":["The requested behavior works"],"outputs":["src/feature.rs"],"write_paths":["src/feature.rs"]}."#;
 
 fn error(code: &str) -> Value {
     json!({"code":code})
@@ -59,7 +60,7 @@ fn observation(dir: &Path, kind: &str) -> Result<Value, Value> {
     if bytes.len() as u64 > MAX_ARTIFACT {
         return Err(error("coordinator_artifact_invalid"));
     }
-    let result: Value =
+    let mut result: Value =
         serde_json::from_slice(&bytes).map_err(|_| error("coordinator_artifact_invalid"))?;
     let valid_plan = result["plan"]["nodes"]
         .as_array()
@@ -67,7 +68,23 @@ fn observation(dir: &Path, kind: &str) -> Result<Value, Value> {
     if !(valid_plan || (kind == "repair" && result["task"].is_object())) {
         return Err(error("coordinator_artifact_invalid"));
     }
+    // A single prose acceptance condition has exactly the same meaning as one
+    // list item. Canonicalize it here; the workflow still validates the full DAG.
+    if let Some(nodes) = result["plan"]["nodes"].as_array_mut() {
+        for node in nodes {
+            normalize_acceptance(node);
+        }
+    }
+    if let Some(task) = result.get_mut("task") {
+        normalize_acceptance(task);
+    }
     Ok(result)
+}
+
+fn normalize_acceptance(node: &mut Value) {
+    if let Some(condition) = node["acceptance"].as_str() {
+        node["acceptance"] = json!([condition]);
+    }
 }
 
 /// Execute one coordinator action; the caller owns the workflow claim and observation.
@@ -90,7 +107,7 @@ pub fn fulfill(
     let state = Workflow::new(root.to_path_buf())
         .status(run)
         .map_err(|e| e.to_value())?;
-    let task = json!({"id":key(id,attempt,"task"),"objective":OBJECTIVE,"instructions":INSTRUCTIONS,"goal":request["goal"],"action":action_value,"workflow_state":state});
+    let task = json!({"id":key(id,attempt,"task"),"objective":OBJECTIVE,"instructions":format!("{INSTRUCTIONS} {NODE_FORMAT}"),"goal":request["goal"],"action":action_value,"workflow_state":state});
     // Leave room for the host's framing and JSON escaping.
     if serde_json::to_vec(&task)
         .map_err(|_| error("invalid_action"))?
@@ -140,4 +157,32 @@ pub fn cancel(root: &Path, run: &str, action_value: &Value) -> Result<(), Value>
     ))
     .map_err(|e| e.to_value())?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn canonicalizes_single_acceptance_for_plan_and_repair_without_reinterpreting_other_fields() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("switchbite-observation.json");
+        for original in [
+            json!({"plan":{"nodes":[{"id":"one","objective":"One","acceptance":"Works","depends_on":[]}]}}),
+            json!({"task":{"id":"one","objective":"One","acceptance":"Works","depends_on":[]}}),
+        ] {
+            fs::write(&path, serde_json::to_vec(&original).unwrap()).unwrap();
+            let result = observation(dir.path(), "repair").unwrap();
+            let node = if result["task"].is_object() {
+                &result["task"]
+            } else {
+                &result["plan"]["nodes"][0]
+            };
+            assert_eq!(node["acceptance"], json!(["Works"]));
+            assert_eq!(node["depends_on"], json!([]));
+        }
+        let mut invalid = json!({"acceptance":{"unexpected":"shape"}});
+        normalize_acceptance(&mut invalid);
+        assert!(invalid["acceptance"].is_object());
+    }
 }

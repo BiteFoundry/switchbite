@@ -753,7 +753,7 @@ impl LocalHost {
         let task = p.get("task").ok_or(HostError("invalid_action"))?;
         string(task, "objective")?;
         let prompt = format!(
-            "Complete the following task only within this working directory. Treat outputs beginning with artifact: as references, not writable paths. Task: {}",
+            "Complete the following task only within this working directory. Treat outputs beginning with artifact: as references, not writable paths. On Windows use non-login shell commands (login=false) and PowerShell -NoProfile so profiles do not change the working directory or write outside it. Task: {}",
             serde_json::to_string(task).map_err(|_| HostError("invalid_action"))?
         );
         if prompt.len() > 128 * 1024 {

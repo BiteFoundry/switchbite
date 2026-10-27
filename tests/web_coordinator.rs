@@ -48,7 +48,8 @@ fn fake_worker(tmp: &Path) -> Value {
         let prompt = args.join(" ");
         assert!(prompt.contains("Keep the complete user goal"));
         assert!(prompt.contains("independent review node"));
-        std::fs::write("switchbite-observation.json", r#"{"plan":{"nodes":[{"id":"build","objective":"Build"}]}}"#).unwrap();
+        assert!(prompt.contains("arrays of strings"));
+        std::fs::write("switchbite-observation.json", r#"{"plan":{"nodes":[{"id":"build","objective":"Build","acceptance":"Build works"}]}}"#).unwrap();
         println!("{{\"type\":\"thread.started\",\"thread_id\":\"t\"}}");
         println!("{{\"type\":\"turn.started\"}}");
         println!("{{\"type\":\"turn.completed\"}}");
@@ -76,6 +77,10 @@ fn verified_worker_produces_plan_with_complete_context() {
     let result =
         web_coordinator::fulfill(&tmp.path().join("state"), &run, &action, &candidate).unwrap();
     assert_eq!(result["plan"]["nodes"][0]["id"], "build");
+    assert_eq!(
+        result["plan"]["nodes"][0]["acceptance"],
+        json!(["Build works"])
+    );
     assert!(
         !tmp.path()
             .join("repo")
@@ -87,6 +92,13 @@ fn verified_worker_produces_plan_with_complete_context() {
         result,
         web_coordinator::fulfill(&tmp.path().join("state"), &run, &action, &candidate).unwrap()
     );
+    let registered = Workflow::new(tmp.path().join("state"))
+        .observe(
+            &run,
+            &json!({"action_id":action["id"],"event_id":"plan-result","result":result}),
+        )
+        .unwrap();
+    assert_eq!(registered["tasks"][0]["id"], "build");
 }
 #[test]
 fn cancellation_before_launch_is_bound_to_attempt() {
