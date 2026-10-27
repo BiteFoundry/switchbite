@@ -274,12 +274,23 @@ fn handle(
                     })
             };
             match result {
-                Ok(value) => response(
-                    &mut stream,
-                    "200 OK",
-                    "application/json",
-                    &value.to_string(),
-                ),
+                Ok(mut value) => {
+                    // A standalone viewer does not own the Workbench repair driver.
+                    if app.is_none() {
+                        for stream in value["streams"].as_array_mut().into_iter().flatten() {
+                            stream["can_retry"] = json!(false);
+                        }
+                        if let Some(selected) = value["selected_stream"].as_object_mut() {
+                            selected.insert("can_retry".into(), json!(false));
+                        }
+                    }
+                    response(
+                        &mut stream,
+                        "200 OK",
+                        "application/json",
+                        &value.to_string(),
+                    )
+                }
                 Err(error) => response(
                     &mut stream,
                     "400 Bad Request",

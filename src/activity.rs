@@ -587,6 +587,8 @@ pub fn snapshot(
         ("needs_attention", Some("resume"))
     } else if let Some(s) = active {
         (s.value["health"].as_str().unwrap_or("active"), None)
+    } else if state["status"] == "running" && tasks.iter().any(|task| task["status"] == "blocked") {
+        ("blocked", None)
     } else {
         (state["status"].as_str().unwrap_or("unknown"), None)
     };

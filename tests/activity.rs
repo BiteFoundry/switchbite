@@ -178,3 +178,29 @@ fn check_logs_use_the_matching_action_id() {
         "check output"
     );
 }
+
+#[test]
+fn blocked_run_is_visible_even_when_its_last_worker_finished() {
+    let (root, run, mut state, hash) = setup();
+    state["tasks"][0]["status"] = json!("done");
+    state["tasks"]
+        .as_array_mut()
+        .unwrap()
+        .push(json!({"id":"two","status":"blocked"}));
+    fs::write(
+        root.path()
+            .join(&run)
+            .join("host/output")
+            .join(format!("{hash}.out")),
+        "Finished\n",
+    )
+    .unwrap();
+    let value = snapshot(root.path(), &run, &state, None, None, 10_000).unwrap();
+    assert_eq!(value["health"]["status"], "blocked");
+    assert!(value["health"]["action"].is_null());
+    assert_eq!(value["selected_stream"]["health"], "done");
+    state["coordinator"] = json!({"error":{"code":"routing_held"}});
+    let value = snapshot(root.path(), &run, &state, None, None, 10_000).unwrap();
+    assert_eq!(value["health"]["status"], "needs_attention");
+    assert_eq!(value["health"]["action"], "resume");
+}
