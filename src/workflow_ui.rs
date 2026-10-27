@@ -98,6 +98,19 @@ fn view(state: &Value) -> Value {
             result[field] = value.clone();
         }
     }
+    if let Some(url) = state["handoff"]["url"].as_str()
+        && let Ok(parsed) = reqwest::Url::parse(url)
+        && parsed.scheme() == "http"
+        && parsed.host_str() == Some("127.0.0.1")
+        && parsed.port().is_some()
+        && parsed.username().is_empty()
+        && parsed.password().is_none()
+        && parsed.path() == "/"
+        && parsed.query().is_none()
+        && parsed.fragment().is_none()
+    {
+        result["handoff"] = json!({"url":parsed.as_str(),"bundle_id":safe_string(&state["handoff"]["bundle_id"],96)});
+    }
     if state["runtime"].is_object() {
         let runtime = &state["runtime"];
         result["runtime"] = json!({
@@ -602,6 +615,24 @@ pub fn serve_app_resume(
 #[cfg(test)]
 mod summary_tests {
     use super::*;
+    #[test]
+    fn handoff_allows_only_a_loopback_http_endpoint() {
+        let state = |url| json!({"status":"handoff","handoff":{"url":url,"bundle_id":"release-1","secret":"hidden"}});
+        let accepted = view(&state("http://127.0.0.1:2468/"));
+        assert_eq!(
+            accepted["handoff"],
+            json!({"url":"http://127.0.0.1:2468/","bundle_id":"release-1"})
+        );
+        for url in [
+            "https://127.0.0.1:2468/",
+            "http://example.com:2468/",
+            "http://127.0.0.1/",
+            "http://user@127.0.0.1:2468/",
+            "http://127.0.0.1:2468/?token=x",
+        ] {
+            assert!(view(&state(url)).get("handoff").is_none(), "{url}");
+        }
+    }
     #[test]
     fn runtime_and_observed_identity_are_explicit_and_bounded() {
         let state = json!({"runtime":{"switchbite":{"version":"1.2","commit":"abc","secret":"hidden"},"backend":{"kind":"codex","version":"3","protocol_version":1},"project":{"workspace":"project","base_commit":"def"}},"tasks":[{"id":"a","candidate":{"model":"requested","effort":"high"},"observed":{"model":"actual"}}]});
