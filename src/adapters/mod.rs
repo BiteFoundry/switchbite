@@ -13,7 +13,7 @@ use sha2::{Digest, Sha256};
 use std::{
     fmt,
     fs::{self, OpenOptions},
-    io::{Read, Write},
+    io::{Read, Seek, SeekFrom, Write},
     path::{Path, PathBuf},
     process::{Command, Stdio},
     thread,
@@ -266,16 +266,93 @@ fn value_file(path: &Path) -> Result<Value, HostError> {
     serde_json::from_slice(&read_bounded(path)?).map_err(|_| HostError("invalid_state"))
 }
 fn write_atomic(path: &Path, v: &Value) -> Result<(), HostError> {
-    let tmp = path.with_extension("tmp");
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static NEXT: AtomicU64 = AtomicU64::new(0);
+    let tmp = path.with_extension(format!(
+        "{}.{}.tmp",
+        std::process::id(),
+        NEXT.fetch_add(1, Ordering::Relaxed)
+    ));
     fs::write(
         &tmp,
         serde_json::to_vec(v).map_err(|_| HostError("io_error"))?,
     )
     .map_err(|_| HostError("io_error"))?;
-    if path.exists() {
-        fs::remove_file(path).map_err(|_| HostError("io_error"))?;
+    if replace_atomic(&tmp, path).is_err() {
+        let _ = fs::remove_file(&tmp);
+        return Err(HostError("io_error"));
     }
-    fs::rename(tmp, path).map_err(|_| HostError("io_error"))
+    Ok(())
+}
+#[cfg(not(windows))]
+fn replace_atomic(from: &Path, to: &Path) -> std::io::Result<()> {
+    fs::rename(from, to)
+}
+#[cfg(windows)]
+fn replace_atomic(from: &Path, to: &Path) -> std::io::Result<()> {
+    use std::os::windows::ffi::OsStrExt;
+    #[link(name = "kernel32")]
+    unsafe extern "system" {
+        fn MoveFileExW(from: *const u16, to: *const u16, flags: u32) -> i32;
+    }
+    let from: Vec<u16> = from.as_os_str().encode_wide().chain(Some(0)).collect();
+    let to: Vec<u16> = to.as_os_str().encode_wide().chain(Some(0)).collect();
+    // MOVEFILE_REPLACE_EXISTING keeps readers from seeing a missing record.
+    if unsafe { MoveFileExW(from.as_ptr(), to.as_ptr(), 1) } == 0 {
+        Err(std::io::Error::last_os_error())
+    } else {
+        Ok(())
+    }
+}
+fn unix_ms() -> u128 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis()
+}
+
+/// Query only the named job and the recorded process identity; never signal it.
+pub(crate) fn execution_alive(record: &Value) -> Option<bool> {
+    let name = record["job_name"].as_str()?;
+    match process::job_drained(name)? {
+        true => Some(false),
+        false => {
+            let pid = u32::try_from(record["pid"].as_u64()?).ok()?;
+            let creation = record["worker_creation"].as_u64()?;
+            // A surviving job can contain descendants after its leader exits.
+            match process::stopped(pid, creation)? {
+                false => Some(true),
+                true => None,
+            }
+        }
+    }
+}
+
+fn output_len(path: &Path) -> u64 {
+    fs::metadata(path).map(|m| m.len()).unwrap_or(0)
+}
+
+fn retain_tail(path: &Path) -> Result<(), HostError> {
+    const TAIL: u64 = 64 * 1024;
+    let mut file = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(path)
+        .map_err(|_| HostError("io_error"))?;
+    let len = file.metadata().map_err(|_| HostError("io_error"))?.len();
+    if len > TAIL {
+        file.seek(SeekFrom::End(-(TAIL as i64)))
+            .map_err(|_| HostError("io_error"))?;
+        let mut tail = Vec::with_capacity(TAIL as usize);
+        file.read_to_end(&mut tail)
+            .map_err(|_| HostError("io_error"))?;
+        file.seek(SeekFrom::Start(0))
+            .map_err(|_| HostError("io_error"))?;
+        file.write_all(&tail).map_err(|_| HostError("io_error"))?;
+        file.set_len(tail.len() as u64)
+            .map_err(|_| HostError("io_error"))?;
+    }
+    Ok(())
 }
 fn path_string(p: &Path) -> Result<&str, HostError> {
     p.to_str()
@@ -535,28 +612,53 @@ impl LocalHost {
         cursor: bool,
     ) -> Result<(bool, Vec<u8>, Option<&'static str>), HostError> {
         let logs = self.state.join("output");
-        fs::create_dir_all(&logs).map_err(|_| HostError("io_error"))?;
         let execution_dir = self.state.join("executions");
-        let cancel = execution_dir.join(format!("{}.cancel", hash(tag)));
-        if launch && cancel.exists() {
-            return Err(HostError("cancelled"));
-        }
-        let out = logs.join(format!("{}.out", hash(tag)));
-        let err = logs.join(format!("{}.err", hash(tag)));
-        let stdout = fs::File::create(&out).map_err(|_| HostError("io_error"))?;
-        let stderr = fs::File::create(&err).map_err(|_| HostError("io_error"))?;
-        cmd.current_dir(dir)
-            .stdin(Stdio::null())
-            .stdout(Stdio::from(stdout))
-            .stderr(Stdio::from(stderr));
-        let job_name = format!(
-            "Local\\Switchbite-{}",
-            hash(&format!("{}:{tag}", self.state.display()))
-        );
-        let mut tree = process::Tree::spawn(&mut cmd, &job_name)
-            .map_err(|_| HostError("process_ownership_unavailable"))?;
-        if launch {
-            fs::create_dir_all(&execution_dir).map_err(|_| HostError("io_error"))?;
+        fs::create_dir_all(&logs).map_err(|_| HostError("io_error"))?;
+        fs::create_dir_all(&execution_dir).map_err(|_| HostError("io_error"))?;
+        let key = hash(tag);
+        let cancel = execution_dir.join(format!("{key}.cancel"));
+        let record_path = execution_dir.join(format!("{key}.json"));
+        let out = logs.join(format!("{key}.out"));
+        let err = logs.join(format!("{key}.err"));
+        let now = unix_ms();
+        let mut record = json!({"execution_id":tag,"token":key,"status":"running",
+            "started_unix_ms":now,"updated_unix_ms":now,"finished_unix_ms":null,
+            "stdout_bytes":0,"stderr_bytes":0,"cwd":dir,"kind":if launch {"worker"} else {"check"}});
+        let publish = |record: &mut Value, status: &str, exit_code: Option<i32>| {
+            let now = unix_ms();
+            record["status"] = json!(status);
+            record["updated_unix_ms"] = json!(now);
+            record["stdout_bytes"] = json!(output_len(&out));
+            record["stderr_bytes"] = json!(output_len(&err));
+            if status != "running" {
+                record["finished_unix_ms"] = json!(now);
+                if let Some(code) = exit_code {
+                    record["exit_code"] = json!(code);
+                }
+            }
+            write_atomic(&record_path, record)
+        };
+        // Settle the record even when spawning or a later operation fails.
+        let mut terminal = "failed";
+        let mut exit_code = None;
+        let result = (|| {
+            if launch && cancel.exists() {
+                terminal = "cancelled";
+                return Err(HostError("cancelled"));
+            }
+            let stdout = fs::File::create(&out).map_err(|_| HostError("io_error"))?;
+            let stderr = fs::File::create(&err).map_err(|_| HostError("io_error"))?;
+            publish(&mut record, "running", None)?;
+            cmd.current_dir(dir)
+                .stdin(Stdio::null())
+                .stdout(Stdio::from(stdout))
+                .stderr(Stdio::from(stderr));
+            let job_name = format!(
+                "Local\\Switchbite-{}",
+                hash(&format!("{}:{tag}", self.state.display()))
+            );
+            let mut tree = process::Tree::spawn(&mut cmd, &job_name)
+                .map_err(|_| HostError("process_ownership_unavailable"))?;
             let identity = match (process::owner_creation_time(), tree.creation_time()) {
                 (Ok(owner), Ok(worker)) => (owner, worker),
                 _ => {
@@ -565,84 +667,86 @@ impl LocalHost {
                     return Err(HostError("process_ownership_unavailable"));
                 }
             };
-            if write_atomic(&execution_dir.join(format!("{}.json", hash(tag))), &json!({"execution_id":tag,"token":hash(tag),"pid":tree.child.id(),"owner_pid":std::process::id(),"owner_creation":identity.0,"worker_creation":identity.1,"job_name":job_name,"started_unix_ms":SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_millis()})).is_err() {
-                tree.terminate().map_err(|_| HostError("process_ownership_unavailable"))?;
+            record["pid"] = json!(tree.child.id());
+            record["owner_pid"] = json!(std::process::id());
+            record["owner_creation"] = json!(identity.0);
+            record["worker_creation"] = json!(identity.1);
+            record["job_name"] = json!(job_name);
+            if publish(&mut record, "running", None).is_err() {
+                tree.terminate()
+                    .map_err(|_| HostError("process_ownership_unavailable"))?;
                 return Err(HostError("io_error"));
             }
-        }
-        let started = Instant::now();
-        let mut last_stderr_poll = started;
-        loop {
-            if let Some(status) = tree
-                .child
-                .try_wait()
-                .map_err(|_| HostError("process_failed"))?
-                .filter(|_| tree.active().is_ok_and(|n| n == 0))
-            {
-                let bytes = read_bounded(&out)?;
-                if fs::metadata(&err)
-                    .map(|m| m.len() > MAX_OUTPUT)
-                    .unwrap_or(false)
-                {
-                    let _ = fs::remove_file(&out);
-                    let _ = fs::remove_file(&err);
-                    return Err(HostError("output_limit"));
-                }
-                let stderr = read_bounded(&err)?;
-                if launch && cursor && cursor_weekly_limit(&stderr) {
-                    let _ = fs::remove_file(&out);
-                    return Ok((false, bytes, Some("rate_limited")));
-                }
-                let hint = if status.success() {
-                    None
-                } else {
-                    failure_hint(&stderr)
-                };
-                let _ = fs::remove_file(&out);
-                let _ = fs::remove_file(&err);
-                return Ok((status.success(), bytes, hint));
-            }
-            if launch && cancel.exists() {
-                tree.terminate()
-                    .map_err(|_| HostError("process_ownership_unavailable"))?;
-                let _ = fs::remove_file(&out);
-                let _ = fs::remove_file(&err);
-                return Err(HostError("cancelled"));
-            }
-            if started.elapsed() >= Duration::from_secs(self.timeout) {
-                tree.terminate()
-                    .map_err(|_| HostError("process_ownership_unavailable"))?;
-                let _ = fs::remove_file(&out);
-                let _ = fs::remove_file(&err);
-                return Err(HostError("timeout"));
-            }
-            if fs::metadata(&out)
-                .map(|m| m.len() > MAX_OUTPUT)
-                .unwrap_or(false)
-                || fs::metadata(&err)
-                    .map(|m| m.len() > MAX_OUTPUT)
-                    .unwrap_or(false)
-            {
-                tree.terminate()
-                    .map_err(|_| HostError("process_ownership_unavailable"))?;
-                let _ = fs::remove_file(&out);
-                let _ = fs::remove_file(&err);
-                return Err(HostError("output_limit"));
-            }
-            if launch && cursor && last_stderr_poll.elapsed() >= Duration::from_millis(500) {
-                last_stderr_poll = Instant::now();
-                let stderr = read_bounded(&err)?;
-                if cursor_weekly_limit(&stderr) {
+            let started = Instant::now();
+            let mut heartbeat = started;
+            loop {
+                let status = tree
+                    .child
+                    .try_wait()
+                    .map_err(|_| HostError("process_failed"))?
+                    .filter(|_| tree.active().is_ok_and(|n| n == 0));
+                if output_len(&out) > MAX_OUTPUT || output_len(&err) > MAX_OUTPUT {
                     tree.terminate()
                         .map_err(|_| HostError("process_ownership_unavailable"))?;
-                    let bytes = read_bounded(&out)?;
-                    let _ = fs::remove_file(&out);
-                    return Ok((false, bytes, Some("rate_limited")));
+                    terminal = "output_limit";
+                    retain_tail(&out)?;
+                    retain_tail(&err)?;
+                    return Err(HostError("output_limit"));
                 }
+                if let Some(status) = status {
+                    exit_code = status.code();
+                    let bytes = read_bounded(&out)?;
+                    let stderr = read_bounded(&err)?;
+                    if launch && cursor && cursor_weekly_limit(&stderr) {
+                        return Ok((false, bytes, Some("rate_limited")));
+                    }
+                    terminal = if status.success() {
+                        "completed"
+                    } else {
+                        "failed"
+                    };
+                    let hint = if status.success() {
+                        None
+                    } else {
+                        failure_hint(&stderr)
+                    };
+                    return Ok((status.success(), bytes, hint));
+                }
+                if launch && cancel.exists() {
+                    tree.terminate()
+                        .map_err(|_| HostError("process_ownership_unavailable"))?;
+                    terminal = "cancelled";
+                    return Err(HostError("cancelled"));
+                }
+                if started.elapsed() >= Duration::from_secs(self.timeout) {
+                    tree.terminate()
+                        .map_err(|_| HostError("process_ownership_unavailable"))?;
+                    terminal = "timeout";
+                    return Err(HostError("timeout"));
+                }
+                if heartbeat.elapsed() >= Duration::from_millis(500) {
+                    heartbeat = Instant::now();
+                    publish(&mut record, "running", None)?;
+                    if launch && cursor && cursor_weekly_limit(&read_bounded(&err)?) {
+                        tree.terminate()
+                            .map_err(|_| HostError("process_ownership_unavailable"))?;
+                        return Ok((false, read_bounded(&out)?, Some("rate_limited")));
+                    }
+                }
+                thread::sleep(Duration::from_millis(50));
             }
-            thread::sleep(Duration::from_millis(50));
+        })();
+        if output_len(&out) > MAX_OUTPUT || output_len(&err) > MAX_OUTPUT {
+            retain_tail(&out)?;
+            retain_tail(&err)?;
+            terminal = "output_limit";
+            publish(&mut record, terminal, exit_code)?;
+            return Err(HostError("output_limit"));
         }
+        publish(&mut record, terminal, exit_code)?;
+        result
     }
+
     fn launch(&self, a: &Value, p: &Value) -> Result<Value, HostError> {
         let dir = self.owned(p, "workspace")?;
         let c = p.get("candidate").ok_or(HostError("invalid_action"))?;
@@ -1169,6 +1273,156 @@ mod tests {
         let mut result = json!({"status":"failed", "reason":reason});
         attach_rate_limit_error(&mut result);
         assert_eq!(result["error"]["code"], "quota_or_rate_limit");
+    }
+    #[cfg(windows)]
+    #[test]
+    fn live_check_progress_and_terminal_output_are_visible() {
+        use super::*;
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().to_owned();
+        let worker_root = root.clone();
+        let handle = thread::spawn(move || {
+            let host = LocalHost {
+                workspace: worker_root.clone(),
+                state: worker_root.clone(),
+                worktrees: worker_root.clone(),
+                base: String::new(),
+                timeout: 10,
+            };
+            let mut cmd = Command::new("powershell.exe");
+            cmd.args(["-NoProfile", "-Command", "[Console]::Out.WriteLine('live'); [Console]::Error.WriteLine('error'); Start-Sleep -Seconds 2"]);
+            host.execute(cmd, &worker_root, "live-check", false, false)
+                .unwrap()
+        });
+        let record_path = root
+            .join("executions")
+            .join(format!("{}.json", hash("live-check")));
+        let out = root
+            .join("output")
+            .join(format!("{}.out", hash("live-check")));
+        let deadline = Instant::now() + Duration::from_secs(8);
+        let mut observed = false;
+        while Instant::now() < deadline {
+            if let Ok(record) = value_file(&record_path) {
+                if record["status"] == "running"
+                    && record["kind"] == "check"
+                    && record["pid"].is_number()
+                    && output_len(&out) > 0
+                {
+                    assert_eq!(execution_alive(&record), Some(true));
+                    observed = true;
+                    break;
+                }
+            }
+            thread::sleep(Duration::from_millis(50));
+        }
+        assert!(observed);
+        assert!(handle.join().unwrap().0);
+        let record = value_file(&record_path).unwrap();
+        assert_eq!(record["status"], "completed");
+        assert!(record["finished_unix_ms"].is_number());
+        assert!(String::from_utf8_lossy(&fs::read(out).unwrap()).contains("live"));
+        assert!(record["stderr_bytes"].as_u64().unwrap() > 0);
+    }
+    #[cfg(windows)]
+    #[test]
+    fn timeout_and_cancel_keep_output_and_terminal_records() {
+        use super::*;
+        for cancel in [false, true] {
+            let temp = tempfile::tempdir().unwrap();
+            let root = temp.path().to_owned();
+            let worker_root = root.clone();
+            let handle = thread::spawn(move || {
+                let host = LocalHost {
+                    workspace: worker_root.clone(),
+                    state: worker_root.clone(),
+                    worktrees: worker_root.clone(),
+                    base: String::new(),
+                    timeout: 2,
+                };
+                let mut cmd = Command::new("powershell.exe");
+                cmd.args(["-NoProfile", "-Command", "[Console]::Out.WriteLine('partial'); [Console]::Error.WriteLine('detail'); Start-Sleep -Seconds 15"]);
+                host.execute(cmd, &worker_root, "stopped", true, false)
+                    .unwrap_err()
+                    .0
+            });
+            let out = root.join("output").join(format!("{}.out", hash("stopped")));
+            let deadline = Instant::now() + Duration::from_secs(8);
+            while output_len(&out) == 0 && Instant::now() < deadline {
+                thread::sleep(Duration::from_millis(25));
+            }
+            assert!(output_len(&out) > 0);
+            if cancel {
+                fs::write(
+                    root.join("executions")
+                        .join(format!("{}.cancel", hash("stopped"))),
+                    b"cancel",
+                )
+                .unwrap();
+            }
+            let expected = if cancel { "cancelled" } else { "timeout" };
+            assert_eq!(handle.join().unwrap(), expected);
+            let record = value_file(
+                &root
+                    .join("executions")
+                    .join(format!("{}.json", hash("stopped"))),
+            )
+            .unwrap();
+            assert_eq!(record["status"], expected);
+            assert!(String::from_utf8_lossy(&fs::read(out).unwrap()).contains("partial"));
+            assert!(record["stderr_bytes"].as_u64().unwrap() > 0);
+        }
+    }
+    #[cfg(windows)]
+    #[test]
+    fn rapid_output_limit_retains_bounded_tails() {
+        use super::*;
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path();
+        let host = LocalHost {
+            workspace: root.to_owned(),
+            state: root.to_owned(),
+            worktrees: root.to_owned(),
+            base: String::new(),
+            timeout: 10,
+        };
+        let mut cmd = Command::new("powershell.exe");
+        cmd.args(["-NoProfile", "-Command", "[Console]::Out.Write(('x' * 3000000)); [Console]::Error.Write(('e' * 3000000)); Start-Sleep -Seconds 5"]);
+        assert_eq!(
+            host.execute(cmd, root, "flood", false, false)
+                .unwrap_err()
+                .0,
+            "output_limit"
+        );
+        let record = value_file(
+            &root
+                .join("executions")
+                .join(format!("{}.json", hash("flood"))),
+        )
+        .unwrap();
+        assert_eq!(record["status"], "output_limit");
+        for ext in ["out", "err"] {
+            assert!(
+                output_len(
+                    &root
+                        .join("output")
+                        .join(format!("{}.{}", hash("flood"), ext))
+                ) <= 64 * 1024
+            );
+        }
+    }
+    #[test]
+    fn oversized_output_keeps_only_tail() {
+        use super::*;
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("output");
+        let mut bytes = vec![b'a'; 1024 * 1024];
+        bytes.extend_from_slice(b"tail");
+        fs::write(&path, bytes).unwrap();
+        retain_tail(&path).unwrap();
+        let retained = fs::read(path).unwrap();
+        assert_eq!(retained.len(), 64 * 1024);
+        assert!(retained.ends_with(b"tail"));
     }
     #[test]
     fn receipts_fail_closed_on_contradictions() {
