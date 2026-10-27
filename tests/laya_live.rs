@@ -28,7 +28,7 @@ async fn installed_orchestrator_plugin_discovers_and_routes_with_real_local_laya
     assert!(args.windows(2).any(|a| a == ["--profile", "workflow"]));
     assert!(
         args.windows(2)
-            .any(|a| a[0] == "--workspace" && PathBuf::from(a[1]) == workspace)
+            .any(|a| a[0] == "--workspace" && std::path::Path::new(a[1]) == workspace)
     );
     let model = args
         .windows(2)
