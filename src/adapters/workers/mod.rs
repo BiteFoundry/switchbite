@@ -143,7 +143,11 @@ pub(super) fn command(
                 "windows.sandbox=\"unelevated\"",
             ]);
             if effort != "default" {
-                if !["minimal", "low", "medium", "high", "xhigh"].contains(&effort) {
+                if ![
+                    "none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra",
+                ]
+                .contains(&effort)
+                {
                     return Err(HostError("unsupported_effort"));
                 }
                 cmd.args(["-c", &format!("model_reasoning_effort=\"{effort}\"")]);
@@ -160,7 +164,7 @@ pub(super) fn command(
                 model,
             ]);
             if effort != "default" {
-                if !["low", "medium", "high", "max"].contains(&effort) {
+                if !["low", "medium", "high", "xhigh", "max"].contains(&effort) {
                     return Err(HostError("unsupported_effort"));
                 }
                 cmd.args(["--effort", effort]);
@@ -258,15 +262,16 @@ fn native_command(provider: &str, executable: &str) -> Result<Command, HostError
                 .filter(|p| {
                     p.is_dir()
                         && p.file_name().and_then(|n| n.to_str()).is_some_and(|n| {
-                            n.len() >= 12
-                                && n.chars().take(10).enumerate().all(|(i, c)| {
-                                    if i == 4 || i == 7 {
-                                        c == '.'
-                                    } else {
-                                        c.is_ascii_digit()
-                                    }
-                                })
-                                && !n.ends_with(".previous")
+                            let Some((date, suffix)) = n.split_once('-') else {
+                                return false;
+                            };
+                            let parts: Vec<_> = date.split('.').collect();
+                            parts.len() == 3
+                                && parts[0].len() == 4
+                                && parts[1..].iter().all(|p| !p.is_empty() && p.len() <= 2)
+                                && parts.iter().all(|p| p.chars().all(|c| c.is_ascii_digit()))
+                                && !suffix.is_empty()
+                                && suffix.chars().all(|c| c.is_ascii_hexdigit() || c == '-')
                         })
                         && p.join("node.exe").is_file()
                         && p.join("index.js").is_file()
@@ -339,6 +344,8 @@ fn native_receipt(provider: &str, output: &[u8]) -> (bool, Option<String>) {
     let mut terminal = false;
     let mut model = None;
     let mut valid = true;
+    let mut projected_text = false;
+    let mut saw_step = false;
     for line in output.split(|b| *b == b'\n').filter(|l| !l.is_empty()) {
         let Ok(v) = serde_json::from_slice::<Value>(line) else {
             return (false, None);
@@ -354,6 +361,9 @@ fn native_receipt(provider: &str, output: &[u8]) -> (bool, Option<String>) {
         } else {
             "sessionID"
         };
+        if provider == "opencode" && v.get(key).and_then(Value::as_str).is_none_or(str::is_empty) {
+            valid = false;
+        }
         if let Some(id) = v.get(key).and_then(Value::as_str).filter(|s| !s.is_empty()) {
             if session.as_deref().is_some_and(|previous| previous != id) {
                 valid = false;
@@ -389,6 +399,7 @@ fn native_receipt(provider: &str, output: &[u8]) -> (bool, Option<String>) {
             match kind {
                 "step_start" => {
                     init = true;
+                    saw_step = true;
                     terminal = false;
                 }
                 "step_finish" => {
@@ -399,6 +410,18 @@ fn native_receipt(provider: &str, output: &[u8]) -> (bool, Option<String>) {
                     terminal = v["part"]["reason"] == "stop";
                 }
                 "error" => valid = false,
+                "text" => {
+                    if v["part"]["text"].as_str().is_none_or(str::is_empty) {
+                        valid = false;
+                    } else {
+                        projected_text = true;
+                    }
+                }
+                "tool_use" => {
+                    if !v["part"].is_object() {
+                        valid = false;
+                    }
+                }
                 _ => {
                     if !init {
                         valid = false;
@@ -407,7 +430,12 @@ fn native_receipt(provider: &str, output: &[u8]) -> (bool, Option<String>) {
             }
         }
     }
-    (valid && init && terminal && session.is_some(), model)
+    let completed = if provider == "opencode" && !saw_step {
+        projected_text
+    } else {
+        init && terminal
+    };
+    (valid && completed && session.is_some(), model)
 }
 
 #[cfg(test)]
@@ -483,5 +511,71 @@ mod tests {
             cmd.get_args().next().unwrap(),
             temp.path().join("versions/2026.10.22-abcdef1/index.js")
         );
+    }
+    #[test]
+    fn opencode_projected_output_requires_text_and_consistent_session() {
+        let projected = b"{\"type\":\"tool_use\",\"sessionID\":\"s\",\"part\":{}}\n{\"type\":\"text\",\"sessionID\":\"s\",\"part\":{\"text\":\"done\"}}\n";
+        assert!(verified_receipt("opencode", projected, "unused").0);
+        let mut error = projected.to_vec();
+        error.extend_from_slice(b"{\"type\":\"error\",\"sessionID\":\"s\"}\n");
+        assert!(!verified_receipt("opencode", &error, "unused").0);
+        let mut foreign = projected.to_vec();
+        foreign.extend_from_slice(
+            b"{\"type\":\"text\",\"sessionID\":\"other\",\"part\":{\"text\":\"x\"}}\n",
+        );
+        assert!(!verified_receipt("opencode", &foreign, "unused").0);
+        assert!(
+            !verified_receipt(
+                "opencode",
+                b"{\"type\":\"text\",\"sessionID\":\"s\",\"part\":{}}\n",
+                "unused"
+            )
+            .0
+        );
+        assert!(
+            !verified_receipt(
+                "opencode",
+                b"{\"type\":\"tool_use\",\"sessionID\":\"s\",\"part\":{}}\n",
+                "unused"
+            )
+            .0
+        );
+    }
+    #[test]
+    fn newer_efforts_are_forwarded() {
+        for (provider, effort) in [
+            ("codex", "none"),
+            ("codex", "max"),
+            ("codex", "ultra"),
+            ("claude", "xhigh"),
+        ] {
+            let cmd = command(
+                provider,
+                "test",
+                "model",
+                effort,
+                "session",
+                Path::new("message"),
+                Path::new("."),
+                "prompt",
+            )
+            .unwrap();
+            assert!(cmd.get_args().any(|a| a.to_string_lossy().contains(effort)));
+        }
+    }
+    #[cfg(windows)]
+    #[test]
+    fn cursor_resolves_a_single_unpadded_version() {
+        let temp = tempfile::tempdir().unwrap();
+        let dir = temp.path().join("versions/2026.9.8-abcdef0");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("node.exe"), b"").unwrap();
+        std::fs::write(dir.join("index.js"), b"").unwrap();
+        let cmd = native_command(
+            "cursor",
+            temp.path().join("cursor-agent.cmd").to_str().unwrap(),
+        )
+        .unwrap();
+        assert_eq!(cmd.get_program(), dir.join("node.exe"));
     }
 }
