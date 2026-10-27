@@ -1,5 +1,11 @@
 use serde_json::{Value, json};
 mod process;
+mod workers;
+use workers::verified_receipt;
+
+pub fn supports_provider(provider: &str) -> bool {
+    matches!(provider, "claude" | "codex" | "cursor" | "opencode")
+}
 use sha2::{Digest, Sha256};
 use std::{
     fmt,
@@ -192,108 +198,6 @@ fn session_id(id: &str) -> String {
         &h[20..32]
     )
 }
-fn verified_receipt(provider: &str, output: &[u8], session: &str) -> (bool, Option<String>) {
-    let mut init = false;
-    let mut turn = false;
-    let mut terminal = false;
-    let mut model = None;
-    let mut valid = true;
-    for line in output.split(|b| *b == b'\n').filter(|l| !l.is_empty()) {
-        let Ok(v) = serde_json::from_slice::<Value>(line) else {
-            return (false, None);
-        };
-        let Some(kind) = v.get("type").and_then(Value::as_str) else {
-            return (false, None);
-        };
-        if terminal {
-            valid = false;
-        }
-        if provider == "claude" {
-            if v.get("session_id")
-                .is_some_and(|x| x.as_str() != Some(session))
-            {
-                valid = false;
-            }
-            match kind {
-                "system" if v["subtype"] == "init" => {
-                    if init || v["session_id"] != session {
-                        valid = false;
-                    }
-                    init = true;
-                    model = v
-                        .get("model")
-                        .and_then(Value::as_str)
-                        .filter(|s| !s.is_empty() && s.len() <= 256)
-                        .map(str::to_owned);
-                }
-                "result" => {
-                    if !init
-                        || v["session_id"] != session
-                        || v["subtype"] != "success"
-                        || v["is_error"] != false
-                        || !v
-                            .get("permission_denials")
-                            .and_then(Value::as_array)
-                            .is_some_and(Vec::is_empty)
-                    {
-                        valid = false;
-                    }
-                    terminal = true;
-                }
-                "error" => valid = false,
-                "assistant" | "user" => {
-                    if !init
-                        || v.get("error").is_some_and(|x| !x.is_null())
-                        || v["message"]["stop_reason"] == "refusal"
-                        || v["message"]["content"]
-                            .as_array()
-                            .is_some_and(|a| a.iter().any(|x| x["type"] == "refusal"))
-                    {
-                        valid = false;
-                    }
-                }
-                _ => {
-                    if !init {
-                        valid = false;
-                    }
-                }
-            }
-        } else {
-            match kind {
-                "thread.started" => {
-                    if init || v["thread_id"].as_str().is_none_or(str::is_empty) {
-                        valid = false;
-                    }
-                    init = true;
-                }
-                "turn.started" => {
-                    if !init || turn {
-                        valid = false;
-                    }
-                    turn = true;
-                }
-                "turn.completed" => {
-                    if !init || !turn {
-                        valid = false;
-                    }
-                    terminal = true;
-                }
-                "error" | "turn.failed" => valid = false,
-                "item.failed" => {
-                    if !turn {
-                        valid = false;
-                    }
-                }
-                _ => {
-                    if !turn {
-                        valid = false;
-                    }
-                }
-            }
-        }
-    }
-    (valid && init && terminal, model)
-}
 fn run_git(dir: &Path, args: &[&str]) -> Result<String, HostError> {
     let output = Command::new("git")
         .args(["-c", "core.longpaths=true"])
@@ -322,7 +226,13 @@ fn read_bounded(path: &Path) -> Result<Vec<u8>, HostError> {
 }
 fn failure_hint(bytes: &[u8]) -> Option<&'static str> {
     let message = String::from_utf8_lossy(bytes).to_ascii_lowercase();
-    if message.contains("authentication")
+    if (message.contains("effort") || message.contains("variant"))
+        && (message.contains("unsupported")
+            || message.contains("invalid")
+            || message.contains("not found"))
+    {
+        Some("unsupported_effort")
+    } else if message.contains("authentication")
         || message.contains("unauthorized")
         || message.contains("login required")
     {
@@ -451,7 +361,7 @@ impl LocalHost {
         })
     }
     pub fn describe(&self) -> Value {
-        json!({"kind":"local","base":self.base,"providers":["claude","codex"],"process_tree":if cfg!(windows) {"windows_job"} else {"unsupported"},"timeout_seconds":self.timeout,"requires":["git","candidate.provider","candidate.executable","candidate.model","candidate.effort"]})
+        json!({"kind":"local","base":self.base,"providers":["claude","codex","cursor","opencode"],"process_tree":if cfg!(windows) {"windows_job"} else {"unsupported"},"timeout_seconds":self.timeout,"requires":["git","candidate.provider","candidate.executable","candidate.model","candidate.effort"]})
     }
     pub fn perform(&self, action: &Value) -> Result<Value, HostError> {
         let id = string(action, "id")?;
@@ -725,7 +635,6 @@ impl LocalHost {
         if prompt.len() > 128 * 1024 {
             return Err(HostError("invalid_action"));
         }
-        let mut cmd = Command::new(executable);
         if c.get("args")
             .and_then(Value::as_array)
             .is_some_and(|args| !args.is_empty())
@@ -737,66 +646,16 @@ impl LocalHost {
         let messages = self.state.join("messages");
         fs::create_dir_all(&messages).map_err(|_| HostError("io_error"))?;
         let message_path = messages.join(format!("{}.txt", hash(id)));
-        match provider {
-            "codex" => {
-                configure_codex_shell(&mut cmd);
-                cmd.args([
-                    "exec",
-                    "--json",
-                    "--model",
-                    model,
-                    "--sandbox",
-                    "workspace-write",
-                    "--ignore-user-config",
-                    "--ephemeral",
-                    "--output-last-message",
-                    path_string(&message_path)?,
-                    "-c",
-                    "approval_policy=\"never\"",
-                    "-c",
-                    "windows.sandbox=\"unelevated\"",
-                    "-c",
-                    &format!("model_reasoning_effort=\"{effort}\""),
-                    &prompt,
-                ]);
-            }
-            "claude" => {
-                cmd.args([
-                    "--print",
-                    "--output-format",
-                    "stream-json",
-                    "--verbose",
-                    "--model",
-                    model,
-                    "--effort",
-                    effort,
-                    "--session-id",
-                    &session,
-                    "--restricted",
-                    "--safe-mode",
-                    "--no-session-persistence",
-                    "--disable-slash-commands",
-                    "--permission-mode",
-                    "acceptEdits",
-                    "--permission-prompts",
-                    "none",
-                    "--allowedTools",
-                    "Read",
-                    "Write",
-                    "Edit",
-                    "--tools",
-                    "Read,Write,Edit",
-                    "--strict-mcp-config",
-                    "--mcp-config",
-                    "{\"mcpServers\":{}}",
-                    "--settings",
-                    "{\"disableAllHooks\":true}",
-                    "--",
-                    &prompt,
-                ]);
-            }
-            _ => return Err(HostError("unsupported_provider")),
-        }
+        let mut cmd = workers::command(
+            provider,
+            executable,
+            model,
+            effort,
+            &session,
+            &message_path,
+            &dir,
+            &prompt,
+        )?;
         for (key, _) in std::env::vars_os() {
             let name = key.to_string_lossy().to_ascii_uppercase();
             if [
@@ -833,12 +692,17 @@ impl LocalHost {
             Err(error) => return Err(error),
         };
         let (verified, resolved_model) = verified_receipt(provider, &output, &session);
+        if !message_path.exists() {
+            if let Some(message) = workers::message(provider, &output) {
+                fs::write(&message_path, message).map_err(|_| HostError("io_error"))?;
+            }
+        }
         // Private context pointers let the coordinator inspect a failed attempt
         // and prepare a repair. Browser summaries never expose these raw logs.
         let stream_path = messages.join(format!("{}.jsonl", hash(id)));
         fs::write(&stream_path, &output).map_err(|_| HostError("io_error"))?;
         Ok(
-            json!({"status":if ok && verified {"completed"} else {"failed"},"execution_id":id,"completion_verified":ok && verified,"requested_model":model,"resolved_model":resolved_model,"message_ref":if message_path.exists(){Some(message_path)}else{None},"stream_ref":stream_path,"reason":if !ok {Some(stderr_hint.unwrap_or("provider_exit_failed"))} else if !verified {Some("provider_receipt_invalid")} else {None}}),
+            json!({"status":if ok && verified {"completed"} else {"failed"},"execution_id":id,"completion_verified":ok && verified,"requested_model":model,"resolved_model":resolved_model,"message_ref":if message_path.exists(){Some(message_path)}else{None},"stream_ref":stream_path,"reason":if !ok {Some(stderr_hint.or_else(|| failure_hint(&output)).unwrap_or("provider_exit_failed"))} else if !verified {Some("provider_receipt_invalid")} else {None}}),
         )
     }
     fn inspect(&self, p: &Value) -> Result<Value, HostError> {
