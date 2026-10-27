@@ -1380,7 +1380,9 @@ fn validate_pool(value: &Value) -> Result<(), WorkflowError> {
 }
 fn review_exclusions(s: &State, index: usize) -> BTreeSet<String> {
     let task = &s.tasks[index];
-    if task.node["role"] != "review" {
+    if task.node["role"] != "review"
+        || s.request["runtime"]["backend"]["session_isolation"] == "fresh_per_task"
+    {
         return BTreeSet::new();
     }
     let deps = strings(task.node.get("depends_on"), 128).unwrap_or_default();
@@ -1697,5 +1699,114 @@ fn lock_file(file: &fs::File) -> Result<(), WorkflowError> {
         Ok(())
     } else {
         Err(err("storage_error"))
+    }
+}
+
+#[cfg(test)]
+mod review_session_tests {
+    use super::*;
+
+    fn observe(
+        workflow: &Workflow,
+        run: &str,
+        state: &Value,
+        kind: &str,
+        task: &str,
+        mut result: Value,
+    ) -> Value {
+        let action = state["actions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|a| a["kind"] == kind && a["task_id"] == task)
+            .unwrap();
+        if kind == "launch" {
+            result["execution_id"] = action["id"].clone();
+        }
+        workflow.observe(run, &json!({"action_id":action["id"],"event_id":format!("test:{}",action["id"].as_str().unwrap()),"result":result})).unwrap()
+    }
+
+    fn check_review(isolation: Option<&str>) {
+        let dir = tempfile::tempdir().unwrap();
+        let workflow = Workflow::new(dir.path().to_path_buf());
+        let request = json!({"workspace":"workspace","pool":[{"id":"a","description":"worker","capabilities":[],"available":true}],"plan":{"nodes":[{"id":"build","objective":"build","role":"implementation"},{"id":"review","objective":"review","role":"review","depends_on":["build"]}]}});
+        let mut state = workflow.start(&request).unwrap();
+        let run = state["run_id"].as_str().unwrap().to_owned();
+        if let Some(isolation) = isolation {
+            let mut stored = workflow.load(&run).unwrap();
+            stored.request["runtime"]["backend"]["session_isolation"] = json!(isolation);
+            workflow.save(&mut stored).unwrap();
+        }
+        state = observe(
+            &workflow,
+            &run,
+            &state,
+            "route",
+            "build",
+            json!({"status":"ready","candidate_id":"a"}),
+        );
+        state = observe(
+            &workflow,
+            &run,
+            &state,
+            "prepare",
+            "build",
+            json!({"status":"prepared","workspace":"w","branch":"b","integration_workspace":"i","integration_branch":"ib"}),
+        );
+        state = observe(
+            &workflow,
+            &run,
+            &state,
+            "launch",
+            "build",
+            json!({"status":"completed","completion_verified":true}),
+        );
+        state = observe(
+            &workflow,
+            &run,
+            &state,
+            "verify",
+            "build",
+            json!({"status":"passed","evidence":[]}),
+        );
+        state = observe(
+            &workflow,
+            &run,
+            &state,
+            "integrate",
+            "build",
+            json!({"status":"integrated"}),
+        );
+        let route = state["actions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|a| a["kind"] == "route" && a["task_id"] == "review")
+            .unwrap();
+        let result = workflow.observe(&run, &json!({"action_id":route["id"],"event_id":"review-choice","result":{"status":"ready","candidate_id":"a"}}));
+        if isolation == Some("fresh_per_task") {
+            assert_eq!(
+                route["payload"]["route_input"]["policy"]["excluded_candidate_ids"],
+                json!([])
+            );
+            assert!(result.is_ok());
+        } else {
+            assert_eq!(
+                route["payload"]["route_input"]["policy"]["excluded_candidate_ids"],
+                json!(["a"])
+            );
+            assert_eq!(result.unwrap_err().code, "invalid_receipt");
+        }
+    }
+
+    #[test]
+    fn fresh_task_session_allows_independent_review_with_same_profile() {
+        check_review(Some("fresh_per_task"));
+    }
+
+    #[test]
+    fn unknown_or_unattested_hosts_still_exclude_producer() {
+        check_review(None);
+        check_review(Some("unknown"));
     }
 }
