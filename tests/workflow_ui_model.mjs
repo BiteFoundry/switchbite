@@ -1,6 +1,16 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { artifactOrder, graphModel, outputChunks, streamsFor, waitReason, usableToolIds, failureText, feedbackView, dependencyChoices } from '../assets/workflow-ui/model.js';
+import { artifactOrder, graphModel, outputChunks, streamsFor, waitReason, usableToolIds, failureText, feedbackView, dependencyChoices, scaffoldFor, updateDraftEdge } from '../assets/workflow-ui/model.js';
+
+test('draft scaffold preserves typed and empty roles and wire edits keep an acyclic copy', () => {
+  const workers=[{id:'a',objective:'직접 입력한 역할',depends_on:[],status:'draft'},{id:'b',objective:'',depends_on:[],status:'draft'}];
+  const linked=updateDraftEdge(workers,'a','b','add');
+  assert.deepEqual(workers[1].depends_on,[]);
+  assert.deepEqual(scaffoldFor(linked),{nodes:[{id:'a',objective:'직접 입력한 역할',depends_on:[]},{id:'b',objective:'',depends_on:['a']}]});
+  assert.throws(()=>updateDraftEdge(linked,'b','a','add'),/순환/);
+  assert.deepEqual(updateDraftEdge(linked,'a','b','remove')[1].depends_on,[]);
+  assert.equal(graphModel(workers).nodes[0].status,'draft');
+});
 
 test('dependency picker excludes itself and transitive followers but offers parallel and upstream tasks', () => {
   const tasks=[{id:'a',depends_on:[]},{id:'b',depends_on:['a']},{id:'c',depends_on:['b']},{id:'parallel',depends_on:[]}];

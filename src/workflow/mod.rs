@@ -102,6 +102,8 @@ struct State {
     #[serde(default)]
     dependency_overrides: BTreeMap<String, Vec<String>>,
     #[serde(default)]
+    role_hints: BTreeMap<String, String>,
+    #[serde(default)]
     superseded_actions: BTreeSet<String>,
     #[serde(default)]
     interrupt_tasks: BTreeSet<String>,
@@ -197,6 +199,14 @@ impl Workflow {
         result["feedback"] = json!(s.feedback);
         result["plan_revision"] = json!(s.plan_revision);
         result["dependency_overrides"] = json!(s.dependency_overrides);
+        result["role_hints"] = json!(s.role_hints);
+        result["draft_task_ids"] = json!(
+            s.tasks
+                .iter()
+                .filter(|t| t.state == "draft")
+                .map(|t| t.node["id"].clone())
+                .collect::<Vec<_>>()
+        );
         result["editable_task_ids"] = json!(
             s.tasks
                 .iter()
@@ -226,6 +236,7 @@ impl Workflow {
                 "max_parallel",
                 "repair_rounds",
                 "review_plan",
+                "scaffold",
                 "checks",
                 "host",
             ]
@@ -291,6 +302,12 @@ impl Workflow {
             }
             let _ = default;
         }
+        if let Some(scaffold) = request.get("scaffold") {
+            validate_scaffold(scaffold)?;
+            if request.get("plan").is_some() {
+                return Err(err("invalid_request"));
+            }
+        }
         let tasks = if let Some(plan) = request.get("plan") {
             validate_plan(plan)?
         } else {
@@ -323,6 +340,20 @@ impl Workflow {
             feedback: vec![],
             plan_revision: 0,
             dependency_overrides: BTreeMap::new(),
+            role_hints: request["scaffold"]["nodes"]
+                .as_array()
+                .map(|nodes| {
+                    nodes
+                        .iter()
+                        .filter_map(|n| {
+                            Some((
+                                n["id"].as_str()?.to_owned(),
+                                n["objective"].as_str()?.to_owned(),
+                            ))
+                        })
+                        .collect()
+                })
+                .unwrap_or_default(),
             superseded_actions: BTreeSet::new(),
             interrupt_tasks: BTreeSet::new(),
             sequence: 0,
@@ -577,6 +608,27 @@ impl Workflow {
         task_id: &str,
         dependencies: Option<&Value>,
     ) -> Result<Value, WorkflowError> {
+        self.update_dependencies(run_id, task_id, dependencies, None)
+    }
+    pub fn change_dependency(
+        &self,
+        run_id: &str,
+        task_id: &str,
+        operation: &str,
+        predecessor: &str,
+    ) -> Result<Value, WorkflowError> {
+        if !["add", "remove"].contains(&operation) || !id(predecessor) {
+            return Err(err("invalid_request"));
+        }
+        self.update_dependencies(run_id, task_id, None, Some((operation, predecessor)))
+    }
+    fn update_dependencies(
+        &self,
+        run_id: &str,
+        task_id: &str,
+        dependencies: Option<&Value>,
+        edge: Option<(&str, &str)>,
+    ) -> Result<Value, WorkflowError> {
         let _g = MUTATION.lock().map_err(|_| err("storage_error"))?;
         let _lock = self.lock()?;
         let mut s = self.load(run_id)?;
@@ -588,7 +640,18 @@ impl Workflow {
             .iter()
             .position(|t| t.node["id"] == task_id)
             .ok_or(err("task_not_found"))?;
-        let deps = dependencies.map(|v| strings(Some(v), 128)).transpose()?;
+        let deps = if let Some((op, predecessor)) = edge {
+            let mut deps = strings(s.tasks[i].node.get("depends_on"), 128)?;
+            if op == "add" && !deps.iter().any(|d| d == predecessor) {
+                deps.push(predecessor.to_owned());
+            }
+            if op == "remove" {
+                deps.retain(|d| d != predecessor);
+            }
+            Some(deps)
+        } else {
+            dependencies.map(|v| strings(Some(v), 128)).transpose()?
+        };
         if deps
             .as_ref()
             .is_some_and(|d| d.len() != d.iter().collect::<BTreeSet<_>>().len())
@@ -616,6 +679,134 @@ impl Workflow {
             s.dependency_overrides.remove(task_id);
             s.feedback.push(json!({"id":report_id,"source":"user","task_id":task_id,"kind":"request_change","message":"이 작업의 선행 작업 직접 지정을 해제했습니다. 현재 목표와 작업 단위에 맞게 의존 관계를 다시 정해 주세요.","status":"pending"}));
         }
+        supersede_role_assignment(&mut s);
+        self.schedule(&mut s);
+        self.save(&mut s)?;
+        Ok(Self::response(&s))
+    }
+
+    pub fn workers(
+        &self,
+        run_id: &str,
+        operation: &str,
+        task_id: Option<&str>,
+        objective: Option<&str>,
+    ) -> Result<Value, WorkflowError> {
+        let _g = MUTATION.lock().map_err(|_| err("storage_error"))?;
+        let _lock = self.lock()?;
+        let mut s = self.load(run_id)?;
+        if !["running", "paused"].contains(&s.status.as_str()) {
+            return Err(err("invalid_state"));
+        }
+        match operation {
+            "remove" => {
+                let name = task_id.ok_or(err("invalid_request"))?;
+                let i = s
+                    .tasks
+                    .iter()
+                    .position(|t| t.node["id"] == name)
+                    .ok_or(err("task_not_found"))?;
+                if s.tasks[i].state != "draft" || !mutable_task(&s, &s.tasks[i]) {
+                    return Err(err("task_already_started"));
+                }
+                let successors: Vec<usize> = s
+                    .tasks
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, t)| {
+                        strings(t.node.get("depends_on"), 128)
+                            .unwrap_or_default()
+                            .iter()
+                            .any(|d| d == name)
+                    })
+                    .map(|(i, _)| i)
+                    .collect();
+                if successors.iter().any(|&i| !mutable_task(&s, &s.tasks[i])) {
+                    return Err(err("task_already_started"));
+                }
+                let mut nodes: Vec<Value> = s
+                    .tasks
+                    .iter()
+                    .filter(|t| t.node["id"] != name)
+                    .map(|t| t.node.clone())
+                    .collect();
+                for node in &mut nodes {
+                    if let Some(deps) = node["depends_on"].as_array_mut() {
+                        deps.retain(|d| d != name);
+                    }
+                }
+                s.dependency_overrides.remove(name);
+                for deps in s.dependency_overrides.values_mut() {
+                    deps.retain(|d| d != name);
+                }
+                apply_remaining_plan(&mut s, &json!({"nodes":nodes}))?;
+                s.role_hints.remove(name);
+            }
+            "add" | "edit" => {
+                let role = objective.unwrap_or("");
+                if role.len() > 24000 {
+                    return Err(err("invalid_request"));
+                }
+                let name = if operation == "add" {
+                    if s.tasks.len() >= 128 {
+                        return Err(err("invalid_request"));
+                    }
+                    let mut n = s.revision + 1;
+                    while s
+                        .tasks
+                        .iter()
+                        .any(|t| t.node["id"] == format!("worker-{n}"))
+                    {
+                        n += 1;
+                    }
+                    let name = format!("worker-{n}");
+                    let mut t = validate_plan(&json!({"nodes":[{"id":name,"objective":"Unassigned worker","depends_on":[]}]}))?.remove(0);
+                    t.node["objective"] = json!(role);
+                    t.state = "draft".into();
+                    s.tasks.push(t);
+                    name
+                } else {
+                    let name = task_id
+                        .filter(|id| !id.is_empty())
+                        .ok_or(err("invalid_request"))?;
+                    let i = s
+                        .tasks
+                        .iter()
+                        .position(|t| t.node["id"] == name)
+                        .ok_or(err("task_not_found"))?;
+                    if !mutable_task(&s, &s.tasks[i]) {
+                        return Err(err("task_already_started"));
+                    }
+                    let obsolete: Vec<String> = s
+                        .actions
+                        .iter()
+                        .filter(|a| a["task_id"] == name)
+                        .filter_map(|a| a["id"].as_str().map(str::to_owned))
+                        .collect();
+                    s.superseded_actions.extend(obsolete);
+                    s.actions.retain(|a| a["task_id"] != name);
+                    s.tasks[i].node["objective"] = json!(role);
+                    s.tasks[i].state = "draft".into();
+                    name.to_owned()
+                };
+                s.role_hints.insert(name, role.to_owned());
+            }
+            "assign_roles" => {
+                if s.tasks.is_empty() || s.feedback.len() >= 4096 {
+                    return Err(err("invalid_state"));
+                }
+                if s.status == "paused" {
+                    s.status = "running".into();
+                    s.request["review_plan"] = json!(true);
+                }
+                let rid = format!("assign-roles:{}", s.revision + 1);
+                s.feedback.push(json!({"id":rid,"source":"user","kind":"assign_roles","message":"Fill task roles and definitions, preserving all current IDs, dependencies and user role hints.","status":"pending"}));
+            }
+            _ => return Err(err("invalid_request")),
+        }
+        if operation != "assign_roles" {
+            supersede_role_assignment(&mut s);
+        }
         self.schedule(&mut s);
         self.save(&mut s)?;
         Ok(Self::response(&s))
@@ -628,6 +819,18 @@ impl Workflow {
         match action {
             "pause" if s.status == "running" => s.status = "paused".into(),
             "resume" if s.status == "paused" => {
+                if s.tasks.iter().any(|t| t.state == "draft")
+                    && !s
+                        .feedback
+                        .iter()
+                        .any(|f| f["kind"] == "assign_roles" && f["status"] == "pending")
+                {
+                    if s.feedback.len() >= 4096 {
+                        return Err(err("feedback_limit"));
+                    }
+                    let rid = format!("assign-roles:{}", s.revision + 1);
+                    s.feedback.push(json!({"id":rid,"source":"user","kind":"assign_roles","message":"Fill task roles and definitions, preserving all current IDs, dependencies and user role hints.","status":"pending"}));
+                }
                 s.request["review_plan"] = json!(false);
                 s.status = "running".into();
                 self.schedule(&mut s)
@@ -730,8 +933,20 @@ impl Workflow {
             .and_then(|id| s.tasks.iter().position(|t| t.node["id"] == id));
         match kind {
             "plan" => {
-                s.tasks = validate_plan(result.get("plan").ok_or(err("invalid_receipt"))?)
-                    .map_err(|_| err("invalid_receipt"))?;
+                let mut plan = result.get("plan").ok_or(err("invalid_receipt"))?.clone();
+                if let Some(scaffold) = s.request.get("scaffold") {
+                    constrain_plan(&mut plan, scaffold)?;
+                    for node in plan["nodes"].as_array().ok_or(err("invalid_receipt"))? {
+                        if node["role"].as_str().is_none()
+                            || !node["acceptance"].is_array()
+                            || !node["outputs"].is_array()
+                            || !node["write_paths"].is_array()
+                        {
+                            return Err(err("invalid_receipt"));
+                        }
+                    }
+                }
+                s.tasks = validate_plan(&plan).map_err(|_| err("invalid_receipt"))?;
                 if s.request["review_plan"] == true {
                     s.status = "paused".into();
                 }
@@ -758,10 +973,46 @@ impl Workflow {
                     }
                 }
                 let changes = if result["plan"].is_null() {
+                    if a["payload"]["assign_roles"] == true {
+                        return Err(err("invalid_receipt"));
+                    }
                     json!({"added":[],"changed":[],"removed":[]})
                 } else {
-                    apply_remaining_plan(&mut s, &result["plan"])?
+                    let mut plan = result["plan"].clone();
+                    if a["payload"]["assign_roles"] == true {
+                        let nodes: Vec<Value> = s.tasks.iter().map(|t| json!({"id":t.node["id"],"objective":s.role_hints.get(t.node["id"].as_str().unwrap_or("")).cloned().unwrap_or_default(),"depends_on":t.node["depends_on"]})).collect();
+                        constrain_plan(&mut plan, &json!({"nodes":nodes}))?;
+                        for node in plan["nodes"].as_array().ok_or(err("invalid_receipt"))? {
+                            let is_draft = s
+                                .tasks
+                                .iter()
+                                .any(|t| t.state == "draft" && t.node["id"] == node["id"]);
+                            if is_draft
+                                && (node["objective"]
+                                    .as_str()
+                                    .is_none_or(|v| v.trim().is_empty())
+                                    || node["role"].as_str().is_none()
+                                    || !node["acceptance"].is_array()
+                                    || !node["outputs"].is_array()
+                                    || !node["write_paths"].is_array())
+                            {
+                                return Err(err("invalid_receipt"));
+                            }
+                        }
+                    }
+                    let changes = apply_remaining_plan(&mut s, &plan)?;
+                    if a["payload"]["assign_roles"] == true {
+                        for task in &mut s.tasks {
+                            if task.state == "draft" {
+                                task.state = "pending".into();
+                            }
+                        }
+                    }
+                    changes
                 };
+                if a["payload"]["assign_roles"] == true && s.request["review_plan"] == true {
+                    s.status = "paused".into();
+                }
                 for name in interruptions {
                     let current = s
                         .tasks
@@ -1372,7 +1623,12 @@ impl Workflow {
         reconcile_candidates(s);
         if s.tasks.is_empty() {
             if s.actions.is_empty() {
-                self.action(s, "plan", None, json!({"goal":s.request["goal"]}));
+                self.action(
+                    s,
+                    "plan",
+                    None,
+                    json!({"goal":s.request["goal"],"scaffold":s.request["scaffold"]}),
+                );
             }
             return;
         }
@@ -1393,7 +1649,8 @@ impl Workflow {
                 .filter(|t| mutable_task(s, t))
                 .map(|t| t.node["id"].clone())
                 .collect();
-            self.action(s, "replan", None, json!({"goal":s.request["goal"],"plan":{"nodes":nodes},"tasks":tasks,"mutable_task_ids":mutable,"feedback":pending,"feedback_ids":ids}));
+            let assign_roles = pending.iter().any(|f| f["kind"] == "assign_roles");
+            self.action(s, "replan", None, json!({"goal":s.request["goal"],"plan":{"nodes":nodes},"tasks":tasks,"mutable_task_ids":mutable,"feedback":pending,"feedback_ids":ids,"assign_roles":assign_roles,"role_hints":s.role_hints}));
         }
         let held = feedback_hold(s);
         for i in 0..s.tasks.len() {
@@ -2160,6 +2417,21 @@ fn feedback_hold(s: &State) -> Option<Option<BTreeSet<String>>> {
     Some(Some(affected))
 }
 
+fn supersede_role_assignment(s: &mut State) {
+    let ids: Vec<String> = s
+        .actions
+        .iter()
+        .filter(|a| a["kind"] == "replan" && a["payload"]["assign_roles"] == true)
+        .filter_map(|a| a["id"].as_str().map(str::to_owned))
+        .collect();
+    s.actions.retain(|a| {
+        !a["id"]
+            .as_str()
+            .is_some_and(|id| ids.iter().any(|old| old == id))
+    });
+    s.superseded_actions.extend(ids);
+}
+
 fn enforce_dependencies(s: &State, plan: &Value) -> Result<Value, WorkflowError> {
     let mut plan = plan.clone();
     let nodes = plan["nodes"].as_array_mut().ok_or(err("invalid_receipt"))?;
@@ -2170,15 +2442,97 @@ fn enforce_dependencies(s: &State, plan: &Value) -> Result<Value, WorkflowError>
             .ok_or(err("invalid_receipt"))?;
         node["depends_on"] = json!(deps);
     }
+    for (task, hint) in &s.role_hints {
+        if !hint.trim().is_empty()
+            && s.tasks.iter().any(|existing| existing.node["id"] == *task)
+            && let Some(node) = nodes.iter_mut().find(|node| node["id"] == *task)
+        {
+            node["objective"] = json!(hint);
+        }
+    }
     Ok(plan)
 }
 
+fn validate_scaffold(scaffold: &Value) -> Result<(), WorkflowError> {
+    let obj = scaffold.as_object().ok_or(err("invalid_request"))?;
+    if obj.keys().any(|k| k != "nodes") {
+        return Err(err("invalid_request"));
+    }
+    let nodes = scaffold["nodes"].as_array().ok_or(err("invalid_request"))?;
+    let mut plan = scaffold.clone();
+    for (original, node) in nodes.iter().zip(plan["nodes"].as_array_mut().unwrap()) {
+        if original.as_object().is_none_or(|o| {
+            o.keys()
+                .any(|k| !["id", "objective", "depends_on"].contains(&k.as_str()))
+        }) || original["objective"]
+            .as_str()
+            .is_none_or(|v| v.len() > 24000)
+            || !original["depends_on"].is_array()
+        {
+            return Err(err("invalid_request"));
+        }
+        node["objective"] = json!("Scaffold validation");
+    }
+    validate_plan(&plan).map(|_| ())
+}
+
+fn constrain_plan(plan: &mut Value, scaffold: &Value) -> Result<(), WorkflowError> {
+    let expected = scaffold["nodes"].as_array().ok_or(err("invalid_receipt"))?;
+    let nodes = plan["nodes"].as_array_mut().ok_or(err("invalid_receipt"))?;
+    if nodes.len() != expected.len() {
+        return Err(err("invalid_receipt"));
+    }
+    for source in expected {
+        let matching: Vec<_> = nodes
+            .iter_mut()
+            .filter(|n| n["id"] == source["id"])
+            .collect();
+        if matching.len() != 1 {
+            return Err(err("invalid_receipt"));
+        }
+        let node = matching.into_iter().next().unwrap();
+        if source["depends_on"].is_null() {
+            node.as_object_mut()
+                .ok_or(err("invalid_receipt"))?
+                .remove("depends_on");
+        } else {
+            node["depends_on"] = source["depends_on"].clone();
+        }
+        if source["objective"]
+            .as_str()
+            .is_some_and(|s| !s.trim().is_empty())
+        {
+            node["objective"] = source["objective"].clone();
+        }
+    }
+    Ok(())
+}
+
 fn apply_remaining_plan(s: &mut State, plan: &Value) -> Result<Value, WorkflowError> {
-    let plan = enforce_dependencies(s, plan)?;
+    let mut plan = enforce_dependencies(s, plan)?;
+    let mut blank = BTreeSet::new();
+    for node in plan["nodes"].as_array_mut().ok_or(err("invalid_receipt"))? {
+        if node["objective"]
+            .as_str()
+            .is_some_and(|o| o.trim().is_empty())
+            && s.tasks
+                .iter()
+                .any(|t| t.state == "draft" && t.node["id"] == node["id"])
+        {
+            blank.insert(node["id"].as_str().unwrap_or("").to_owned());
+            node["objective"] = json!("Unassigned worker");
+        }
+    }
     let mut added = Vec::new();
     let mut changed = Vec::new();
     let mut removed = Vec::new();
-    let validated = validate_plan(&plan).map_err(|_| err("invalid_receipt"))?;
+    let mut validated = validate_plan(&plan).map_err(|_| err("invalid_receipt"))?;
+    for task in &mut validated {
+        if blank.contains(task.node["id"].as_str().unwrap_or("")) {
+            task.node["objective"] = json!("");
+            task.state = "draft".into();
+        }
+    }
     for old in &s.tasks {
         let new = validated.iter().find(|t| t.node["id"] == old.node["id"]);
         let protected = !mutable_task(s, old);
@@ -2221,6 +2575,9 @@ fn apply_remaining_plan(s: &mut State, plan: &Value) -> Result<Value, WorkflowEr
                 Some(t) if t.node == new.node => t.clone(),
                 Some(t) => {
                     let mut revised = new;
+                    if t.state == "draft" {
+                        revised.state = "draft".into();
+                    }
                     if revised.node.get("context_refs").is_none()
                         && let Some(refs) = t.node.get("context_refs")
                     {
@@ -2256,6 +2613,7 @@ fn mutable_task(s: &State, task: &Task) -> bool {
     !claimed
         && [
             "pending",
+            "draft",
             "routing",
             "routed",
             "held",
@@ -2452,6 +2810,209 @@ fn lock_file(file: &fs::File) -> Result<(), WorkflowError> {
 
 #[cfg(test)]
 mod review_session_tests {
+
+    #[test]
+    fn canvas_mutations_supersede_inflight_role_assignment() {
+        use super::*;
+        let dir = tempfile::tempdir().unwrap();
+        let workflow = Workflow::new(dir.path().to_path_buf());
+        let state = workflow.start(&json!({"workspace":"workspace","goal":"test","pool":[],"review_plan":true,"plan":{"nodes":[{"id":"a","objective":"original"},{"id":"b","objective":"second"}]}})).unwrap();
+        let run = state["run_id"].as_str().unwrap();
+        workflow
+            .workers(run, "edit", Some("a"), Some("first role"))
+            .unwrap();
+        let state = workflow.control(run, "resume").unwrap();
+        let old = state["actions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|a| a["kind"] == "replan")
+            .unwrap()["id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        assert!(workflow.claim(run, &old).unwrap());
+        let state = workflow
+            .workers(run, "edit", Some("a"), Some("new role"))
+            .unwrap();
+        let fresh = state["actions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|a| a["kind"] == "replan")
+            .unwrap();
+        assert_ne!(fresh["id"], old);
+        assert_eq!(fresh["payload"]["role_hints"]["a"], "new role");
+        let fresh_id = fresh["id"].as_str().unwrap().to_owned();
+        let state = workflow.change_dependency(run, "a", "add", "b").unwrap();
+        let rewired = state["actions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|a| a["kind"] == "replan")
+            .unwrap();
+        assert_ne!(rewired["id"], fresh_id);
+        assert_eq!(
+            rewired["payload"]["tasks"][0]["task"]["depends_on"],
+            json!(["b"])
+        );
+        let state = workflow.observe(run, &json!({"event_id":"stale-fill","action_id":old,"result":{"plan":{"nodes":[]},"reply":"obsolete"}})).unwrap();
+        assert_eq!(state["role_hints"]["a"], "new role");
+        assert_eq!(state["draft_task_ids"], json!(["a"]));
+        assert!(
+            state["feedback"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|f| f["kind"] == "assign_roles" && f["status"] == "pending")
+        );
+    }
+
+    #[test]
+    fn ordinary_replan_does_not_activate_draft() {
+        use super::*;
+        let dir = tempfile::tempdir().unwrap();
+        let workflow = Workflow::new(dir.path().to_path_buf());
+        let state = workflow.start(&json!({"workspace":"workspace","goal":"test","pool":[],"plan":{"nodes":[{"id":"a","objective":"original"}]}})).unwrap();
+        let run = state["run_id"].as_str().unwrap();
+        workflow
+            .workers(run, "edit", Some("a"), Some("user role"))
+            .unwrap();
+        let state = workflow.report(run, &json!({"id":"feedback","source":"user","kind":"request_change","message":"Revise the plan"})).unwrap();
+        let action = state["actions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|a| a["kind"] == "replan")
+            .unwrap();
+        let state = workflow.observe(run, &json!({"event_id":"ordinary","action_id":action["id"],"result":{"reply":"Revised","interrupt_tasks":[],"plan":{"nodes":[{"id":"a","objective":"changed","role":"implementation","acceptance":[],"outputs":[],"write_paths":[]}]}}})).unwrap();
+        assert_eq!(state["draft_task_ids"], json!(["a"]));
+        assert!(
+            !state["actions"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|a| a["task_id"] == "a")
+        );
+    }
+
+    #[test]
+    fn resume_fills_draft_then_continues_without_another_pause() {
+        use super::*;
+        let dir = tempfile::tempdir().unwrap();
+        let workflow = Workflow::new(dir.path().to_path_buf());
+        let state = workflow.start(&json!({"workspace":"workspace","goal":"test","pool":[],"review_plan":true,"plan":{"nodes":[{"id":"a","objective":"original"}]}})).unwrap();
+        let run = state["run_id"].as_str().unwrap();
+        workflow
+            .workers(run, "edit", Some("a"), Some("User role"))
+            .unwrap();
+        let state = workflow.control(run, "resume").unwrap();
+        assert_eq!(state["status"], "running");
+        let action = state["actions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|a| a["kind"] == "replan")
+            .unwrap();
+        assert_eq!(action["payload"]["assign_roles"], true);
+        let state = workflow.observe(run, &json!({"event_id":"fill-on-resume","action_id":action["id"],"result":{"reply":"Ready","interrupt_tasks":[],"plan":{"nodes":[{"id":"a","objective":"rewritten","depends_on":[],"role":"implementation","acceptance":[],"outputs":[],"write_paths":[]}]}}})).unwrap();
+        assert_eq!(state["status"], "running");
+        assert_eq!(state["draft_task_ids"], json!([]));
+        assert_eq!(state["tasks"][0]["task"]["objective"], "User role");
+        assert!(
+            state["actions"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|a| a["task_id"] == "a" && a["kind"] == "route")
+        );
+    }
+
+    #[test]
+    fn canvas_scaffold_and_worker_mutations_preserve_user_intent() {
+        use super::*;
+        let dir = tempfile::tempdir().unwrap();
+        let workflow = Workflow::new(dir.path().to_path_buf());
+        let scaffold = json!({"nodes":[{"id":"a","objective":"My exact role","depends_on":[]},{"id":"b","objective":"","depends_on":["a"]}]});
+        let state = workflow.start(&json!({"workspace":"workspace","goal":"test","pool":[],"review_plan":true,"scaffold":scaffold})).unwrap();
+        let run = state["run_id"].as_str().unwrap();
+        let plan_action = state["actions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|a| a["kind"] == "plan")
+            .unwrap();
+        let state = workflow.observe(run, &json!({"event_id":"plan","action_id":plan_action["id"],"result":{"plan":{"nodes":[{"id":"a","objective":"replaced","depends_on":["b"],"role":"implementation","acceptance":[],"outputs":[],"write_paths":[]},{"id":"b","objective":"Generated","depends_on":[],"role":"review","acceptance":[],"outputs":[],"write_paths":[]}]}}})).unwrap();
+        assert_eq!(state["status"], "paused");
+        assert_eq!(state["tasks"][0]["task"]["objective"], "My exact role");
+        assert_eq!(state["tasks"][1]["task"]["depends_on"], json!(["a"]));
+        let state = workflow.workers(run, "add", None, None).unwrap();
+        let draft = state["draft_task_ids"][0].as_str().unwrap().to_owned();
+        assert!(
+            !state["actions"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|a| a["task_id"] == draft)
+        );
+        let state = workflow
+            .workers(run, "edit", Some(&draft), Some("Custom role"))
+            .unwrap();
+        assert_eq!(state["role_hints"][&draft], "Custom role");
+        let state = workflow.change_dependency(run, &draft, "add", "a").unwrap();
+        assert_eq!(state["draft_task_ids"], json!([draft]));
+        let state = workflow.change_dependency(run, &draft, "add", "b").unwrap();
+        let added = state["tasks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|t| t["id"] == draft)
+            .unwrap();
+        assert_eq!(added["task"]["depends_on"], json!(["a", "b"]));
+        let state = workflow.workers(run, "assign_roles", None, None).unwrap();
+        let replan = state["actions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|a| a["kind"] == "replan")
+            .unwrap();
+        let state = workflow.observe(run, &json!({"event_id":"fill","action_id":replan["id"],"result":{"reply":"Filled","interrupt_tasks":[],"plan":{"nodes":[{"id":"a","objective":"wrong","depends_on":[]},{"id":"b","objective":"Generated","depends_on":[]},{"id":draft,"objective":"wrong","depends_on":[],"role":"implementation","acceptance":[],"outputs":[],"write_paths":[]}]}}})).unwrap();
+        let task = state["tasks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|t| t["id"] == draft)
+            .unwrap();
+        assert_eq!(task["task"]["objective"], "Custom role");
+        assert_eq!(task["task"]["depends_on"], json!(["a", "b"]));
+        assert_eq!(state["status"], "paused");
+        assert_eq!(state["draft_task_ids"], json!([]));
+    }
+
+    #[test]
+    fn cyclic_canvas_scaffold_is_rejected() {
+        use super::*;
+        let dir = tempfile::tempdir().unwrap();
+        let workflow = Workflow::new(dir.path().to_path_buf());
+        assert!(workflow.start(&json!({"workspace":"workspace","goal":"test","pool":[],"scaffold":{"nodes":[{"id":"a","objective":"","depends_on":["b"]},{"id":"b","objective":"","depends_on":["a"]}]}})).is_err());
+    }
+
+    #[test]
+    fn remove_draft_cleans_incident_edges() {
+        use super::*;
+        let dir = tempfile::tempdir().unwrap();
+        let workflow = Workflow::new(dir.path().to_path_buf());
+        let state = workflow.start(&json!({"workspace":"workspace","goal":"test","pool":[],"review_plan":true,"plan":{"nodes":[{"id":"a","objective":"existing"}]}})).unwrap();
+        let run = state["run_id"].as_str().unwrap();
+        let state = workflow.workers(run, "add", None, None).unwrap();
+        let draft = state["draft_task_ids"][0].as_str().unwrap().to_owned();
+        workflow.change_dependency(run, "a", "add", &draft).unwrap();
+        assert!(workflow.change_dependency(run, &draft, "add", "a").is_err());
+        let state = workflow.workers(run, "remove", Some(&draft), None).unwrap();
+        assert_eq!(state["tasks"][0]["task"]["depends_on"], json!([]));
+        assert_eq!(state["dependency_overrides"]["a"], json!([]));
+        assert_eq!(state["draft_task_ids"], json!([]));
+    }
 
     #[test]
     fn review_launch_includes_the_original_goal() {
@@ -2660,6 +3221,21 @@ mod live_feedback_tests {
             .find(|a| a["kind"] == kind)
             .unwrap()
             .clone()
+    }
+    #[test]
+    fn ordinary_feedback_replan_preserves_typed_role() {
+        let (_dir, workflow, run, report) = setup();
+        let mut stored = workflow.load(&run).unwrap();
+        stored.tasks[2].node["objective"] = json!("Exact user role");
+        stored
+            .role_hints
+            .insert("later".into(), "Exact user role".into());
+        workflow.save(&mut stored).unwrap();
+        let state = workflow.report(&run, &report).unwrap();
+        let replan = action(&state, "replan");
+        let plan = json!({"nodes":[{"id":"done","objective":"finished"},{"id":"running","objective":"active"},{"id":"later","objective":"coordinator rewrite","depends_on":["done"]}]});
+        let state = workflow.observe(&run, &json!({"event_id":"ordinary-replan","action_id":replan["id"],"result":{"plan":plan,"reply":"Updated","interrupt_tasks":[]}})).unwrap();
+        assert_eq!(state["tasks"][2]["task"]["objective"], "Exact user role");
     }
     #[test]
     fn replacement_preserves_active_and_done_and_keeps_new_feedback_pending() {

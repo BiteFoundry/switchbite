@@ -2,6 +2,7 @@
 export const ACTIVE = new Set(['running', 'planning', 'paused']);
 export const COPY = {
   replanning: '계획 조정 중', replan: '계획 조정', repairing_plan: '계획 형식 수정 중',
+  composing: '새 작업 구성', draft: '역할 배정 대기',
   idle: '새 작업 대기', planning: '계획 중', running: '실행 중', paused: '일시정지',
   completed: '완료', cancelled: '취소됨', blocked: '선행 작업 확인 필요',
   held: '배정 확인 필요', failed: '실패', unknown: '상태 확인 중',
@@ -53,7 +54,8 @@ export function duration(ms) {
 export function taskView(task, allTasks) {
   const dependencies = task.depends_on || [];
   let status;
-  if (task.status === 'done') status = 'completed';
+  if (task.status === 'draft') status = 'draft';
+  else if (task.status === 'done') status = 'completed';
   else if (task.status === 'pending' && dependencies.some(id => !allTasks.some(t => t.id === id && t.status === 'done'))) status = 'waiting_dependency';
   else if (task.status === 'held') status = 'routing_hold';
   else if (['blocked', 'failed', 'cancelled'].includes(task.status)) status = 'failed';
@@ -62,7 +64,18 @@ export function taskView(task, allTasks) {
   return { id: task.id, title: task.objective || task.id, status,
     statusLabel: status === 'waiting_dependency' ? label(status) : label(task.status),
     glyph: status === 'completed' ? '✓' : status === 'running' ? '●' : status === 'failed' ? '×' : '○',
-    difficultyLabel: ROLES[task.role] || task.role || '작업', dependsOn: dependencies };
+    difficultyLabel: ROLES[task.role] || task.role || '작업', dependsOn: dependencies,
+    modelLabel: [task.provider, task.model, task.effort].filter(Boolean).join(' / ') || '모델 자동 배정' };
+}
+
+export function scaffoldFor(tasks) {
+  return {nodes: tasks.map(task => ({id: task.id, objective: task.objective || '', depends_on: [...(task.depends_on || [])]}))};
+}
+export function updateDraftEdge(tasks, from, to, operation) {
+  if (!tasks.some(task => task.id === from) || !tasks.some(task => task.id === to)) throw Error('연결할 작업자를 선택하세요.');
+  const target = tasks.find(task => task.id === to);
+  if (operation === 'add' && (!dependencyChoices(tasks, to).some(task => task.id === from) || (target.depends_on || []).includes(from))) throw Error('순환 연결이나 중복 연결은 만들 수 없습니다.');
+  return tasks.map(task => task.id !== to ? task : {...task, depends_on: operation === 'remove' ? (task.depends_on || []).filter(id => id !== from) : [...(task.depends_on || []), from]});
 }
 export function graphModel(tasks) {
   const nodes = tasks.map(task => taskView(task, tasks));

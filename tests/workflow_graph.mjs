@@ -1,0 +1,16 @@
+import assert from 'node:assert/strict';
+import { readFile } from 'node:fs/promises';
+const source = await readFile(new URL('../assets/workflow-ui/graph.js', import.meta.url), 'utf8');
+const { computeLayout, validConnection, avoidCollision } = await import(`data:text/javascript;base64,${Buffer.from(source).toString('base64')}`);
+const nodes = [{ id: 'a' }, { id: 'b', dependsOn: ['a'] }, { id: 'c' }];
+const edges = [{ from: 'a', to: 'b' }];
+const p = computeLayout(nodes, edges);
+assert.ok(p.b.x > p.a.x, 'dependencies lay out left to right');
+assert.notDeepEqual(p.a, p.c, 'independent cards do not overlap');
+assert.equal(validConnection('b', 'a', nodes, edges), false, 'cycles are rejected');
+assert.equal(validConnection('a', 'b', nodes, edges), false, 'duplicates are rejected');
+assert.equal(validConnection('a', 'a', nodes, edges), false, 'self links are rejected');
+assert.equal(validConnection('b', 'c', nodes, edges), true);
+const dropped = avoidCollision(p.a, p, 'c');
+assert.ok(Math.abs(dropped.y - p.a.y) >= 166 || Math.abs(dropped.x - p.a.x) >= 236, 'drop avoids existing cards');
+console.log('workflow graph helpers passed');

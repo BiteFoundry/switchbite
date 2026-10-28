@@ -482,7 +482,7 @@ pub fn fulfill(
         (OBJECTIVE, format!("{INSTRUCTIONS} {NODE_FORMAT}"))
     };
     let instructions = format!(
-        "{instructions} Respect workflow_state.dependency_overrides: these are exact user-selected predecessors. Keep those task IDs and their predecessor IDs in the plan. Other dependencies remain automatic."
+        "{instructions} Respect workflow_state.dependency_overrides: these are exact user-selected predecessors. Keep those task IDs and their predecessor IDs in the plan. Other dependencies remain automatic. When action.payload.scaffold is provided, return exactly those IDs and dependencies, fill empty objectives, and preserve nonempty objectives verbatim. When action.payload.assign_roles is true, return a full plan with exactly the current task IDs and dependencies, preserve protected nodes unchanged, and preserve every nonempty action.payload.role_hints objective verbatim. Fill draft definitions including role, acceptance, outputs and write_paths. Write generated role descriptions and user replies in the language of the user goal; preserve exact user-entered role text."
     );
     let task = json!({"id":key(id,attempt,"task"),"objective":objective,"instructions":instructions,"goal":request["goal"],"action":coordinator_action.clone(),"workflow_state":state,"result_schema":result_schema(kind)});
     // Leave room for the host's framing and JSON escaping.

@@ -350,6 +350,7 @@ impl Workbench {
                 "tools",
                 "max_parallel",
                 "review_plan",
+                "scaffold",
             ]
             .contains(&k.as_str())
         }) {
@@ -456,7 +457,13 @@ impl Workbench {
         {
             return Ok(handoff);
         }
-        let state = Workflow::new(root.clone()).start(&json!({"workspace":workspace,"goal":goal,"catalog":{"providers":selected},"max_parallel":max_parallel,"review_plan":body.get("review_plan").cloned().unwrap_or(json!(false)),"host":{}})).map_err(|e| e.to_value())?;
+        let mut request = json!({"workspace":workspace,"goal":goal,"catalog":{"providers":selected},"max_parallel":max_parallel,"review_plan":body.get("review_plan").cloned().unwrap_or(json!(false)),"host":{}});
+        if let Some(scaffold) = body.get("scaffold") {
+            request["scaffold"] = scaffold.clone();
+        }
+        let state = Workflow::new(root.clone())
+            .start(&request)
+            .map_err(|e| e.to_value())?;
         let run = Arc::new(Run {
             root,
             id: state["run_id"].as_str().unwrap().to_owned(),
@@ -753,8 +760,16 @@ impl Workbench {
     pub fn set_dependencies(&self, body: &Value) -> Result<Value, Value> {
         let _control = CONTROL.lock().map_err(|_| lock_error())?;
         if body.as_object().is_none_or(|o| {
-            o.keys()
-                .any(|k| !["run_id", "task_id", "depends_on"].contains(&k.as_str()))
+            o.keys().any(|k| {
+                ![
+                    "run_id",
+                    "task_id",
+                    "depends_on",
+                    "operation",
+                    "predecessor_id",
+                ]
+                .contains(&k.as_str())
+            })
         }) {
             return Err(error("invalid_request", "작업과 선행 작업을 선택하세요."));
         }
@@ -773,12 +788,78 @@ impl Workbench {
         let task = body["task_id"]
             .as_str()
             .ok_or_else(|| error("invalid_request", "작업을 선택하세요."))?;
-        let deps = body
-            .get("depends_on")
-            .ok_or_else(|| error("invalid_request", "선행 작업을 선택하세요."))?;
-        let state = Workflow::new(run.root.clone()).set_dependencies(&run.id,task,if deps.is_null(){None}else{Some(deps)}).map_err(|e| {
-            let mut detail=e.to_value(); detail["message"]=json!(if e.to_value()["code"]=="task_already_started" {"이미 시작한 작업입니다. 아직 시작하지 않은 후속 작업을 선택하세요."} else {"선행 작업을 적용하지 못했습니다. 순환 연결이나 삭제된 작업이 있는지 확인하세요."}); detail
+        let workflow = Workflow::new(run.root.clone());
+        let changed = if let Some(op) = body.get("operation").and_then(Value::as_str) {
+            if body.get("depends_on").is_some() {
+                return Err(error("invalid_request", "선행 작업을 선택하세요."));
+            }
+            workflow.change_dependency(
+                &run.id,
+                task,
+                op,
+                body["predecessor_id"]
+                    .as_str()
+                    .ok_or_else(|| error("invalid_request", "선행 작업을 선택하세요."))?,
+            )
+        } else {
+            let deps = body
+                .get("depends_on")
+                .ok_or_else(|| error("invalid_request", "선행 작업을 선택하세요."))?;
+            workflow.set_dependencies(
+                &run.id,
+                task,
+                if deps.is_null() { None } else { Some(deps) },
+            )
+        };
+        let state = changed.map_err(|e| {
+            let mut detail = e.to_value();
+            detail["message"] = json!(if e.to_value()["code"] == "task_already_started" {
+                "이미 시작한 작업입니다. 아직 시작하지 않은 후속 작업을 선택하세요."
+            } else {
+                "선행 작업을 적용하지 못했습니다. 순환 연결이나 삭제된 작업이 있는지 확인하세요."
+            });
+            detail
         })?;
+        if state["status"] == "running" && !run.alive.load(Ordering::Acquire) {
+            run.attempt.fetch_add(1, Ordering::AcqRel);
+            self.spawn(run);
+        }
+        self.status()
+    }
+
+    pub fn workers(&self, body: &Value) -> Result<Value, Value> {
+        let _control = CONTROL.lock().map_err(|_| lock_error())?;
+        if body.as_object().is_none_or(|o| {
+            o.keys()
+                .any(|k| !["run_id", "operation", "task_id", "objective"].contains(&k.as_str()))
+        }) {
+            return Err(error("invalid_request", "작업을 선택하세요."));
+        }
+        let run = self
+            .current
+            .lock()
+            .map_err(|_| lock_error())?
+            .clone()
+            .ok_or_else(|| error("run_missing", "먼저 업무를 시작하세요."))?;
+        if body["run_id"] != run.id {
+            return Err(error("run_changed", "현재 실행이 바뀌었습니다."));
+        }
+        let operation = body["operation"]
+            .as_str()
+            .ok_or_else(|| error("invalid_request", "작업을 선택하세요."))?;
+        if body.get("objective").is_some_and(|v| !v.is_string())
+            || body.get("task_id").is_some_and(|v| !v.is_string())
+        {
+            return Err(error("invalid_request", "작업을 선택하세요."));
+        }
+        let state = Workflow::new(run.root.clone())
+            .workers(
+                &run.id,
+                operation,
+                body["task_id"].as_str(),
+                body["objective"].as_str(),
+            )
+            .map_err(|e| e.to_value())?;
         if state["status"] == "running" && !run.alive.load(Ordering::Acquire) {
             run.attempt.fetch_add(1, Ordering::AcqRel);
             self.spawn(run);

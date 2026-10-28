@@ -148,6 +148,8 @@ fn view(state: &Value) -> Value {
         "plan_revision",
         "dependency_overrides",
         "editable_task_ids",
+        "draft_task_ids",
+        "role_hints",
         "plan_review_pending",
     ] {
         if let Some(value) = state.get(field) {
@@ -510,6 +512,24 @@ fn handle(
                 Ok(state) => response(
                     &mut stream,
                     "202 Accepted",
+                    "application/json",
+                    &view(&state).to_string(),
+                ),
+                Err(error) => response(
+                    &mut stream,
+                    "400 Bad Request",
+                    "application/json",
+                    &json!({"error":error}).to_string(),
+                ),
+            }
+        }
+        "POST /api/workers HTTP/1.1" if app.is_some() => {
+            let body =
+                serde_json::from_slice(&data[head_end..head_end + length]).unwrap_or(Value::Null);
+            match app.unwrap().workers(&body) {
+                Ok(state) => response(
+                    &mut stream,
+                    "200 OK",
                     "application/json",
                     &view(&state).to_string(),
                 ),
