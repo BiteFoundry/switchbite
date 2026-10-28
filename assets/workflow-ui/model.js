@@ -20,7 +20,21 @@ export const label = value => COPY[value] || value || '대기';
 export function feedbackView(report) {
   const source = report.source === 'user' ? '사용자' : report.source === 'worker' ? `작업자${report.task_id ? ` · ${report.task_id}` : ''}` : '실행 상태';
   const changes = [['added', '추가'], ['changed', '변경'], ['removed', '제거']].flatMap(([key, title]) => report.changes?.[key]?.length ? [`${title}: ${report.changes[key].join(', ')}`] : []);
-  return { id: report.id, source, status: report.status === 'processed' ? '답변 완료' : '조율 대기', message: report.message || '', reply: report.reply || '', changes: changes.join(' · ') };
+  return { id: report.id, source, status: report.status === 'processed' ? report.kind === 'dependency_change' ? '반영 완료' : '답변 완료' : '조율 대기', message: report.message || '', reply: report.reply || '', changes: changes.join(' · ') };
+}
+
+export function dependencyChoices(tasks, taskId) {
+  const descendants = new Set([taskId]);
+  let changed = true;
+  while (changed) {
+    changed = false;
+    for (const task of tasks) {
+      if (!descendants.has(task.id) && (task.depends_on || []).some(id => descendants.has(id))) {
+        descendants.add(task.id); changed = true;
+      }
+    }
+  }
+  return tasks.filter(task => !descendants.has(task.id));
 }
 export function failureText(problem) {
   if (!problem) return '';

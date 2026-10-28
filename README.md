@@ -8,7 +8,7 @@ can run configured local Codex and Claude workers through verification and
 integration. The coordinator supplies plans and handles actions that need its
 judgment or context.
 
-**v0.9.0-preview.4 · Windows x64 · MIT · No Python runtime.**
+**v0.9.0-preview.5 · Windows x64 · MIT · No Python runtime.**
 
 Run `switchbite workflow app` to enter a Git project path and goal in the local web
 app. Select which detected CLI tools may participate; the saved selection limits
@@ -17,6 +17,12 @@ coordinator supplies the plan and bounded repairs;
 the existing judge and workflow engine route, execute, verify and integrate the
 tasks. The completed run shows its result worktree, branch and final commit.
 See [the web workflow guide](docs/workflow-ui.ko.md).
+
+The default coordinator builds dependencies automatically. To adjust them before
+execution, enable **계획을 먼저 확인하고 시작**. In **작업 순서 직접 지정**,
+choose a task and check its predecessors. Applied dependencies persist across
+replanning; **자동으로 맡기기** releases the task back to the coordinator.
+See [manual dependencies](docs/manual-dependencies.ko.md).
 
 During a run, use **조율자에게 전달** to report a problem or change direction.
 Workers can send explicit reports through the local channel named in their task

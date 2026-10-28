@@ -146,6 +146,9 @@ fn view(state: &Value) -> Value {
         "startup_submission",
         "feedback",
         "plan_revision",
+        "dependency_overrides",
+        "editable_task_ids",
+        "plan_review_pending",
     ] {
         if let Some(value) = state.get(field) {
             result[field] = value.clone();
@@ -507,6 +510,24 @@ fn handle(
                 Ok(state) => response(
                     &mut stream,
                     "202 Accepted",
+                    "application/json",
+                    &view(&state).to_string(),
+                ),
+                Err(error) => response(
+                    &mut stream,
+                    "400 Bad Request",
+                    "application/json",
+                    &json!({"error":error}).to_string(),
+                ),
+            }
+        }
+        "POST /api/dependencies HTTP/1.1" if app.is_some() => {
+            let body =
+                serde_json::from_slice(&data[head_end..head_end + length]).unwrap_or(Value::Null);
+            match app.unwrap().set_dependencies(&body) {
+                Ok(state) => response(
+                    &mut stream,
+                    "200 OK",
                     "application/json",
                     &view(&state).to_string(),
                 ),

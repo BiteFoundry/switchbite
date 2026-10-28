@@ -100,6 +100,8 @@ struct State {
     #[serde(default)]
     plan_revision: u64,
     #[serde(default)]
+    dependency_overrides: BTreeMap<String, Vec<String>>,
+    #[serde(default)]
     superseded_actions: BTreeSet<String>,
     #[serde(default)]
     interrupt_tasks: BTreeSet<String>,
@@ -194,6 +196,16 @@ impl Workflow {
         let mut result = json!({"schema_version":s.schema_version,"run_id":s.run_id,"status":s.status,"max_parallel":s.request["max_parallel"].as_u64().unwrap_or(2),"summary":format!("{done}/{} tasks completed",s.tasks.len()),"tasks":s.tasks.iter().map(|t|json!({"task":t.node,"id":t.node["id"],"status":t.state,"candidate":t.candidate,"prepared":t.prepared,"execution_id":t.execution_id,"repair_rounds":t.attempts,"evidence":t.evidence,"observed":t.observed,"next_inspect_at_ms":t.next_inspect_at_ms,"wait_reason":Self::wait_reason(s, t)})).collect::<Vec<_>>(),"actions":s.actions,"events":s.recent_events,"event_count":s.events.len(),"event_cursor":{"first":s.events.len().saturating_sub(s.recent_events.len())+if s.recent_events.is_empty(){0}else{1},"last":s.events.len()},"revision":s.revision,"progress":{"done":done,"total":s.tasks.len(),"blocked":s.tasks.iter().filter(|t| ["held","blocked"].contains(&t.state.as_str())).count()}});
         result["feedback"] = json!(s.feedback);
         result["plan_revision"] = json!(s.plan_revision);
+        result["dependency_overrides"] = json!(s.dependency_overrides);
+        result["editable_task_ids"] = json!(
+            s.tasks
+                .iter()
+                .filter(|t| mutable_task(s, t))
+                .map(|t| t.node["id"].clone())
+                .collect::<Vec<_>>()
+        );
+        result["plan_review_pending"] =
+            json!(s.request["review_plan"] == true && s.status == "paused");
         result["runtime"] = s.request["runtime"].clone();
         if let Some(catalog) = &s.catalog {
             result["catalog"] = json!({"revision":catalog["revision"],"candidate_count":catalog["candidates"].as_array().map_or(0, Vec::len),"diagnostics":catalog["diagnostics"]});
@@ -213,6 +225,7 @@ impl Workflow {
                 "preferences",
                 "max_parallel",
                 "repair_rounds",
+                "review_plan",
                 "checks",
                 "host",
             ]
@@ -221,6 +234,9 @@ impl Workflow {
             return Err(err("invalid_request"));
         }
         text(request, "workspace", 4096)?;
+        if request.get("review_plan").is_some_and(|v| !v.is_boolean()) {
+            return Err(err("invalid_request"));
+        }
         if request.get("goal").is_some() {
             text(request, "goal", 24000)?;
         }
@@ -292,7 +308,12 @@ impl Workflow {
             schema_version: 2,
             catalog,
             run_id: run,
-            status: "running".into(),
+            status: if request["review_plan"] == true && !tasks.is_empty() {
+                "paused"
+            } else {
+                "running"
+            }
+            .into(),
             request: request.clone(),
             tasks,
             actions: vec![],
@@ -301,6 +322,7 @@ impl Workflow {
             recent_events: vec![],
             feedback: vec![],
             plan_revision: 0,
+            dependency_overrides: BTreeMap::new(),
             superseded_actions: BTreeSet::new(),
             interrupt_tasks: BTreeSet::new(),
             sequence: 0,
@@ -548,6 +570,57 @@ impl Workflow {
         }
         Ok(allowed)
     }
+    /// Set exact user-selected predecessors, or release the task back to the coordinator.
+    pub fn set_dependencies(
+        &self,
+        run_id: &str,
+        task_id: &str,
+        dependencies: Option<&Value>,
+    ) -> Result<Value, WorkflowError> {
+        let _g = MUTATION.lock().map_err(|_| err("storage_error"))?;
+        let _lock = self.lock()?;
+        let mut s = self.load(run_id)?;
+        if !["running", "paused"].contains(&s.status.as_str()) {
+            return Err(err("invalid_state"));
+        }
+        let i = s
+            .tasks
+            .iter()
+            .position(|t| t.node["id"] == task_id)
+            .ok_or(err("task_not_found"))?;
+        let deps = dependencies.map(|v| strings(Some(v), 128)).transpose()?;
+        if deps
+            .as_ref()
+            .is_some_and(|d| d.len() != d.iter().collect::<BTreeSet<_>>().len())
+        {
+            return Err(err("invalid_dependencies"));
+        }
+        if deps.as_ref() == s.dependency_overrides.get(task_id) {
+            return Ok(Self::response(&s));
+        }
+        if !mutable_task(&s, &s.tasks[i]) {
+            return Err(err("task_already_started"));
+        }
+        if s.feedback.len() >= 4096 {
+            return Err(err("feedback_limit"));
+        }
+        let report_id = format!("dependencies:{}:{}", task_id, s.revision + 1);
+        if let Some(deps) = deps {
+            s.dependency_overrides
+                .insert(task_id.to_owned(), deps.clone());
+            let plan = json!({"nodes":s.tasks.iter().map(|t|t.node.clone()).collect::<Vec<_>>()});
+            let changes =
+                apply_remaining_plan(&mut s, &plan).map_err(|_| err("invalid_dependencies"))?;
+            s.feedback.push(json!({"id":report_id,"source":"user","task_id":task_id,"kind":"dependency_change","message":format!("선행 작업 직접 지정: {}",if deps.is_empty(){"없음 — 독립 실행".to_owned()}else{deps.join(", ")}),"status":"processed","plan_revision":s.plan_revision,"changes":changes}));
+        } else {
+            s.dependency_overrides.remove(task_id);
+            s.feedback.push(json!({"id":report_id,"source":"user","task_id":task_id,"kind":"request_change","message":"이 작업의 선행 작업 직접 지정을 해제했습니다. 현재 목표와 작업 단위에 맞게 의존 관계를 다시 정해 주세요.","status":"pending"}));
+        }
+        self.schedule(&mut s);
+        self.save(&mut s)?;
+        Ok(Self::response(&s))
+    }
+
     pub fn control(&self, run_id: &str, action: &str) -> Result<Value, WorkflowError> {
         let _g = MUTATION.lock().map_err(|_| err("storage_error"))?;
         let _lock = self.lock()?;
@@ -555,6 +628,7 @@ impl Workflow {
         match action {
             "pause" if s.status == "running" => s.status = "paused".into(),
             "resume" if s.status == "paused" => {
+                s.request["review_plan"] = json!(false);
                 s.status = "running".into();
                 self.schedule(&mut s)
             }
@@ -658,6 +732,9 @@ impl Workflow {
             "plan" => {
                 s.tasks = validate_plan(result.get("plan").ok_or(err("invalid_receipt"))?)
                     .map_err(|_| err("invalid_receipt"))?;
+                if s.request["review_plan"] == true {
+                    s.status = "paused".into();
+                }
             }
             "replan" => {
                 let reply = text(result, "reply", 8000)
@@ -680,80 +757,11 @@ impl Workflow {
                         return Err(err("invalid_receipt"));
                     }
                 }
-                let mut added = Vec::new();
-                let mut changed = Vec::new();
-                let mut removed = Vec::new();
-                if !result["plan"].is_null() {
-                    let validated =
-                        validate_plan(&result["plan"]).map_err(|_| err("invalid_receipt"))?;
-                    for old in &s.tasks {
-                        let new = validated.iter().find(|t| t.node["id"] == old.node["id"]);
-                        let protected = !mutable_task(&s, old);
-                        if protected && new.is_none_or(|n| n.node != old.node) {
-                            return Err(err("invalid_receipt"));
-                        }
-                        match new {
-                            None => removed.push(old.node["id"].clone()),
-                            Some(new) if new.node != old.node => {
-                                changed.push(old.node["id"].clone())
-                            }
-                            _ => {}
-                        }
-                    }
-                    for new in &validated {
-                        if !s.tasks.iter().any(|t| t.node["id"] == new.node["id"]) {
-                            added.push(new.node["id"].clone());
-                        }
-                    }
-                    let invalid: BTreeSet<String> = changed
-                        .iter()
-                        .chain(removed.iter())
-                        .filter_map(Value::as_str)
-                        .map(str::to_owned)
-                        .collect();
-                    for action in &s.actions {
-                        if action["task_id"]
-                            .as_str()
-                            .is_some_and(|id| invalid.contains(id))
-                            && let Some(id) = action["id"].as_str()
-                        {
-                            s.superseded_actions.insert(id.to_owned());
-                        }
-                    }
-                    s.actions
-                        .retain(|a| !a["task_id"].as_str().is_some_and(|id| invalid.contains(id)));
-                    let old = std::mem::take(&mut s.tasks);
-                    s.tasks = validated
-                        .into_iter()
-                        .map(
-                            |new| match old.iter().find(|t| t.node["id"] == new.node["id"]) {
-                                Some(t) if t.node == new.node => t.clone(),
-                                Some(t) => {
-                                    let mut revised = new;
-                                    if revised.node.get("context_refs").is_none()
-                                        && let Some(refs) = t.node.get("context_refs")
-                                    {
-                                        revised.node["context_refs"] = refs.clone();
-                                    }
-                                    let used_workspace = t.prepared.is_some()
-                                        || t.execution_id.is_some()
-                                        || t.evidence.iter().any(|e| {
-                                            ["prepare", "launch"]
-                                                .contains(&e["stage"].as_str().unwrap_or(""))
-                                        });
-                                    revised.attempts =
-                                        t.attempts.saturating_add(u64::from(used_workspace));
-                                    revised.evidence = t.evidence.clone();
-                                    revised.context_gathered = t.context_gathered;
-                                    revised.context_summary = t.context_summary.clone();
-                                    revised
-                                }
-                                None => new,
-                            },
-                        )
-                        .collect();
-                    s.plan_revision += 1;
-                }
+                let changes = if result["plan"].is_null() {
+                    json!({"added":[],"changed":[],"removed":[]})
+                } else {
+                    apply_remaining_plan(&mut s, &result["plan"])?
+                };
                 for name in interruptions {
                     let current = s
                         .tasks
@@ -816,7 +824,7 @@ impl Workflow {
                         f["status"] = json!("processed");
                         f["reply"] = json!(reply);
                         f["plan_revision"] = json!(s.plan_revision);
-                        f["changes"] = json!({"added":added,"changed":changed,"removed":removed});
+                        f["changes"] = changes.clone();
                     }
                 }
             }
@@ -853,8 +861,8 @@ impl Workflow {
                         merged.push(node);
                     }
                 }
-                let validated =
-                    validate_plan(&json!({"nodes": merged})).map_err(|_| err("invalid_receipt"))?;
+                let plan = enforce_dependencies(&s, &json!({"nodes": merged}))?;
+                let validated = validate_plan(&plan).map_err(|_| err("invalid_receipt"))?;
                 for (j, new) in validated.into_iter().enumerate() {
                     if let Some(old) = s.tasks.get_mut(j) {
                         old.node = new.node;
@@ -2150,6 +2158,91 @@ fn feedback_hold(s: &State) -> Option<Option<BTreeSet<String>>> {
         }
     }
     Some(Some(affected))
+}
+
+fn enforce_dependencies(s: &State, plan: &Value) -> Result<Value, WorkflowError> {
+    let mut plan = plan.clone();
+    let nodes = plan["nodes"].as_array_mut().ok_or(err("invalid_receipt"))?;
+    for (task, deps) in &s.dependency_overrides {
+        let node = nodes
+            .iter_mut()
+            .find(|node| node["id"] == *task)
+            .ok_or(err("invalid_receipt"))?;
+        node["depends_on"] = json!(deps);
+    }
+    Ok(plan)
+}
+
+fn apply_remaining_plan(s: &mut State, plan: &Value) -> Result<Value, WorkflowError> {
+    let plan = enforce_dependencies(s, plan)?;
+    let mut added = Vec::new();
+    let mut changed = Vec::new();
+    let mut removed = Vec::new();
+    let validated = validate_plan(&plan).map_err(|_| err("invalid_receipt"))?;
+    for old in &s.tasks {
+        let new = validated.iter().find(|t| t.node["id"] == old.node["id"]);
+        let protected = !mutable_task(s, old);
+        if protected && new.is_none_or(|n| n.node != old.node) {
+            return Err(err("invalid_receipt"));
+        }
+        match new {
+            None => removed.push(old.node["id"].clone()),
+            Some(new) if new.node != old.node => changed.push(old.node["id"].clone()),
+            _ => {}
+        }
+    }
+    for new in &validated {
+        if !s.tasks.iter().any(|t| t.node["id"] == new.node["id"]) {
+            added.push(new.node["id"].clone());
+        }
+    }
+    let invalid: BTreeSet<String> = changed
+        .iter()
+        .chain(removed.iter())
+        .filter_map(Value::as_str)
+        .map(str::to_owned)
+        .collect();
+    for action in &s.actions {
+        if action["task_id"]
+            .as_str()
+            .is_some_and(|id| invalid.contains(id))
+            && let Some(id) = action["id"].as_str()
+        {
+            s.superseded_actions.insert(id.to_owned());
+        }
+    }
+    s.actions
+        .retain(|a| !a["task_id"].as_str().is_some_and(|id| invalid.contains(id)));
+    let old = std::mem::take(&mut s.tasks);
+    s.tasks = validated
+        .into_iter()
+        .map(
+            |new| match old.iter().find(|t| t.node["id"] == new.node["id"]) {
+                Some(t) if t.node == new.node => t.clone(),
+                Some(t) => {
+                    let mut revised = new;
+                    if revised.node.get("context_refs").is_none()
+                        && let Some(refs) = t.node.get("context_refs")
+                    {
+                        revised.node["context_refs"] = refs.clone();
+                    }
+                    let used_workspace = t.prepared.is_some()
+                        || t.execution_id.is_some()
+                        || t.evidence.iter().any(|e| {
+                            ["prepare", "launch"].contains(&e["stage"].as_str().unwrap_or(""))
+                        });
+                    revised.attempts = t.attempts.saturating_add(u64::from(used_workspace));
+                    revised.evidence = t.evidence.clone();
+                    revised.context_gathered = t.context_gathered;
+                    revised.context_summary = t.context_summary.clone();
+                    revised
+                }
+                None => new,
+            },
+        )
+        .collect();
+    s.plan_revision += 1;
+    Ok(json!({"added":added,"changed":changed,"removed":removed}))
 }
 
 fn mutable_task(s: &State, task: &Task) -> bool {

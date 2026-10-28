@@ -182,7 +182,7 @@ fn web_submission_runs_real_workflow_with_isolated_fake_provider() {
         .find(|c| c["model"] == "fake-build" && c["effort"] == "high")
         .expect("fixture candidate")["id"]
         .clone();
-    let body=json!({"workspace":repo,"goal":"Create a result and independent review","coordinator_id":coordinator,"tools":["codex"]}).to_string();
+    let body=json!({"workspace":repo,"goal":"Create a result and independent review","coordinator_id":coordinator,"tools":["codex"],"review_plan":true}).to_string();
     assert_eq!(
         http(
             port,
@@ -294,6 +294,76 @@ fn web_submission_runs_real_workflow_with_isolated_fake_provider() {
     assert!(!log.exists());
     let (status, started) = http(port, "POST", "/api/start", token, &origin, &body);
     assert_eq!(status, 202);
+    let deadline = Instant::now() + Duration::from_secs(30);
+    let prepared = loop {
+        let (_, raw) = http(port, "GET", "/api/state", "", "", "");
+        let state: Value = serde_json::from_str(&raw).unwrap();
+        if state["plan_review_pending"] == true {
+            break state;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "plan review never became ready: {state}"
+        );
+        thread::sleep(Duration::from_millis(50));
+    };
+    assert_eq!(prepared["status"], "paused");
+    assert!(
+        prepared["tasks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|t| t["status"] == "pending")
+    );
+    assert_eq!(
+        fs::read_to_string(&log).unwrap().lines().count(),
+        1,
+        "workers started before user resumed"
+    );
+    let dependency =
+        json!({"run_id":prepared["run_id"],"task_id":"review","depends_on":["build"]}).to_string();
+    assert_eq!(
+        http(
+            port,
+            "POST",
+            "/api/dependencies",
+            token,
+            "http://evil.invalid",
+            &dependency
+        )
+        .0,
+        403
+    );
+    let cycle =
+        json!({"run_id":prepared["run_id"],"task_id":"build","depends_on":["review"]}).to_string();
+    assert_eq!(
+        http(port, "POST", "/api/dependencies", token, &origin, &cycle).0,
+        400
+    );
+    let (code, raw) = http(
+        port,
+        "POST",
+        "/api/dependencies",
+        token,
+        &origin,
+        &dependency,
+    );
+    assert_eq!(code, 200, "{raw}");
+    let edited: Value = serde_json::from_str(&raw).unwrap();
+    assert_eq!(edited["dependency_overrides"]["review"], json!(["build"]));
+    assert_eq!(edited["status"], "paused");
+    assert_eq!(
+        http(
+            port,
+            "POST",
+            "/api/control",
+            token,
+            &origin,
+            r#"{"action":"resume"}"#
+        )
+        .0,
+        200
+    );
     assert_eq!(
         serde_json::from_str::<Value>(&started).unwrap()["max_parallel"],
         3

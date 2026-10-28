@@ -1,6 +1,12 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { artifactOrder, graphModel, outputChunks, streamsFor, waitReason, usableToolIds, failureText, feedbackView } from '../assets/workflow-ui/model.js';
+import { artifactOrder, graphModel, outputChunks, streamsFor, waitReason, usableToolIds, failureText, feedbackView, dependencyChoices } from '../assets/workflow-ui/model.js';
+
+test('dependency picker excludes itself and transitive followers but offers parallel and upstream tasks', () => {
+  const tasks=[{id:'a',depends_on:[]},{id:'b',depends_on:['a']},{id:'c',depends_on:['b']},{id:'parallel',depends_on:[]}];
+  assert.deepEqual(dependencyChoices(tasks,'b').map(t=>t.id),['a','parallel']);
+  assert.equal(feedbackView({kind:'dependency_change',source:'user',status:'processed'}).status,'반영 완료');
+});
 
 test('independent branches stay ready together and dependencies track actual completion', () => {
   const tasks = [

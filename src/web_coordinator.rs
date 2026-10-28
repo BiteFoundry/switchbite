@@ -481,6 +481,9 @@ pub fn fulfill(
     } else {
         (OBJECTIVE, format!("{INSTRUCTIONS} {NODE_FORMAT}"))
     };
+    let instructions = format!(
+        "{instructions} Respect workflow_state.dependency_overrides: these are exact user-selected predecessors. Keep those task IDs and their predecessor IDs in the plan. Other dependencies remain automatic."
+    );
     let task = json!({"id":key(id,attempt,"task"),"objective":objective,"instructions":instructions,"goal":request["goal"],"action":coordinator_action.clone(),"workflow_state":state,"result_schema":result_schema(kind)});
     // Leave room for the host's framing and JSON escaping.
     if serde_json::to_vec(&task)
