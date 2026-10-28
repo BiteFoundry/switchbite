@@ -1,0 +1,81 @@
+{
+  "verified_on": "2026-10-28",
+  "release": {
+    "tag": "v0.9.0-preview.6",
+    "tag_commit": "19e17839e60e5934fe8e92f5fbf45152cc3b2155",
+    "runtime_source_commit": "19e17839e60e5934fe8e92f5fbf45152cc3b2155",
+    "url": "https://github.com/BiteFoundry/switchbite/releases/tag/v0.9.0-preview.6",
+    "draft": false,
+    "prerelease": true
+  },
+  "channel": {
+    "url": "https://github.com/BiteFoundry/switchbite/releases/download/runtime-preview/channel-windows-x64.json",
+    "bundle_id": "v0.9.0-preview.6-windows-x64",
+    "sha256": "f3a1f28d99f8fd5ffffe243e974c4e5a60170afb1e6ec88c1a36771d3a3e37ac"
+  },
+  "ci": {
+    "run_id": 40662290147,
+    "url": "https://github.com/BiteFoundry/switchbite/actions/runs/40662290147",
+    "conclusion": "success",
+    "rust_tests_passed": 316,
+    "rust_tests_ignored": 2,
+    "node_tests_passed": 12,
+    "earlier_run_cancelled": 40661162033,
+    "cancel_reason": "Included complete editable role text and its regression check before publication."
+  },
+  "pages": {
+    "url": "https://bitefoundry.github.io/switchbite/",
+    "source_commit": "99bb218acbe8ef9df9da1a98009c95e72010fb61",
+    "pages_commit": "076ce56ee9d7f217180a813a69606cfcc8068222",
+    "run_id": 40661244464,
+    "conclusion": "success"
+  },
+  "feature_e2e": {
+    "run_id": "run-1793176905950147500-81144",
+    "runtime": "development preview.6 before publication",
+    "model": "gpt-6.1-terra",
+    "effort": "high",
+    "completed_tasks": 2,
+    "outputs": "a.txt Alpha; review.md PASS",
+    "native_pointer_card_drag": "verified",
+    "native_pointer_wire_and_delete": "verified",
+    "automatic_arrangement": "verified",
+    "unsaved_typed_role_and_positions_preserved_on_assignment": "verified",
+    "live_blank_worker_add_remove": "verified",
+    "same_id_project_switch_isolation": "verified",
+    "reviewed_project_switch_fix": "resolved",
+    "mobile_pixels": "not_verified",
+    "mobile_capture_fallback": "Background browser capture denied by automatic approval review: blocked by policy."
+  },
+  "verified": {
+    "uploaded_asset_digests": 8,
+    "anonymous_manifest_http": 200,
+    "fresh_public_channel_install": "passed",
+    "installed_executable_hashes": "matched",
+    "switchbite_version": "0.9.0-preview.6",
+    "stackbite_engine_version": "0.5.75",
+    "protocol_version": 1,
+    "local_app": "http://127.0.0.1:58431/",
+    "active_channel": "GitHub runtime-preview",
+    "preserved_user_workflow": {
+      "status": "paused",
+      "done": 0,
+      "total": 5,
+      "task_ids_statuses_and_dependencies": "unchanged",
+      "automatically_resumed": false
+    },
+    "aside_toolbar": "verified",
+    "original_stackbite_modified": false
+  },
+  "storage": {
+    "validation_path": ".switchbite/canvas-validation",
+    "verified_workbite_binding": false,
+    "enrolled": false,
+    "preserved": true
+  },
+  "runtime_assets": {
+    "switchbite_sha256": "3b2bfa8abbf5cd955911fa83c998e7f4b4cededfcc732e0c95114c289ed6ad88",
+    "stackbite_sha256": "dcd388fe91ad6b966cd2a0cd112bba4f509e4560c81a3822bdac73b8cf33381e",
+    "archive_sha256": "d333468310c44156088de2aa8fe7ff0bca5d470aabb68efb6f696fae5d7b7ec9"
+  }
+}

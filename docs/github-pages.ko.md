@@ -34,3 +34,12 @@
 - [배포 실행](https://github.com/BiteFoundry/switchbite/actions/runs/40651988995): 성공. 공개 `build.json`의 소스 커밋 일치.
 - [Windows preview.5](https://github.com/BiteFoundry/switchbite/releases/tag/v0.9.0-preview.5)와 공개 자동 업데이트 채널 게시·신규 설치 검증 완료. 로컬 앱에서도 새 계획 확인 옵션과 기존 완료 결과를 확인했다.
 - [의존 관계 직접 지정 사용법](manual-dependencies.ko.md). 공개 Pages는 예시 UI이며 실제 설정·CLI 실행은 로컬 앱에서 수행한다.
+
+## preview.6 게시 확인
+
+- UI 소스: `99bb218acbe8ef9df9da1a98009c95e72010fb61`, Pages 커밋: `076ce56ee9d7f217180a813a69606cfcc8068222`.
+- [Pages 배포](https://github.com/BiteFoundry/switchbite/actions/runs/40661244464): 성공. 공개 `build.json`의 UI 소스 커밋 일치.
+- [Windows 검증·릴리스](https://github.com/BiteFoundry/switchbite/actions/runs/40662290147): 성공. 런타임 소스 `19e17839e60e5934fe8e92f5fbf45152cc3b2155`는 긴 역할 지시의 편집 원문 보존 수정을 포함한다.
+- [preview.6 릴리스](https://github.com/BiteFoundry/switchbite/releases/tag/v0.9.0-preview.6)와 자동 업데이트 채널 게시, 공개 채널 신규 설치·해시 검증 완료.
+- 로컬 앱의 기존 5개 작업·의존 관계와 0/5 일시정지 상태를 보존했다. 새 캔버스의 작업자 추가·역할 배정·자동 정렬 버튼을 Aside에서 확인했다.
+- [작업자 캔버스 사용법](worker-canvas.ko.md).
