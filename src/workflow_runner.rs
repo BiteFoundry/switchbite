@@ -174,6 +174,8 @@ pub(crate) fn advance_inner(
     let _guard = ADVANCE.lock().map_err(|_| error("driver_busy"))?;
     let engine = Workflow::new(root.to_path_buf());
     let request = engine.request(run_id).map_err(map_core)?;
+    let host_state = root.join(run_id).join("host");
+    crate::worker_feedback::collect(&engine, run_id, &host_state).map_err(map_core)?;
     let key_prefix = format!("{}:{run_id}:", root.display());
     let finished: Vec<_> = {
         let map = jobs().lock().map_err(|_| error("driver_busy"))?;
@@ -205,6 +207,8 @@ pub(crate) fn advance_inner(
             .unwrap_or("launch")
             .to_owned();
         let outcome = job.handle.join();
+        // The worker may have written its final line immediately before exit.
+        crate::worker_feedback::collect(&engine, run_id, &host_state).map_err(map_core)?;
         if job.route {
             match outcome {
                 Ok(Ok(result)) => {
@@ -215,8 +219,9 @@ pub(crate) fn advance_inner(
                         }
                     }
                 }
-                Ok(Err(failure)) => route_attention = Some(failure),
-                Err(_) => route_attention = Some(json!({"code":"route_panic"})),
+                Ok(Err(failure)) if !current_action.is_null() => route_attention = Some(failure),
+                Err(_) if !current_action.is_null() => route_attention = Some(json!({"code":"route_panic"})),
+                _ => {}
             }
             continue;
         }
@@ -438,9 +443,16 @@ pub fn resume_to_completion(
                 }
             }
             if actions.iter().any(|a| {
-                ["plan", "repair", "review", "review_route", "refresh_pool"]
-                    .iter()
-                    .any(|k| a["kind"] == *k)
+                [
+                    "plan",
+                    "repair",
+                    "review",
+                    "review_route",
+                    "refresh_pool",
+                    "replan",
+                ]
+                .iter()
+                .any(|k| a["kind"] == *k)
             }) {
                 state["next_action"] = json!("continue_with_coordinator");
                 return Ok(state);

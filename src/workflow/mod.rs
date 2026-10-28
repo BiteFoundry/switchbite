@@ -95,6 +95,14 @@ struct State {
     events: BTreeMap<String, Value>,
     #[serde(default)]
     recent_events: Vec<Value>,
+    #[serde(default)]
+    feedback: Vec<Value>,
+    #[serde(default)]
+    plan_revision: u64,
+    #[serde(default)]
+    superseded_actions: BTreeSet<String>,
+    #[serde(default)]
+    interrupt_tasks: BTreeSet<String>,
     sequence: u64,
     revision: u64,
 }
@@ -184,6 +192,8 @@ impl Workflow {
     fn response(s: &State) -> Value {
         let done = s.tasks.iter().filter(|t| t.state == "done").count();
         let mut result = json!({"schema_version":s.schema_version,"run_id":s.run_id,"status":s.status,"max_parallel":s.request["max_parallel"].as_u64().unwrap_or(2),"summary":format!("{done}/{} tasks completed",s.tasks.len()),"tasks":s.tasks.iter().map(|t|json!({"task":t.node,"id":t.node["id"],"status":t.state,"candidate":t.candidate,"prepared":t.prepared,"execution_id":t.execution_id,"repair_rounds":t.attempts,"evidence":t.evidence,"observed":t.observed,"next_inspect_at_ms":t.next_inspect_at_ms,"wait_reason":Self::wait_reason(s, t)})).collect::<Vec<_>>(),"actions":s.actions,"events":s.recent_events,"event_count":s.events.len(),"event_cursor":{"first":s.events.len().saturating_sub(s.recent_events.len())+if s.recent_events.is_empty(){0}else{1},"last":s.events.len()},"revision":s.revision,"progress":{"done":done,"total":s.tasks.len(),"blocked":s.tasks.iter().filter(|t| ["held","blocked"].contains(&t.state.as_str())).count()}});
+        result["feedback"] = json!(s.feedback);
+        result["plan_revision"] = json!(s.plan_revision);
         result["runtime"] = s.request["runtime"].clone();
         if let Some(catalog) = &s.catalog {
             result["catalog"] = json!({"revision":catalog["revision"],"candidate_count":catalog["candidates"].as_array().map_or(0, Vec::len),"diagnostics":catalog["diagnostics"]});
@@ -289,6 +299,10 @@ impl Workflow {
             claimed_actions: BTreeSet::new(),
             events: BTreeMap::new(),
             recent_events: vec![],
+            feedback: vec![],
+            plan_revision: 0,
+            superseded_actions: BTreeSet::new(),
+            interrupt_tasks: BTreeSet::new(),
             sequence: 0,
             revision: 0,
         };
@@ -418,6 +432,59 @@ impl Workflow {
         let _lock = self.lock()?;
         Ok(Self::response(&self.load(run_id)?))
     }
+    /// Persist a trusted caller's report and schedule a coordinator decision.
+    pub fn report(&self, run_id: &str, report: &Value) -> Result<Value, WorkflowError> {
+        bounded(report)?;
+        let obj = report.as_object().ok_or(err("invalid_request"))?;
+        if obj
+            .keys()
+            .any(|k| !["id", "source", "task_id", "kind", "message"].contains(&k.as_str()))
+        {
+            return Err(err("invalid_request"));
+        }
+        let report_id = text(report, "id", 128)?;
+        if !id(report_id)
+            || !["user", "worker", "system"].contains(&text(report, "source", 16)?)
+            || !["blocked", "finding", "request_change"].contains(&text(report, "kind", 32)?)
+        {
+            return Err(err("invalid_request"));
+        }
+        text(report, "message", 8000)?;
+        let _g = MUTATION.lock().map_err(|_| err("storage_error"))?;
+        let _lock = self.lock()?;
+        let mut s = self.load(run_id)?;
+        if let Some(old) = s.feedback.iter().find(|f| f["id"] == report_id) {
+            return if ["id", "source", "task_id", "kind", "message"]
+                .iter()
+                .all(|key| old.get(*key) == report.get(*key))
+            {
+                Ok(Self::response(&s))
+            } else {
+                Err(err("feedback_conflict"))
+            };
+        }
+        if s.feedback.len() >= 4096 {
+            return Err(err("feedback_limit"));
+        }
+        if let Some(task) = report.get("task_id") {
+            let task = task
+                .as_str()
+                .filter(|t| id(t))
+                .ok_or(err("invalid_request"))?;
+            if !s.tasks.iter().any(|t| t.node["id"] == task) {
+                return Err(err("invalid_request"));
+            }
+        }
+        if !["running", "paused"].contains(&s.status.as_str()) {
+            return Err(err("invalid_state"));
+        }
+        let mut item = report.clone();
+        item["status"] = json!("pending");
+        s.feedback.push(item);
+        self.schedule(&mut s);
+        self.save(&mut s)?;
+        Ok(Self::response(&s))
+    }
     pub fn next(&self, run_id: &str) -> Result<Value, WorkflowError> {
         let _g = MUTATION.lock().map_err(|_| err("storage_error"))?;
         let _lock = self.lock()?;
@@ -460,7 +527,17 @@ impl Workflow {
         let Some(action) = state.actions.iter().find(|a| a["id"] == action_id) else {
             return Ok(false);
         };
-        let allowed = state.status == "running"
+        let held = feedback_hold(&state);
+        let action_held = held.as_ref().is_some_and(|affected| {
+            action["task_id"]
+                .as_str()
+                .is_some_and(|task| affected.as_ref().is_none_or(|ids| ids.contains(task)))
+        });
+        let allowed = (state.status == "running"
+            && (!action_held
+                || state.claimed_actions.contains(action_id)
+                || ["replan", "inspect", "verify", "integrate"]
+                    .contains(&action["kind"].as_str().unwrap_or(""))))
             || (state.status == "cancelled"
                 && ((action["kind"] == "inspect" && action["payload"]["operation"] == "cancel")
                     || (state.claimed_actions.contains(action_id)
@@ -562,11 +639,14 @@ impl Workflow {
         if s.events.len() >= 4096 {
             return Err(err("event_limit"));
         }
-        let pos = s
-            .actions
-            .iter()
-            .position(|a| a["id"] == aid)
-            .ok_or(err("action_not_found"))?;
+        let Some(pos) = s.actions.iter().position(|a| a["id"] == aid) else {
+            if s.superseded_actions.contains(aid) {
+                s.events.insert(eid.to_string(), json!(digest));
+                self.save(&mut s)?;
+                return Ok(Self::response(&s));
+            }
+            return Err(err("action_not_found"));
+        };
         let a = s.actions[pos].clone();
         let result = &event["result"];
         let kind = a["kind"].as_str().unwrap();
@@ -578,6 +658,167 @@ impl Workflow {
             "plan" => {
                 s.tasks = validate_plan(result.get("plan").ok_or(err("invalid_receipt"))?)
                     .map_err(|_| err("invalid_receipt"))?;
+            }
+            "replan" => {
+                let reply = text(result, "reply", 8000)
+                    .map_err(|_| err("invalid_receipt"))?
+                    .to_owned();
+                let interruptions = strings(result.get("interrupt_tasks"), 128)
+                    .map_err(|_| err("invalid_receipt"))?;
+                if !interruptions.is_empty() && !result["plan"].is_null() {
+                    return Err(err("invalid_receipt"));
+                }
+                for name in &interruptions {
+                    let snapshot = a["payload"]["tasks"]
+                        .as_array()
+                        .and_then(|tasks| tasks.iter().find(|t| t["task"]["id"] == *name))
+                        .ok_or(err("invalid_receipt"))?;
+                    if !["launching", "running", "unknown"]
+                        .contains(&snapshot["status"].as_str().unwrap_or(""))
+                        || !s.tasks.iter().any(|t| t.node["id"] == *name)
+                    {
+                        return Err(err("invalid_receipt"));
+                    }
+                }
+                let mut added = Vec::new();
+                let mut changed = Vec::new();
+                let mut removed = Vec::new();
+                if !result["plan"].is_null() {
+                    let validated =
+                        validate_plan(&result["plan"]).map_err(|_| err("invalid_receipt"))?;
+                    for old in &s.tasks {
+                        let new = validated.iter().find(|t| t.node["id"] == old.node["id"]);
+                        let protected = !mutable_task(&s, old);
+                        if protected && new.is_none_or(|n| n.node != old.node) {
+                            return Err(err("invalid_receipt"));
+                        }
+                        match new {
+                            None => removed.push(old.node["id"].clone()),
+                            Some(new) if new.node != old.node => {
+                                changed.push(old.node["id"].clone())
+                            }
+                            _ => {}
+                        }
+                    }
+                    for new in &validated {
+                        if !s.tasks.iter().any(|t| t.node["id"] == new.node["id"]) {
+                            added.push(new.node["id"].clone());
+                        }
+                    }
+                    let invalid: BTreeSet<String> = changed
+                        .iter()
+                        .chain(removed.iter())
+                        .filter_map(Value::as_str)
+                        .map(str::to_owned)
+                        .collect();
+                    for action in &s.actions {
+                        if action["task_id"]
+                            .as_str()
+                            .is_some_and(|id| invalid.contains(id))
+                            && let Some(id) = action["id"].as_str()
+                        {
+                            s.superseded_actions.insert(id.to_owned());
+                        }
+                    }
+                    s.actions
+                        .retain(|a| !a["task_id"].as_str().is_some_and(|id| invalid.contains(id)));
+                    let old = std::mem::take(&mut s.tasks);
+                    s.tasks = validated
+                        .into_iter()
+                        .map(
+                            |new| match old.iter().find(|t| t.node["id"] == new.node["id"]) {
+                                Some(t) if t.node == new.node => t.clone(),
+                                Some(t) => {
+                                    let mut revised = new;
+                                    if revised.node.get("context_refs").is_none()
+                                        && let Some(refs) = t.node.get("context_refs")
+                                    {
+                                        revised.node["context_refs"] = refs.clone();
+                                    }
+                                    let used_workspace = t.prepared.is_some()
+                                        || t.execution_id.is_some()
+                                        || t.evidence.iter().any(|e| {
+                                            ["prepare", "launch"]
+                                                .contains(&e["stage"].as_str().unwrap_or(""))
+                                        });
+                                    revised.attempts =
+                                        t.attempts.saturating_add(u64::from(used_workspace));
+                                    revised.evidence = t.evidence.clone();
+                                    revised.context_gathered = t.context_gathered;
+                                    revised.context_summary = t.context_summary.clone();
+                                    revised
+                                }
+                                None => new,
+                            },
+                        )
+                        .collect();
+                    s.plan_revision += 1;
+                }
+                for name in interruptions {
+                    let current = s
+                        .tasks
+                        .iter()
+                        .find(|t| t.node["id"] == name)
+                        .ok_or(err("invalid_receipt"))?;
+                    if !["launching", "running", "unknown"].contains(&current.state.as_str()) {
+                        s.feedback.push(json!({"id":format!("settled:{}:{}",name,s.sequence),"source":"system","task_id":name,"kind":"finding","message":"The requested execution already reached a later state before the interruption decision; reconsider the plan using its recorded outcome.","status":"pending"}));
+                        continue;
+                    }
+                    // Replace an unclaimed polling lease with the targeted cancellation.
+                    let obsolete: Vec<String> = s
+                        .actions
+                        .iter()
+                        .filter(|a| {
+                            a["task_id"] == name
+                                && a["kind"] == "inspect"
+                                && a["id"]
+                                    .as_str()
+                                    .is_some_and(|id| !s.claimed_actions.contains(id))
+                        })
+                        .filter_map(|a| a["id"].as_str().map(str::to_owned))
+                        .collect();
+                    s.actions.retain(|a| {
+                        !a["id"]
+                            .as_str()
+                            .is_some_and(|id| obsolete.iter().any(|old| old == id))
+                    });
+                    s.superseded_actions.extend(obsolete);
+                    let launch = s
+                        .actions
+                        .iter()
+                        .find(|a| a["task_id"] == name && a["kind"] == "launch")
+                        .and_then(|a| a["id"].as_str())
+                        .map(str::to_owned);
+                    if let Some(launch) = launch {
+                        let i = s
+                            .tasks
+                            .iter()
+                            .position(|t| t.node["id"] == name)
+                            .ok_or(err("invalid_receipt"))?;
+                        if s.claimed_actions.contains(&launch) {
+                            s.tasks[i].execution_id = Some(launch);
+                            s.interrupt_tasks.insert(name);
+                        } else {
+                            s.actions.retain(|a| a["id"] != launch);
+                            s.superseded_actions.insert(launch);
+                            s.tasks[i].state = "blocked".into();
+                            s.feedback.push(json!({"id":format!("stopped:{}:{}",name,s.sequence),"source":"system","task_id":name,"kind":"request_change","message":"The unclaimed launch was withdrawn; reconsider the plan.","status":"pending"}));
+                        }
+                    } else {
+                        s.interrupt_tasks.insert(name);
+                    }
+                }
+                let snapshot = a["payload"]["feedback_ids"]
+                    .as_array()
+                    .ok_or(err("invalid_receipt"))?;
+                for f in &mut s.feedback {
+                    if snapshot.contains(&f["id"]) && f["status"] == "pending" {
+                        f["status"] = json!("processed");
+                        f["reply"] = json!(reply);
+                        f["plan_revision"] = json!(s.plan_revision);
+                        f["changes"] = json!({"added":added,"changed":changed,"removed":removed});
+                    }
+                }
             }
             "repair" => {
                 let i = index.ok_or(err("invalid_receipt"))?;
@@ -806,6 +1047,9 @@ impl Workflow {
                 } else {
                     s.tasks[i].execution_id.as_deref()
                 };
+                let was_interrupted = s
+                    .interrupt_tasks
+                    .contains(s.tasks[i].node["id"].as_str().unwrap_or(""));
                 let received = result.get("execution_id").and_then(Value::as_str);
                 if received.is_some() && received != expected {
                     return Err(err("invalid_receipt"));
@@ -841,7 +1085,16 @@ impl Workflow {
                         {
                             return Err(err("invalid_receipt"));
                         }
-                        s.tasks[i].state = "verifying".into();
+                        s.tasks[i].state = if s.feedback.iter().any(|f| {
+                            f["task_id"] == s.tasks[i].node["id"]
+                                && f["kind"] == "blocked"
+                                && f["status"] == "pending"
+                        }) {
+                            "blocked"
+                        } else {
+                            "verifying"
+                        }
+                        .into();
                         if let Some(model) = result["resolved_model"].as_str().filter(|s| {
                             !s.is_empty() && s.len() <= 256 && !s.chars().any(char::is_control)
                         }) {
@@ -889,6 +1142,22 @@ impl Workflow {
                             s.tasks[i].state = "needs_pool".into();
                         }
                     }
+                    Some("failed")
+                        if result["cancelled"] == true
+                            && s.interrupt_tasks
+                                .contains(s.tasks[i].node["id"].as_str().unwrap_or("")) =>
+                    {
+                        let name = s.tasks[i].node["id"].as_str().unwrap().to_owned();
+                        s.interrupt_tasks.remove(&name);
+                        s.tasks[i].state = "blocked".into();
+                        s.tasks[i].execution_id = None;
+                        s.feedback.push(json!({"id":format!("stopped:{}:{}",name,s.sequence),"source":"system","task_id":name,"kind":"request_change","message":"Requested execution has stopped; reconsider the plan.","status":"pending"}));
+                    }
+                    Some("failed") if kind == "inspect" && was_interrupted => {
+                        // A failed inspection alone does not prove the execution stopped.
+                        s.tasks[i].state = "unknown".into();
+                        s.tasks[i].next_inspect_at_ms = now_ms().saturating_add(1000);
+                    }
                     Some("failed") => {
                         s.tasks[i].state =
                             if s.status == "cancelled" && result["cancelled"] == true {
@@ -898,10 +1167,65 @@ impl Workflow {
                             }
                             .into();
                     }
-                    Some("cancelled") if s.status == "cancelled" => {
-                        s.tasks[i].state = "cancelled".into();
+                    Some("cancelled")
+                        if s.status == "cancelled"
+                            || s.interrupt_tasks
+                                .contains(s.tasks[i].node["id"].as_str().unwrap_or("")) =>
+                    {
+                        let name = s.tasks[i].node["id"].as_str().unwrap().to_owned();
+                        if s.interrupt_tasks.remove(&name) {
+                            s.tasks[i].state = "blocked".into();
+                            s.tasks[i].execution_id = None;
+                            s.feedback.push(json!({"id":format!("stopped:{}:{}",name,s.sequence),"source":"system","task_id":name,"kind":"request_change","message":"Requested execution has stopped; reconsider the plan.","status":"pending"}));
+                        } else {
+                            s.tasks[i].state = "cancelled".into();
+                        }
                     }
                     _ => return Err(err("invalid_receipt")),
+                }
+                let name = s.tasks[i].node["id"].as_str().unwrap().to_owned();
+                if result["status"] == "failed" && result["cancelled"] != true {
+                    let mut reported = false;
+                    for feedback in &mut s.feedback {
+                        if feedback["source"] == "worker"
+                            && feedback["kind"] == "blocked"
+                            && feedback["task_id"] == name
+                            && feedback["attempt_outcome_reported"] != true
+                        {
+                            feedback["attempt_outcome_reported"] = json!(true);
+                            reported = true;
+                        }
+                    }
+                    if reported {
+                        s.feedback.push(json!({"id":format!("blocked-outcome:{}:{}",name,s.sequence),"source":"system","task_id":name,"kind":"finding","message":"The worker attempt ended after reporting a blocker; its output was not accepted as successful. Reconsider the plan with the recorded outcome.","status":"pending"}));
+                    }
+                }
+                let confirmed_terminal = result["status"] == "completed"
+                    || result["status"] == "cancelled"
+                    || (result["status"] == "failed"
+                        && (kind == "launch" || result["cancelled"] == true));
+                if confirmed_terminal && s.interrupt_tasks.remove(&name) {
+                    s.feedback.push(json!({"id":format!("stopped:{}:{}",name,s.sequence),"source":"system","task_id":name,"kind":"request_change","message":"The requested execution reached a terminal state before cancellation; reconsider the plan using its recorded outcome.","status":"pending"}));
+                }
+                if was_interrupted && confirmed_terminal {
+                    // The other concurrent receipt is now stale; retain the actual terminal result.
+                    let stale: Vec<String> = s
+                        .actions
+                        .iter()
+                        .filter(|peer| {
+                            peer["task_id"] == name
+                                && peer["id"] != aid
+                                && ["launch", "inspect"]
+                                    .contains(&peer["kind"].as_str().unwrap_or(""))
+                        })
+                        .filter_map(|peer| peer["id"].as_str().map(str::to_owned))
+                        .collect();
+                    s.actions.retain(|peer| {
+                        !peer["id"]
+                            .as_str()
+                            .is_some_and(|id| stale.iter().any(|old| old == id))
+                    });
+                    s.superseded_actions.extend(stale);
                 }
             }
             "verify" => {
@@ -970,7 +1294,7 @@ impl Workflow {
             s.recent_events.remove(0);
         }
         s.recent_events.push(summary);
-        s.actions.remove(pos);
+        s.actions.retain(|action| action["id"] != aid);
         if kind == "refresh_pool" {
             s.actions.retain(|a| {
                 (a["kind"] != "refresh_pool" && a["kind"] != "route")
@@ -1044,7 +1368,47 @@ impl Workflow {
             }
             return;
         }
-        if s.tasks.iter().all(|t| t.state == "done") {
+        let pending: Vec<Value> = s
+            .feedback
+            .iter()
+            .filter(|f| f["status"] == "pending")
+            .take(8)
+            .cloned()
+            .collect();
+        if !pending.is_empty() && !s.actions.iter().any(|a| a["kind"] == "replan") {
+            let ids: Vec<Value> = pending.iter().map(|f| f["id"].clone()).collect();
+            let nodes: Vec<Value> = s.tasks.iter().map(|t| t.node.clone()).collect();
+            let tasks: Vec<Value> = s.tasks.iter().map(|t| json!({"task":t.node,"status":t.state,"execution_id":t.execution_id,"evidence":t.evidence})).collect();
+            let mutable: Vec<Value> = s
+                .tasks
+                .iter()
+                .filter(|t| mutable_task(s, t))
+                .map(|t| t.node["id"].clone())
+                .collect();
+            self.action(s, "replan", None, json!({"goal":s.request["goal"],"plan":{"nodes":nodes},"tasks":tasks,"mutable_task_ids":mutable,"feedback":pending,"feedback_ids":ids}));
+        }
+        let held = feedback_hold(s);
+        for i in 0..s.tasks.len() {
+            let name = s.tasks[i].node["id"].as_str().unwrap_or("").to_owned();
+            if s.interrupt_tasks.contains(&name)
+                && ["launching", "running", "unknown"].contains(&s.tasks[i].state.as_str())
+                && s.tasks[i].execution_id.is_some()
+                && (s.tasks[i].state == "launching" || s.tasks[i].next_inspect_at_ms <= now_ms())
+                && !s
+                    .actions
+                    .iter()
+                    .any(|a| a["task_id"] == name && a["kind"] == "inspect")
+            {
+                let execution_id = s.tasks[i].execution_id.clone();
+                self.action(
+                    s,
+                    "inspect",
+                    Some(i),
+                    json!({"operation":"cancel","execution_id":execution_id}),
+                );
+            }
+        }
+        if held.is_none() && s.tasks.iter().all(|t| t.state == "done") {
             s.status = "completed".into();
             return;
         }
@@ -1054,6 +1418,14 @@ impl Workflow {
                 continue;
             }
             let state = s.tasks[i].state.clone();
+            if held.as_ref().is_some_and(|affected| {
+                affected
+                    .as_ref()
+                    .is_none_or(|ids| tid.as_str().is_some_and(|id| ids.contains(id)))
+            }) && !["running", "unknown", "verifying", "integrating"].contains(&state.as_str())
+            {
+                continue;
+            }
             let deps = strings(s.tasks[i].node.get("depends_on"), 128).unwrap_or_default();
             if state == "pending"
                 && !deps.iter().all(|d| {
@@ -1741,6 +2113,68 @@ pub fn preflight_plan(plan: &Value) -> Result<(), Value> {
     Ok(())
 }
 
+// Outer None means no decision is pending; inner None holds all tasks.
+fn feedback_hold(s: &State) -> Option<Option<BTreeSet<String>>> {
+    let pending: Vec<&Value> = s
+        .feedback
+        .iter()
+        .filter(|f| f["status"] == "pending")
+        .collect();
+    if pending.is_empty() {
+        return None;
+    }
+    if pending
+        .iter()
+        .any(|f| f.get("task_id").and_then(Value::as_str).is_none())
+    {
+        return Some(None);
+    }
+    let mut affected: BTreeSet<String> = pending
+        .iter()
+        .filter_map(|f| f["task_id"].as_str().map(str::to_owned))
+        .collect();
+    loop {
+        let before = affected.len();
+        for task in &s.tasks {
+            if strings(task.node.get("depends_on"), 128)
+                .unwrap_or_default()
+                .iter()
+                .any(|dep| affected.contains(dep))
+                && let Some(name) = task.node["id"].as_str()
+            {
+                affected.insert(name.to_owned());
+            }
+        }
+        if affected.len() == before {
+            break;
+        }
+    }
+    Some(Some(affected))
+}
+
+fn mutable_task(s: &State, task: &Task) -> bool {
+    let claimed = s.actions.iter().any(|a| {
+        a["task_id"] == task.node["id"]
+            && a["id"]
+                .as_str()
+                .is_some_and(|id| s.claimed_actions.contains(id))
+            && !["route", "review_route", "repair"].contains(&a["kind"].as_str().unwrap_or(""))
+    });
+    !claimed
+        && [
+            "pending",
+            "routing",
+            "routed",
+            "held",
+            "failed",
+            "blocked",
+            "repairing",
+            "needs_pool",
+            "awaiting_pool",
+        ]
+        .contains(&task.state.as_str())
+}
+
 fn validate_plan(plan: &Value) -> Result<Vec<Task>, WorkflowError> {
     if plan
         .as_object()
@@ -2101,5 +2535,392 @@ mod review_session_tests {
     fn unknown_or_unattested_hosts_still_exclude_producer() {
         check_review(None);
         check_review(Some("unknown"));
+    }
+}
+
+#[cfg(test)]
+mod live_feedback_tests {
+    use super::*;
+
+    fn setup() -> (tempfile::TempDir, Workflow, String, Value) {
+        let dir = tempfile::tempdir().unwrap();
+        let workflow = Workflow::new(dir.path().to_path_buf());
+        let state = workflow.start(&json!({"workspace":"workspace","goal":"test", "pool":[{"id":"a","description":"worker","capabilities":[],"available":true}],"plan":{"nodes":[{"id":"done","objective":"finished"},{"id":"running","objective":"active"},{"id":"later","objective":"old","depends_on":["done"]}]}})).unwrap();
+        let run = state["run_id"].as_str().unwrap().to_owned();
+        let mut stored = workflow.load(&run).unwrap();
+        stored.actions.clear();
+        stored.tasks[0].state = "done".into();
+        stored.tasks[0]
+            .evidence
+            .push(json!({"stage":"integrate","status":"integrated"}));
+        stored.tasks[1].state = "running".into();
+        stored.tasks[1].execution_id = Some("execution".into());
+        workflow.save(&mut stored).unwrap();
+        let report = json!({"id":"feedback-1","source":"user","kind":"request_change","message":"Revise later"});
+        (dir, workflow, run, report)
+    }
+    fn action(state: &Value, kind: &str) -> Value {
+        state["actions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|a| a["kind"] == kind)
+            .unwrap()
+            .clone()
+    }
+    #[test]
+    fn replacement_preserves_active_and_done_and_keeps_new_feedback_pending() {
+        let (_dir, workflow, run, report) = setup();
+        let state = workflow.report(&run, &report).unwrap();
+        assert_eq!(
+            workflow.report(&run, &report).unwrap()["feedback"]
+                .as_array()
+                .unwrap()
+                .len(),
+            1
+        );
+        let replan = action(&state, "replan");
+        workflow
+            .report(
+                &run,
+                &json!({"id":"feedback-2","source":"user","kind":"finding","message":"another"}),
+            )
+            .unwrap();
+        let plan = json!({"nodes":[{"id":"done","objective":"finished"},{"id":"running","objective":"active"},{"id":"later","objective":"new","depends_on":["running"]},{"id":"new","objective":"extra","depends_on":["later"]}]});
+        let state = workflow.observe(&run, &json!({"event_id":"replan-result","action_id":replan["id"],"result":{"plan":plan,"reply":"Updated","interrupt_tasks":[]}})).unwrap();
+        assert_eq!(state["plan_revision"], 1);
+        assert_eq!(state["tasks"][0]["status"], "done");
+        assert_eq!(state["tasks"][0]["evidence"][0]["status"], "integrated");
+        assert_eq!(state["tasks"][1]["execution_id"], "execution");
+        assert_eq!(state["feedback"][0]["status"], "processed");
+        assert_eq!(state["feedback"][1]["status"], "pending");
+        assert_eq!(
+            action(&state, "replan")["payload"]["feedback_ids"],
+            json!(["feedback-2"])
+        );
+    }
+    #[test]
+    fn report_during_initial_plan_waits_for_plan_and_freezes_dispatch() {
+        let dir = tempfile::tempdir().unwrap();
+        let workflow = Workflow::new(dir.path().to_path_buf());
+        let state = workflow.start(&json!({"workspace":"workspace","goal":"test","pool":[{"id":"a","description":"worker","capabilities":[],"available":true}]})).unwrap();
+        let run = state["run_id"].as_str().unwrap();
+        let plan = action(&state, "plan");
+        let state = workflow
+            .report(
+                run,
+                &json!({"id":"f","source":"user","kind":"request_change","message":"change"}),
+            )
+            .unwrap();
+        assert!(
+            state["actions"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|a| a["kind"] != "replan")
+        );
+        assert!(workflow.claim(run, plan["id"].as_str().unwrap()).unwrap());
+        let state = workflow.observe(run, &json!({"event_id":"planned","action_id":plan["id"],"result":{"plan":{"nodes":[{"id":"one","objective":"original"}]}}})).unwrap();
+        assert_eq!(
+            action(&state, "replan")["payload"]["mutable_task_ids"],
+            json!(["one"])
+        );
+        assert!(
+            state["actions"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|a| a["kind"] != "route")
+        );
+    }
+    #[test]
+    fn task_feedback_holds_descendants_but_unrelated_branch_can_dispatch() {
+        let (_dir, workflow, run, _) = setup();
+        let mut stored = workflow.load(&run).unwrap();
+        let mut extra =
+            validate_plan(&json!({"nodes":[{"id":"independent","objective":"separate"}]})).unwrap();
+        stored.tasks.append(&mut extra);
+        let mut descendant = validate_plan(&json!({"nodes":[{"id":"child","objective":"child"}]}))
+            .unwrap()
+            .remove(0);
+        descendant.node["depends_on"] = json!(["later"]);
+        stored.tasks.push(descendant);
+        stored.tasks[2].state = "routing".into();
+        workflow.action(&mut stored, "route", Some(2), json!({}));
+        let affected_action = stored.actions[0]["id"].as_str().unwrap().to_owned();
+        workflow.save(&mut stored).unwrap();
+        let state = workflow.report(&run, &json!({"id":"scoped","source":"user","task_id":"later","kind":"request_change","message":"Change this branch"})).unwrap();
+        let route = state["actions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|a| a["kind"] == "route" && a["task_id"] == "independent")
+            .unwrap();
+        assert!(workflow.claim(&run, route["id"].as_str().unwrap()).unwrap());
+        assert!(!workflow.claim(&run, &affected_action).unwrap());
+        assert!(
+            state["actions"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|a| a["task_id"] != "child")
+        );
+    }
+    #[test]
+    fn pending_task_feedback_allows_verification_and_integration_to_settle() {
+        let (_dir, workflow, run, _) = setup();
+        let mut stored = workflow.load(&run).unwrap();
+        stored.tasks[1].state = "verifying".into();
+        workflow.save(&mut stored).unwrap();
+        let state = workflow.report(&run, &json!({"id":"settle","source":"user","task_id":"running","kind":"request_change","message":"Review the result"})).unwrap();
+        let verify = action(&state, "verify");
+        assert!(
+            workflow
+                .claim(&run, verify["id"].as_str().unwrap())
+                .unwrap()
+        );
+        let state = workflow.observe(&run, &json!({"event_id":"verified","action_id":verify["id"],"result":{"status":"passed","evidence":[]}})).unwrap();
+        let integrate = action(&state, "integrate");
+        assert!(
+            workflow
+                .claim(&run, integrate["id"].as_str().unwrap())
+                .unwrap()
+        );
+        let state = workflow.observe(&run, &json!({"event_id":"integrated","action_id":integrate["id"],"result":{"status":"integrated"}})).unwrap();
+        assert_eq!(state["tasks"][1]["status"], "done");
+        assert_eq!(state["feedback"][0]["status"], "pending");
+        assert!(
+            state["actions"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|a| a["kind"] == "replan")
+        );
+    }
+    #[test]
+    fn pending_feedback_is_sent_in_bounded_batches() {
+        let (_dir, workflow, run, report) = setup();
+        let state = workflow.report(&run, &report).unwrap();
+        let first = action(&state, "replan");
+        for n in 2..=10 {
+            workflow.report(&run, &json!({"id":format!("f{n}"),"source":"user","kind":"finding","message":"note"})).unwrap();
+        }
+        let state = workflow.observe(&run, &json!({"event_id":"batch1","action_id":first["id"],"result":{"plan":null,"reply":"noted","interrupt_tasks":[]}})).unwrap();
+        let next = action(&state, "replan");
+        assert_eq!(next["payload"]["feedback_ids"].as_array().unwrap().len(), 8);
+        let state = workflow.observe(&run, &json!({"event_id":"batch2","action_id":next["id"],"result":{"plan":null,"reply":"noted","interrupt_tasks":[]}})).unwrap();
+        assert_eq!(
+            action(&state, "replan")["payload"]["feedback_ids"]
+                .as_array()
+                .unwrap()
+                .len(),
+            1
+        );
+    }
+    #[test]
+    fn revised_failed_task_keeps_evidence_and_uses_fresh_attempt() {
+        let (_dir, workflow, run, report) = setup();
+        let mut stored = workflow.load(&run).unwrap();
+        let task = &mut stored.tasks[2];
+        task.state = "failed".into();
+        task.prepared = Some(json!({"workspace":"old-partial"}));
+        task.execution_id = Some("old-execution".into());
+        task.evidence
+            .push(json!({"stage":"launch","status":"failed"}));
+        task.node["context_refs"] = json!(["prior-notes"]);
+        task.context_summary = Some("prior context".into());
+        workflow.save(&mut stored).unwrap();
+        let state = workflow.report(&run, &report).unwrap();
+        let replan = action(&state, "replan");
+        let plan = json!({"nodes":[{"id":"done","objective":"finished"},{"id":"running","objective":"active"},{"id":"later","objective":"new","depends_on":["done"]}]});
+        let state = workflow.observe(&run, &json!({"event_id":"change-failed","action_id":replan["id"],"result":{"plan":plan,"reply":"Revised","interrupt_tasks":[]}})).unwrap();
+        assert_eq!(state["tasks"][2]["repair_rounds"], 1);
+        assert_eq!(state["tasks"][2]["evidence"][0]["status"], "failed");
+        assert_eq!(
+            state["tasks"][2]["task"]["context_refs"],
+            json!(["prior-notes"])
+        );
+        assert!(state["tasks"][2]["prepared"].is_null());
+        assert!(state["tasks"][2]["execution_id"].is_null());
+        assert_eq!(state["tasks"][1]["execution_id"], "execution");
+        assert_eq!(state["tasks"][0]["evidence"][0]["status"], "integrated");
+    }
+    #[test]
+    fn claimed_side_effect_protects_even_pending_task_from_removal() {
+        let (_dir, workflow, run, report) = setup();
+        let mut stored = workflow.load(&run).unwrap();
+        workflow.action(&mut stored, "prepare", Some(2), json!({}));
+        let aid = stored.actions[0]["id"].as_str().unwrap().to_owned();
+        stored.claimed_actions.insert(aid);
+        workflow.save(&mut stored).unwrap();
+        let state = workflow.report(&run, &report).unwrap();
+        let replan = action(&state, "replan");
+        assert!(
+            !replan["payload"]["mutable_task_ids"]
+                .as_array()
+                .unwrap()
+                .contains(&json!("later"))
+        );
+        let plan = json!({"nodes":[{"id":"done","objective":"finished"},{"id":"running","objective":"active"}]});
+        assert_eq!(workflow.observe(&run, &json!({"event_id":"remove-claimed","action_id":replan["id"],"result":{"plan":plan,"reply":"Remove","interrupt_tasks":[]}})).unwrap_err().code,"invalid_receipt");
+    }
+    #[test]
+    fn active_edit_is_rejected() {
+        let (_dir, workflow, run, report) = setup();
+        let state = workflow.report(&run, &report).unwrap();
+        let replan = action(&state, "replan");
+        let plan = json!({"nodes":[{"id":"done","objective":"finished"},{"id":"running","objective":"edited"},{"id":"later","objective":"old","depends_on":["done"]}]});
+        assert_eq!(workflow.observe(&run, &json!({"event_id":"invalid","action_id":replan["id"],"result":{"plan":plan,"reply":"edit","interrupt_tasks":[]}})).unwrap_err().code, "invalid_receipt");
+    }
+    #[test]
+    fn acknowledged_worker_blocker_is_reconsidered_after_attempt_fails() {
+        let (_dir, workflow, run, _) = setup();
+        let state = workflow.report(&run, &json!({"id":"worker-block","source":"worker","task_id":"running","kind":"blocked","message":"Cannot proceed"})).unwrap();
+        let replan = action(&state, "replan");
+        let state = workflow.observe(&run, &json!({"event_id":"ack","action_id":replan["id"],"result":{"plan":null,"reply":"Noted","interrupt_tasks":[]}})).unwrap();
+        let inspect = action(&state, "inspect");
+        let state = workflow.observe(&run, &json!({"event_id":"attempt-failed","action_id":inspect["id"],"result":{"status":"failed","execution_id":"execution"}})).unwrap();
+        assert_eq!(state["tasks"][1]["status"], "failed");
+        assert_eq!(
+            action(&state, "replan")["payload"]["feedback"][0]["source"],
+            "system"
+        );
+    }
+    #[test]
+    fn superseded_route_receipt_is_ignored() {
+        let (_dir, workflow, run, report) = setup();
+        let mut stored = workflow.load(&run).unwrap();
+        stored.tasks[2].state = "routing".into();
+        workflow.action(&mut stored, "route", Some(2), json!({}));
+        let old = stored.actions[0]["id"].clone();
+        workflow.save(&mut stored).unwrap();
+        let state = workflow.report(&run, &report).unwrap();
+        let replan = action(&state, "replan");
+        let plan = json!({"nodes":[{"id":"done","objective":"finished"},{"id":"running","objective":"active"},{"id":"later","objective":"new","depends_on":["running"]}]});
+        workflow.observe(&run, &json!({"event_id":"change","action_id":replan["id"],"result":{"plan":plan,"reply":"Updated","interrupt_tasks":[]}})).unwrap();
+        let late = json!({"event_id":"late","action_id":old,"result":{"status":"ready","candidate_id":"a"}});
+        let state = workflow.observe(&run, &late).unwrap();
+        assert_eq!(state["tasks"][2]["task"]["objective"], "new");
+        assert!(workflow.observe(&run, &late).is_ok());
+    }
+    #[test]
+    fn interrupt_claimed_launch_uses_exact_execution_and_waits_for_terminal_receipt() {
+        let (_dir, workflow, run, report) = setup();
+        let mut stored = workflow.load(&run).unwrap();
+        stored.tasks[1].state = "launching".into();
+        stored.tasks[1].execution_id = None;
+        workflow.action(&mut stored, "launch", Some(1), json!({}));
+        let launch = stored.actions[0]["id"].as_str().unwrap().to_owned();
+        stored.claimed_actions.insert(launch.clone());
+        workflow.save(&mut stored).unwrap();
+        let state = workflow.report(&run, &report).unwrap();
+        let replan = action(&state, "replan");
+        let state = workflow.observe(&run, &json!({"event_id":"interrupt-launch","action_id":replan["id"],"result":{"plan":null,"reply":"Stopping","interrupt_tasks":["running"]}})).unwrap();
+        let inspect = action(&state, "inspect");
+        assert_eq!(inspect["payload"]["operation"], "cancel");
+        assert_eq!(inspect["payload"]["execution_id"], launch);
+        assert!(
+            state["actions"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|a| a["id"] == launch)
+        );
+        let state = workflow.observe(&run, &json!({"event_id":"cancel-pending","action_id":inspect["id"],"result":{"status":"unknown","execution_id":launch}})).unwrap();
+        assert!(
+            state["feedback"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|f| f["source"] != "system")
+        );
+        let state = workflow.observe(&run, &json!({"event_id":"launch-stopped","action_id":launch,"result":{"status":"failed","cancelled":true,"execution_id":launch}})).unwrap();
+        assert_eq!(state["tasks"][1]["status"], "blocked");
+        assert_eq!(
+            action(&state, "replan")["payload"]["feedback"][0]["source"],
+            "system"
+        );
+    }
+    #[test]
+    fn interrupt_unclaimed_launch_revokes_it_without_starting() {
+        let (_dir, workflow, run, report) = setup();
+        let mut stored = workflow.load(&run).unwrap();
+        stored.tasks[1].candidate = Some(stored.request["pool"][0].clone());
+        stored.tasks[1].state = "launching".into();
+        stored.tasks[1].execution_id = None;
+        workflow.action(&mut stored, "launch", Some(1), json!({}));
+        let launch = stored.actions[0]["id"].as_str().unwrap().to_owned();
+        workflow.save(&mut stored).unwrap();
+        let state = workflow.report(&run, &report).unwrap();
+        let replan = action(&state, "replan");
+        let state = workflow.observe(&run,&json!({"event_id":"withdraw","action_id":replan["id"],"result":{"plan":null,"reply":"Stopping","interrupt_tasks":["running"]}})).unwrap();
+        assert!(!workflow.claim(&run, &launch).unwrap());
+        assert_eq!(state["tasks"][1]["status"], "blocked");
+        assert_eq!(
+            action(&state, "replan")["payload"]["feedback"][0]["source"],
+            "system"
+        );
+    }
+    #[test]
+    fn interruption_reply_after_completion_replans_without_overwriting_result() {
+        let (_dir, workflow, run, report) = setup();
+        let mut stored = workflow.load(&run).unwrap();
+        stored.tasks[1].state = "launching".into();
+        stored.tasks[1].execution_id = None;
+        workflow.action(&mut stored, "launch", Some(1), json!({}));
+        let launch = stored.actions[0]["id"].as_str().unwrap().to_owned();
+        stored.claimed_actions.insert(launch.clone());
+        workflow.save(&mut stored).unwrap();
+        let state = workflow.report(&run, &report).unwrap();
+        let replan = action(&state, "replan");
+        let state = workflow.observe(&run,&json!({"event_id":"finished-before-reply","action_id":launch,"result":{"status":"completed","completion_verified":true,"execution_id":launch}})).unwrap();
+        assert_eq!(state["tasks"][1]["status"], "verifying");
+        let state = workflow.observe(&run,&json!({"event_id":"late-interrupt-reply","action_id":replan["id"],"result":{"plan":null,"reply":"Stopping","interrupt_tasks":["running"]}})).unwrap();
+        assert_eq!(state["tasks"][1]["status"], "verifying");
+        assert_eq!(
+            action(&state, "replan")["payload"]["feedback"][0]["source"],
+            "system"
+        );
+        assert!(
+            state["actions"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|a| a["kind"] != "inspect" || a["payload"]["operation"] != "cancel")
+        );
+    }
+    #[test]
+    fn launch_completion_before_cancel_preserves_success_and_ignores_late_cancel() {
+        let (_dir, workflow, run, report) = setup();
+        let mut stored = workflow.load(&run).unwrap();
+        stored.tasks[1].state = "launching".into();
+        stored.tasks[1].execution_id = None;
+        workflow.action(&mut stored, "launch", Some(1), json!({}));
+        let launch = stored.actions[0]["id"].as_str().unwrap().to_owned();
+        stored.claimed_actions.insert(launch.clone());
+        workflow.save(&mut stored).unwrap();
+        let state = workflow.report(&run, &report).unwrap();
+        let replan = action(&state, "replan");
+        let state = workflow.observe(&run,&json!({"event_id":"interrupt-race","action_id":replan["id"],"result":{"plan":null,"reply":"Stopping","interrupt_tasks":["running"]}})).unwrap();
+        let cancel = action(&state, "inspect");
+        let state = workflow.observe(&run,&json!({"event_id":"completed-first","action_id":launch,"result":{"status":"completed","completion_verified":true,"execution_id":launch}})).unwrap();
+        assert_eq!(state["tasks"][1]["status"], "verifying");
+        let state = workflow.observe(&run,&json!({"event_id":"late-cancel","action_id":cancel["id"],"result":{"status":"failed","cancelled":true,"execution_id":launch}})).unwrap();
+        assert_eq!(state["tasks"][1]["status"], "verifying");
+    }
+    #[test]
+    fn interrupt_waits_for_confirmed_stop_before_replanning() {
+        let (_dir, workflow, run, report) = setup();
+        let state = workflow.report(&run, &report).unwrap();
+        let replan = action(&state, "replan");
+        let state = workflow.observe(&run, &json!({"event_id":"interrupt","action_id":replan["id"],"result":{"plan":null,"reply":"Stopping","interrupt_tasks":["running"]}})).unwrap();
+        let inspect = action(&state, "inspect");
+        assert_eq!(inspect["payload"]["operation"], "cancel");
+        let state = workflow.observe(&run, &json!({"event_id":"stopped","action_id":inspect["id"],"result":{"status":"failed","cancelled":true,"execution_id":"execution"}})).unwrap();
+        assert_eq!(state["tasks"][1]["status"], "blocked");
+        assert_eq!(
+            action(&state, "replan")["payload"]["feedback"][0]["source"],
+            "system"
+        );
     }
 }

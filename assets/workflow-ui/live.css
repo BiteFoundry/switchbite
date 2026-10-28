@@ -25,6 +25,15 @@ input, textarea { caret-color: var(--wim-accent); }
 .wim-artifact-details { margin-top: 16px; }
 .wim-artifact-details summary { cursor: pointer; color: var(--wim-ink-2); padding: 8px 0; }
 .wim-ui-message { margin: 0; padding: 12px var(--wim-pad); color: var(--wim-accent); background: var(--wim-surface); border-bottom: 1px solid var(--wim-line); }
+.wim-feedback { display: grid; gap: 8px; margin-top: 16px; padding-top: 16px; border-top: 1px solid var(--wim-line); }
+.wim-feedback[hidden] { display: none; }
+.wim-feedback label { font-size: var(--wim-fs-2); color: var(--wim-ink-2); }
+.wim-feedback textarea, .wim-feedback select { width: 100%; min-width: 0; box-sizing: border-box; border: 1px solid var(--wim-line); border-radius: 6px; background: var(--wim-bg); color: var(--wim-ink); padding: 10px; font: inherit; }
+.wim-feedback textarea { resize: vertical; }
+.wim-feedback-feed { list-style: none; padding: 0; margin: 12px 0 0; display: grid; gap: 10px; max-height: 440px; overflow: auto; }
+.wim-feedback-feed li { border-left: 2px solid var(--wim-accent); padding: 0 0 0 10px; overflow-wrap: anywhere; }
+.wim-feedback-feed p { margin: 4px 0; white-space: pre-wrap; font-size: var(--wim-fs-2); }
+.wim-feedback-feed small { color: var(--wim-ink-2); }
 .wim-artifact-text { flex-basis: 100%; max-height: 420px; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; font: var(--wim-fs-2)/1.6 var(--wim-font-mono); background: var(--wim-bg); padding: 16px; margin: 0; }
 .wim-pool__row[data-availability] { border-left-width: 1px; border-left-style: solid; }
 .wim-pool__tier:empty { display: none; }

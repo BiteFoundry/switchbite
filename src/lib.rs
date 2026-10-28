@@ -30,3 +30,5 @@ mod workflow_artifacts;
 pub mod workflow_interface;
 pub mod workflow_runner;
 pub mod workflow_ui;
+
+pub mod worker_feedback;

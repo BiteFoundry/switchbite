@@ -6,7 +6,7 @@ use rmcp::model::Tool;
 use serde_json::{Value, json};
 use std::{path::PathBuf, sync::Arc};
 
-pub const INSTRUCTIONS: &str = "Coordinate the user's authorized work. Start with a workspace and a goal or a plan. Omit pool to discover available workers automatically; supply a factual pool to choose workers explicitly. Decompose a goal into bounded tasks when a plan action is returned; give each task an ID, objective, dependencies, acceptance checks and write paths. Execute independent work within reservations. Call next and act on its returned actions. With a host configuration or complete local worker metadata, next can drive supported host actions; otherwise perform them with your host and observe results. Observe plan or repair actions with a plan or task and stable action_id and event_id. Verify completed work and integrate it before unblocking dependants. Gather missing context and perform bounded repairs. Inspect unknown executions rather than launching duplicates. Continue until complete or an actionable input is needed.";
+pub const INSTRUCTIONS: &str = "Coordinate the user's authorized work. Start with a workspace and a goal or a plan. Omit pool to discover available workers automatically; supply a factual pool to choose workers explicitly. Decompose a goal into bounded tasks when a plan action is returned; give each task an ID, objective, dependencies, acceptance checks and write paths. Execute independent work within reservations. Call next and act on its returned actions. With a host configuration or complete local worker metadata, next can drive supported host actions; otherwise perform them with your host and observe results. Observe plan or repair actions with a plan or task and stable action_id and event_id. Use switchbite_report to submit user feedback with a stable ID. When next returns a replan action, evaluate its feedback and current tasks, then observe it with {plan:null or a full replacement DAG, reply: a nonempty user-facing decision, interrupt_tasks: an array of active task IDs}. Preserve completed and active nodes; to replace an active task, request its interruption and replace it after it stops. A plan accompanying the interruption must preserve protected nodes. Verify completed work and integrate it before unblocking dependants. Gather missing context and perform bounded repairs. Inspect unknown executions rather than launching duplicates. Continue until complete or an actionable input is needed.";
 
 /// Canonical workflow plan contract shared with coordinator outputs.
 pub fn plan_schema() -> Value {
@@ -48,14 +48,15 @@ pub fn tools() -> Vec<Tool> {
     let observe = json!({"type":"object","additionalProperties":false,"required":["run_id","event"],"properties":{
         "run_id":{"type":"string"},"event":{"type":"object","additionalProperties":false,"required":["action_id","event_id","result"],"properties":{
             "action_id":{"type":"string","description":"Exact action ID from the workflow."},"event_id":{"type":"string","description":"Stable unique receipt ID; repeat the same event unchanged to retry safely."},
-            "result":{"type":"object","description":"Action-specific result. Plan: {plan:{nodes:[...]}}. Repair: {task:{...}} or {plan:{nodes:[...]}}. Host actions return their specified status and evidence.","properties":{
-                "plan":plan,"task":node,"status":{"type":"string"},"candidate_id":{"type":"string"},"execution_id":{"type":"string"},"reason_codes":{"type":"array","items":{"type":"string"}},"summary":{"type":"string"},"completion_verified":{"type":"boolean"},"evidence":{"type":"array","items":{}},"context_refs":{"type":"array","items":{"type":"string"}},"workspace":{"type":"string"},"branch":{"type":"string"},"integration_workspace":{"type":"string"},"integration_branch":{"type":"string"},"commit":{"type":"string"}
+            "result":{"type":"object","description":"Action-specific result. Plan: {plan:{nodes:[...]}}. Repair: {task:{...}} or {plan:{nodes:[...]}}. Replan: {plan:null or {nodes:[...]},reply:string,interrupt_tasks:[task IDs]}. Host actions return their specified status and evidence.","properties":{
+                "plan":{"anyOf":[plan,{"type":"null"}],"description":"Full replacement DAG, or null to acknowledge feedback or request interruption."},"task":node,"reply":{"type":"string","description":"Nonempty user-facing decision for a replan."},"interrupt_tasks":{"type":"array","items":{"type":"string"},"description":"Task IDs to stop before replacing; any accompanying plan must preserve protected nodes."},"status":{"type":"string"},"candidate_id":{"type":"string"},"execution_id":{"type":"string"},"reason_codes":{"type":"array","items":{"type":"string"}},"summary":{"type":"string"},"completion_verified":{"type":"boolean"},"evidence":{"type":"array","items":{}},"context_refs":{"type":"array","items":{"type":"string"}},"workspace":{"type":"string"},"branch":{"type":"string"},"integration_workspace":{"type":"string"},"integration_branch":{"type":"string"},"commit":{"type":"string"}
             }}
         }}},"examples":[{"run_id":"RUN_ID","event":{"action_id":"PLAN_ACTION_ID","event_id":"plan-1","result":{"plan":{"nodes":[{"id":"build","objective":"Implement the feature","depends_on":[],"role":"implementation","acceptance":["Feature checks pass"],"write_paths":["src/feature.rs"]}]}}}}]});
     vec![
         Tool::new("switchbite_start", "Start a workflow with a workspace and goal or plan. Omit pool for automatic discovery, or supply a factual pool. Run and action IDs and scheduling defaults are generated automatically.", start.as_object().unwrap().clone()),
         Tool::new("switchbite_next", "Advance a run and return actions. Operation defaults to next; status, pause, resume and cancel inspect or control the same run. External hosts claim an action immediately before dispatch.", json!({"type":"object","properties":{"run_id":{"type":"string","description":"Run ID returned by start."},"operation":{"type":"string","enum":["next","status","pause","resume","cancel","claim"],"default":"next"},"action_id":{"type":"string","description":"Required for operation claim; exact leased action ID."}},"required":["run_id"],"additionalProperties":false}).as_object().unwrap().clone()),
         Tool::new("switchbite_observe", "Record a plan, repair or host action result with its exact action ID and a stable event ID; identical retries are idempotent.", observe.as_object().unwrap().clone()),
+        Tool::new("switchbite_report", "Submit a user report or feedback for the coordinator to evaluate during a run.", json!({"type":"object","additionalProperties":false,"required":["run_id","report"],"properties":{"run_id":{"type":"string"},"report":{"type":"object","description":"User feedback with a stable report ID and message.","properties":{"id":{"type":"string"},"source":{"type":"string","enum":["user","worker","system"]},"task_id":{"type":"string"},"kind":{"type":"string","enum":["blocked","finding","request_change"]},"message":{"type":"string"}},"required":["id","source","kind","message"],"additionalProperties":false}}}).as_object().unwrap().clone()),
     ]
 }
 pub struct Interface {
@@ -123,6 +124,11 @@ impl Interface {
     pub fn observe(&self, run: &str, event: &Value) -> Result<Value, Value> {
         Workflow::new(self.root(run)?)
             .observe(run, event)
+            .map_err(|e| e.to_value())
+    }
+    pub fn report(&self, run: &str, report: &Value) -> Result<Value, Value> {
+        Workflow::new(self.root(run)?)
+            .report(run, report)
             .map_err(|e| e.to_value())
     }
     pub fn status(&self, run: &str) -> Result<Value, Value> {

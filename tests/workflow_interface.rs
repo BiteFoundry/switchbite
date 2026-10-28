@@ -2,11 +2,16 @@ use serde_json::json;
 use switchbite::workflow_interface::{Interface, tools};
 
 #[test]
-fn workflow_tools_are_three_and_named() {
+fn workflow_tools_include_live_reporting() {
     let names: Vec<String> = tools().iter().map(|t| t.name.to_string()).collect();
     assert_eq!(
         names,
-        ["switchbite_start", "switchbite_next", "switchbite_observe"]
+        [
+            "switchbite_start",
+            "switchbite_next",
+            "switchbite_observe",
+            "switchbite_report"
+        ]
     );
 }
 

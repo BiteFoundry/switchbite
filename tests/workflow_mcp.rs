@@ -74,6 +74,58 @@ impl Client {
 }
 
 #[tokio::test]
+async fn report_and_coordinator_reply_survive_stdio_restarts() {
+    let temp = tempfile::tempdir().unwrap();
+    let workspace = temp.path().join("project");
+    std::fs::create_dir(&workspace).unwrap();
+    let data = temp.path().join("data");
+    let mut first = Client::open(&data).await;
+    let started = first.tool(2, "switchbite_start", json!({"request":{"workspace":workspace,"goal":"Make a report","pool":[],"plan":{"nodes":[{"id":"draft","objective":"Write the report","write_paths":["report.md"]}]}}})).await;
+    let run = started["run_id"].as_str().unwrap();
+    let report = json!({"id":"user-direction","source":"user","kind":"request_change","message":"Use the updated acceptance criteria."});
+    let state = first
+        .tool(
+            3,
+            "switchbite_report",
+            json!({"run_id":run,"report":report}),
+        )
+        .await;
+    assert_eq!(state["feedback"][0]["status"], "pending");
+    first.close().await;
+    let mut second = Client::open(&data).await;
+    let state = second
+        .tool(
+            2,
+            "switchbite_next",
+            json!({"run_id":run,"operation":"status"}),
+        )
+        .await;
+    let action = state["actions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|a| a["kind"] == "replan")
+        .unwrap();
+    second.tool(3, "switchbite_observe", json!({"run_id":run,"event":{"action_id":action["id"],"event_id":"coordinator-reply","result":{"plan":null,"reply":"Confirmed the revised criteria.","interrupt_tasks":[]}}})).await;
+    second.close().await;
+    let mut third = Client::open(&data).await;
+    let state = third
+        .tool(
+            2,
+            "switchbite_report",
+            json!({"run_id":run,"report":report}),
+        )
+        .await;
+    assert_eq!(state["feedback"].as_array().unwrap().len(), 1);
+    assert_eq!(state["feedback"][0]["status"], "processed");
+    assert_eq!(
+        state["feedback"][0]["reply"],
+        "Confirmed the revised criteria."
+    );
+    third.close().await;
+}
+
+#[tokio::test]
 async fn generic_stdio_connection_keeps_two_workspaces_across_restart() {
     let temp = tempfile::tempdir().unwrap();
     let a = temp.path().join("a");
@@ -83,7 +135,7 @@ async fn generic_stdio_connection_keeps_two_workspaces_across_restart() {
     let data = temp.path().join("data");
     let mut client = Client::open(&data).await;
     let tools = client.rpc(2, "tools/list", json!({})).await;
-    assert_eq!(tools["tools"].as_array().unwrap().len(), 3);
+    assert_eq!(tools["tools"].as_array().unwrap().len(), 4);
     let first = client
         .tool(
             3,

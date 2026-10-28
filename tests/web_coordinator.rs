@@ -59,7 +59,11 @@ fn fake_worker(tmp: &Path) -> Value {
             assert!(prompt.contains(&format!("LONG_CONTEXT_BEGIN{}LONG_CONTEXT_END", "x".repeat(40000))));
         }
         assert!(prompt.contains("Keep the complete user goal"));
-        if prompt.contains("Review the proposed worker assignment") {
+        if prompt.contains("REPLAN_FIXTURE") {
+            assert!(prompt.contains("actual user feedback"));
+            assert!(prompt.contains("Please add a review"));
+            std::fs::write("switchbite-observation.json", r#"{"plan":{"nodes":[{"id":"build","objective":"Build"},{"id":"review","objective":"Review the build","depends_on":["build"]}]},"reply":"Added a review after the build.","interrupt_tasks":[]}"#).unwrap();
+        } else if prompt.contains("Review the proposed worker assignment") {
             assert!(prompt.contains("candidate_snapshot"));
             std::fs::write("switchbite-observation.json", r#"{"status":"ready","candidate_id":"worker","reason_codes":["coordinator_review"],"summary":"Eligible worker"}"#).unwrap();
         } else {
@@ -202,4 +206,49 @@ fn coordinator_retry_receives_previous_plan_and_diagnostic() {
         )
         .unwrap();
     assert_eq!(registered["tasks"][0]["id"], "build");
+}
+
+#[test]
+fn replan_receives_report_and_returns_updated_dependency() {
+    let (tmp, run, mut action) = setup();
+    action["kind"] = json!("replan");
+    action["payload"] = json!({"fixture":"REPLAN_FIXTURE", "feedback":[{"message":"Please add a review"}], "tasks":[]});
+    let result = web_coordinator::fulfill(
+        &tmp.path().join("state"),
+        &run,
+        &action,
+        &fake_worker(tmp.path()),
+    )
+    .unwrap();
+    assert_eq!(result["reply"], "Added a review after the build.");
+    assert_eq!(result["plan"]["nodes"][1]["depends_on"], json!(["build"]));
+}
+
+#[test]
+fn replan_acknowledgement_and_active_stop_are_validated() {
+    let action = json!({"payload":{"tasks":[{"task":{"id":"build"},"status":"running"},{"task":{"id":"done"},"status":"completed"}]}});
+    let ack = json!({"plan":null,"reply":"I will keep the current plan.","interrupt_tasks":[]});
+    assert_eq!(
+        web_coordinator::normalize_observation("replan", ack.clone(), &action).unwrap(),
+        ack
+    );
+    let stop = json!({"plan":null,"reply":"Stopping build before changing it.","interrupt_tasks":["build"]});
+    assert_eq!(
+        web_coordinator::normalize_observation("replan", stop.clone(), &action).unwrap(),
+        stop
+    );
+    let combined = json!({"plan":{"nodes":[{"id":"build","objective":"Build"},{"id":"followup","objective":"Review","depends_on":["build"]}]},"reply":"Adding follow-up and requesting stop.","interrupt_tasks":["build"]});
+    assert_eq!(
+        web_coordinator::normalize_observation("replan", combined.clone(), &action).unwrap(),
+        combined
+    );
+    let settled = json!({"plan":null,"reply":"Checking stop.","interrupt_tasks":["done"]});
+    assert_eq!(
+        web_coordinator::normalize_observation("replan", settled.clone(), &action).unwrap(),
+        settled
+    );
+    let invalid = json!({"plan":null,"reply":"Stopping.","interrupt_tasks":["missing"]});
+    let error = web_coordinator::normalize_observation("replan", invalid, &action).unwrap_err();
+    assert_eq!(error["field"], "interrupt_tasks");
+    assert_eq!(error["code"], "coordinator_replan_invalid");
 }

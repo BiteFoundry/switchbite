@@ -1,6 +1,6 @@
 import { createGraph } from './graph.js';
 import { createOutputView } from './worker-output.js';
-import { ACTIVE, label, pathLabel, duration, graphModel, taskView, streamsFor, waitReason, outputChunks, artifactOrder, usableToolIds, failureText } from './model.js';
+import { ACTIVE, label, pathLabel, duration, graphModel, taskView, streamsFor, waitReason, outputChunks, artifactOrder, usableToolIds, failureText, feedbackView } from './model.js';
 
 const { token, appMode, publicPreview = false, publicApi, publicInfo } = globalThis.switchbite;
 const $ = id => document.getElementById(id);
@@ -11,6 +11,7 @@ let info = null, state = { status: 'idle', tasks: [], progress: {} }, activity =
 let selectedTools = new Set(), selectedTask = null, composing = true;
 let busy = false, polling = false, formDirty = false, currentRun = null, resultKey = null;
 let coordinatorOutput = null, coordinatorOutputId = null, recoveryKey = null;
+let feedbackRequest = null, feedbackSending = false;
 let selectedModel = null;
 const setText = (node, text) => { const value = String(text ?? ''); if (node.textContent !== value) node.textContent = value; };
 const element = (tag, className, text) => { const node = document.createElement(tag); if (className) node.className = className; if (text != null) node.textContent = text; return node; };
@@ -131,6 +132,7 @@ function renderCoordinator() {
     || (validCoordinators().find(c => c.id === $('wim-input-coordinator').value)?.label || '조율자를 선택하세요'));
   const stream = streamChoice(null);
   setText($('wim-coordinator-status'), failureText(coordinator.error)
+    || (coordinator.status === 'replanning' ? '보고를 확인하고 남은 계획을 조정하고 있습니다.' : '')
     || (coordinator.status === 'repairing_plan' ? '기존 계획의 형식을 수정하고 있습니다.' : '')
     || (state.status === 'completed' ? '계획과 실행 조율을 마쳤습니다.' : state.status === 'cancelled' ? '작업이 취소되었습니다.' : '')
     || (stream ? `${label(stream.health)} · ${duration(stream.elapsed_ms)}` : state.run_id ? label(coordinator.status || state.status) : '목표를 입력하면 작업을 나누고 담당자를 배정합니다.'));
@@ -148,6 +150,31 @@ function renderCoordinator() {
     coordinatorOutput = createOutputView($('wim-coordinator-output'), { attemptId: stream.id, label: '조율자', eventTarget: root });
   }
   if (coordinatorOutput) syncOutput(coordinatorOutput, stream);
+}
+
+function renderFeedback() {
+  $('wim-feedback-form').hidden = publicPreview || !appMode || !state.run_id || !['running', 'paused'].includes(state.status);
+  const select = $('wim-feedback-task'), signature = JSON.stringify((state.tasks || []).map(task => [task.id, task.objective]));
+  if (select.dataset.signature !== signature) {
+    const selected = select.value; select.replaceChildren();
+    const all = element('option', '', '전체 작업'); all.value = ''; select.append(all);
+    for (const task of state.tasks || []) { const option = element('option', '', `${task.id} · ${task.objective || ''}`); option.value = task.id; select.append(option); }
+    select.value = Array.from(select.options).some(option => option.value === selected) ? selected : '';
+    select.dataset.signature = signature;
+  }
+  setText($('wim-plan-revision'), state.run_id ? `계획 변경 ${state.plan_revision || 0}회` : '');
+  const feed = $('wim-feedback-feed'), reports = (state.feedback || []).slice(-30), key = JSON.stringify(reports);
+  if (feed.dataset.signature !== key) {
+    feed.replaceChildren();
+    for (const report of reports) {
+      const row = feedbackView(report), item = element('li');
+      item.append(element('small', '', `${row.source} · ${row.status}`), element('p', '', row.message));
+      if (row.reply) item.append(element('p', '', `조율자: ${row.reply}`));
+      if (row.changes) item.append(element('small', '', row.changes));
+      feed.append(item);
+    }
+    feed.dataset.signature = key;
+  }
 }
 function selectTask(id, scroll = false) {
   selectedTask = id; graph.setSelected(id);
@@ -262,7 +289,7 @@ function render() {
     selectedTools = new Set(submission.tools || []); selectedModel = submission.coordinator_id; renderTools();
     $('wim-start-form').hidden = false; goalBytes();
   }
-  graph.update(graphModel(tasks)); renderCards(); renderCoordinator(); renderPool(); renderResult(); setBusy(busy);
+  graph.update(graphModel(tasks)); renderCards(); renderCoordinator(); renderFeedback(); renderPool(); renderResult(); setBusy(busy);
 }
 function renderResult() {
   const result = state.result, visible = state.status === 'completed' && result && !composing;
@@ -364,6 +391,21 @@ $('wim-btn-cancel').addEventListener('click', () => control('cancel'));
 $('wim-btn-reset').addEventListener('click', () => { composing = !composing; if (composing && !formDirty) $('wim-input-goal').value = ''; notice(''); render(); goalBytes(); if (composing) $('wim-input-goal').focus(); });
 $('wim-btn-results').addEventListener('click', () => { $('wim-result').scrollIntoView({ block: 'start' }); $('wim-result-title').focus({ preventScroll: true }); });
 $('wim-btn-attention').addEventListener('click', () => { if (state.status === 'idle') $('wim-start-form').requestSubmit(); else control('resume'); });
+$('wim-feedback-message').addEventListener('input', () => { feedbackRequest = null; });
+$('wim-feedback-task').addEventListener('change', () => { feedbackRequest = null; });
+$('wim-feedback-form').addEventListener('submit', async event => {
+  event.preventDefault(); if (feedbackSending) return;
+  const message = $('wim-feedback-message').value.trim(), task = $('wim-feedback-task').value;
+  if (!message || new TextEncoder().encode(message).length > 8000) { setText($('wim-feedback-status'), '전달할 내용을 8,000바이트 이내로 입력하세요.'); return; }
+  feedbackRequest ||= { id: crypto.randomUUID(), message, ...(task ? { task_id: task } : {}) };
+  feedbackSending = true; $('wim-feedback-send').disabled = true;
+  try {
+    state = await api('/api/feedback', feedbackRequest);
+    $('wim-feedback-message').value = ''; feedbackRequest = null;
+    setText($('wim-feedback-status'), state.status === 'paused' ? '전달했습니다. 재개하면 조율자가 확인합니다.' : '조율자에게 전달했습니다.'); render();
+  } catch (error) { setText($('wim-feedback-status'), error.message); }
+  finally { feedbackSending = false; $('wim-feedback-send').disabled = false; }
+});
 $('wim-btn-goal-more').addEventListener('click', () => { const goal = $('wim-context-goal'), expanded = goal.dataset.expanded !== 'true'; goal.dataset.expanded = String(expanded); $('wim-btn-goal-more').setAttribute('aria-expanded', String(expanded)); $('wim-btn-goal-more').textContent = expanded ? '접기' : '전체 보기'; });
 $('wim-tools-refresh').addEventListener('click', async () => {
   if (busy) return; setBusy(true); setText($('wim-tools-status'), 'CLI와 모델을 다시 확인합니다…');

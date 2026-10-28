@@ -87,6 +87,9 @@ impl McpServer {
             "switchbite_observe" => {
                 object.len() == 2 && args["run_id"].is_string() && args["event"].is_object()
             }
+            "switchbite_report" => {
+                object.len() == 2 && args["run_id"].is_string() && args["report"].is_object()
+            }
             "switchbite_next" => {
                 object
                     .keys()
@@ -122,6 +125,7 @@ impl McpServer {
             match operation.as_str() {
                 "switchbite_start" => interface.start(&args["request"]),
                 "switchbite_observe" => interface.observe(run, &args["event"]),
+                "switchbite_report" => interface.report(run, &args["report"]),
                 _ => match args["operation"].as_str().unwrap_or("next") {
                     "next" => interface.next(run),
                     "status" => interface.status(run),

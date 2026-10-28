@@ -144,6 +144,8 @@ fn view(state: &Value) -> Value {
         "connection",
         "max_parallel",
         "startup_submission",
+        "feedback",
+        "plan_revision",
     ] {
         if let Some(value) = state.get(field) {
             result[field] = value.clone();
@@ -502,6 +504,24 @@ fn handle(
             let body =
                 serde_json::from_slice(&data[head_end..head_end + length]).unwrap_or(Value::Null);
             match app.unwrap().start(&body) {
+                Ok(state) => response(
+                    &mut stream,
+                    "202 Accepted",
+                    "application/json",
+                    &view(&state).to_string(),
+                ),
+                Err(error) => response(
+                    &mut stream,
+                    "400 Bad Request",
+                    "application/json",
+                    &json!({"error":error}).to_string(),
+                ),
+            }
+        }
+        "POST /api/feedback HTTP/1.1" if app.is_some() => {
+            let body =
+                serde_json::from_slice(&data[head_end..head_end + length]).unwrap_or(Value::Null);
+            match app.unwrap().report(&body) {
                 Ok(state) => response(
                     &mut stream,
                     "202 Accepted",

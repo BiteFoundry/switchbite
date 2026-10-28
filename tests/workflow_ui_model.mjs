@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { artifactOrder, graphModel, outputChunks, streamsFor, waitReason, usableToolIds, failureText } from '../assets/workflow-ui/model.js';
+import { artifactOrder, graphModel, outputChunks, streamsFor, waitReason, usableToolIds, failureText, feedbackView } from '../assets/workflow-ui/model.js';
 
 test('independent branches stay ready together and dependencies track actual completion', () => {
   const tasks = [
@@ -54,4 +54,13 @@ test('failure identifies the stage and field without exposing the previous plan'
   assert.match(text, /audit · routing.model/);
   assert.match(text, /기대 형식: string/);
   assert.ok(!text.includes('private-plan'));
+});
+test('feedback distinguishes a queued report from the coordinator decision and plan changes', () => {
+  const pending = feedbackView({ id: 'one', source: 'worker', task_id: 'api', status: 'pending', message: '依存先が変更されました' });
+  assert.equal(pending.status, '조율 대기');
+  assert.match(pending.source, /api/);
+  assert.equal(pending.message, '依存先が変更されました');
+  const handled = feedbackView({ source: 'user', status: 'processed', reply: '수정 작업을 추가했습니다.', changes: { added: ['fix'], changed: ['review'], removed: [] } });
+  assert.equal(handled.status, '답변 완료');
+  assert.equal(handled.changes, '추가: fix · 변경: review');
 });

@@ -164,7 +164,7 @@ fn string<'a>(v: &'a Value, key: &str) -> Result<&'a str, HostError> {
         .filter(|s| !s.is_empty() && s.len() <= 4096)
         .ok_or(HostError("invalid_action"))
 }
-fn hash(s: &str) -> String {
+pub(crate) fn hash(s: &str) -> String {
     format!("{:x}", Sha256::digest(s.as_bytes()))[..24].to_string()
 }
 fn path_allowed(path: &str, pattern: &str) -> bool {
@@ -403,7 +403,7 @@ fn output_len(path: &Path) -> u64 {
     fs::metadata(path).map(|m| m.len()).unwrap_or(0)
 }
 
-fn path_string(p: &Path) -> Result<&str, HostError> {
+pub(crate) fn path_string(p: &Path) -> Result<&str, HostError> {
     p.to_str()
         .map(|s| {
             if cfg!(windows) {
@@ -825,7 +825,6 @@ impl LocalHost {
         {
             return Err(HostError("invalid_action"));
         }
-        let prompt = worker_prompt(p)?;
         if c.get("args")
             .and_then(Value::as_array)
             .is_some_and(|args| !args.is_empty())
@@ -834,6 +833,29 @@ impl LocalHost {
         }
         let id = string(a, "id")?;
         let session = session_id(id);
+        let feedback_path = dir.join(format!(".switchbite-feedback-{}.jsonl", hash(id)));
+        let archive_path = self
+            .state
+            .join("messages")
+            .join(format!("{}.feedback.jsonl", hash(id)));
+        fs::create_dir_all(self.state.join("messages")).map_err(|_| HostError("io_error"))?;
+        // Refuse collisions: neither an existing worktree file nor an old archive is ours.
+        if archive_path.exists() {
+            return Err(HostError("feedback_file_conflict"));
+        }
+        OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&feedback_path)
+            .map_err(|_| HostError("feedback_file_conflict"))?;
+        let _feedback =
+            crate::worker_feedback::ArchiveOnDrop::new(feedback_path.clone(), archive_path.clone());
+        let prompt = format!(
+            "{}\nWorker feedback: append one complete UTF-8 JSON object per line to {}. Schema: {{\"id\":\"unique event id\",\"kind\":\"blocked\" or \"finding\",\"message\":\"concise report\"}}. Use a unique id for each event; keep messages under 8000 bytes. If blocked and unable to proceed, report it and end your turn. This file is runtime control data: never commit it.",
+            worker_prompt(p)?,
+            serde_json::to_string(&feedback_path.to_string_lossy())
+                .map_err(|_| HostError("invalid_action"))?
+        );
         let messages = self.state.join("messages");
         fs::create_dir_all(&messages).map_err(|_| HostError("io_error"))?;
         let message_path = messages.join(format!("{}.txt", hash(id)));
@@ -920,6 +942,9 @@ impl LocalHost {
             }
             Err(error) => return Err(error),
         };
+        drop(_feedback);
+        let blocked = crate::worker_feedback::contains_blocker(&archive_path, id)
+            || crate::worker_feedback::contains_blocker(&feedback_path, id);
         let (verified, resolved_model) =
             workers::verified_receipt_file(provider, &output, &session)?;
         if !message_path.exists()
@@ -932,7 +957,13 @@ impl LocalHost {
         let stream_path = messages.join(format!("{}.jsonl", hash(id)));
         fs::copy(&output, &stream_path).map_err(|_| HostError("io_error"))?;
         let mut result = json!({"status":if ok && verified {"completed"} else {"failed"},"execution_id":id,"completion_verified":ok && verified,"requested_model":model,"resolved_model":resolved_model,"message_ref":if message_path.exists(){Some(&message_path)}else{None},"stream_ref":stream_path,"reason":if !ok {Some(stderr_hint.or_else(|| scan_log(&output).ok().and_then(|s| s.failure_hint())).unwrap_or("provider_exit_failed"))} else if !verified {Some("provider_receipt_invalid")} else {None}});
-        if schema_path.is_some() && ok && verified && message_path.exists() {
+        if blocked {
+            result["native_completion_verified"] = json!(ok && verified);
+            result["status"] = json!("failed");
+            result["completion_verified"] = json!(false);
+            result["reason"] = json!("worker_reported_blocked");
+        }
+        if schema_path.is_some() && ok && verified && !blocked && message_path.exists() {
             match read_final_result(&message_path) {
                 Ok(final_result) => result["final_result"] = final_result,
                 Err(error) => result["final_result_error"] = json!(error.0),
@@ -1144,11 +1175,10 @@ impl LocalHost {
                 ],
             )?;
             let changed = run_git(&task, &["diff", "--cached", "--name-only", "-z", &ancestor])?;
-            if changed
-                .split('\0')
-                .filter(|s| !s.is_empty())
-                .any(|path| !owned.iter().any(|o| path_allowed(path, o)))
-            {
+            if changed.split('\0').filter(|s| !s.is_empty()).any(|path| {
+                path.starts_with(".switchbite-feedback-") && path.ends_with(".jsonl")
+                    || !owned.iter().any(|o| path_allowed(path, o))
+            }) {
                 return Ok(
                     json!({"status":"failed","evidence":["write outside declared outputs"]}),
                 );

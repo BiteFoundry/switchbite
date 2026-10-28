@@ -8,7 +8,7 @@ can run configured local Codex and Claude workers through verification and
 integration. The coordinator supplies plans and handles actions that need its
 judgment or context.
 
-**v0.9.0-preview.3 · Windows x64 · MIT · No Python runtime.**
+**v0.9.0-preview.4 · Windows x64 · MIT · No Python runtime.**
 
 Run `switchbite workflow app` to enter a Git project path and goal in the local web
 app. Select which detected CLI tools may participate; the saved selection limits
@@ -17,6 +17,18 @@ coordinator supplies the plan and bounded repairs;
 the existing judge and workflow engine route, execute, verify and integrate the
 tasks. The completed run shows its result worktree, branch and final commit.
 See [the web workflow guide](docs/workflow-ui.ko.md).
+
+During a run, use **조율자에게 전달** to report a problem or change direction.
+Workers can send explicit reports through the local channel named in their task
+prompt. The coordinator replies and can add, replace or remove remaining tasks,
+change dependencies, or stop a specific worker before replanning its work.
+Completed results and other active workers retain their state. Reports, replies
+and plan changes are saved with the run and shown in the web app.
+
+CLI hosts can use `workflow report RUN --request-file FILE`; MCP hosts use
+`switchbite_report`. A report has a stable `id`, `source`, `kind`, `message` and
+an optional `task_id`. Returned `replan` actions accept `reply`, a full `plan`
+or `null`, and `interrupt_tasks`. These extend the existing workflow protocol.
 
 Plans use the same schema in the coordinator and workflow engine. Model pins
 belong in `routing`; `requirements` contains exact capability IDs, while task
@@ -45,7 +57,7 @@ Connect a Stackbite coordinator to the project-scoped workflow server:
 ```
 
 Start a new coordinator session in the project. The installer registers
-`switchbite-stackbite` with the three-tool workflow profile. The default Jev 1.14
+`switchbite-stackbite` with the workflow profile. The default Jev 1.14
 judge reads `TYPESAFE_API_KEY` from the coordinator environment; the installer
 stores a variable reference, not the key value. Local Laya is selected with
 `--judge laya --endpoint http://127.0.0.1:11435 --model laya:multilingual`.
@@ -216,7 +228,7 @@ or change live policy.
 
 No arguments still serves docking API1 (describe/invoke). serve --profile cli
 retains the original switchbite_decide tools. Generic client connections use
-the legacy four-tool agent profile; the Stackbite installer selects the three-tool
+the legacy four-tool agent profile; the Stackbite installer selects the workflow
 workflow profile. Existing installations are not rewritten until updated.
 
 Windows x64 MSVC is the packaged target. The manifest declares Rust 1.88;

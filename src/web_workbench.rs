@@ -138,6 +138,7 @@ fn friendly(value: &Value) -> Value {
     };
     let message = value["message"].as_str().unwrap_or(match code {
         "coordinator_plan_invalid" | "coordinator_artifact_invalid" | "invalid_receipt" => "계획 형식을 확인하지 못했습니다. 표시된 항목을 수정해 기존 계획으로 이어갑니다.",
+        "coordinator_replan_invalid" => "계획 변경을 적용하지 못했습니다. 표시된 항목을 확인하고 조율자에게 보완 내용을 전달하세요.",
         "coordinator_artifact_missing" => "CLI가 종료됐지만 계획 결과를 찾지 못했습니다. 조율자 출력을 확인하세요.",
         "coordinator_review_invalid" | "coordinator_review_candidate_invalid" | "coordinator_review_snapshot_invalid" => "조율자가 유효한 모델 배정을 반환하지 못했습니다. 다시 시도하세요.",
         "coordinator_execution_failed" => "조율자 CLI 실행이 완료되지 않았습니다. 실행 출력을 확인하세요.",
@@ -179,7 +180,10 @@ fn coordinator_failure(run: &Run, action: &Value, detail: Value) -> Result<bool,
         .get("prior_result")
         .cloned()
         .or_else(|| previous.and_then(|old| old.get("prior_result").cloned()));
-    let retry = detail["code"] == "coordinator_plan_invalid" && prior.is_some() && retries == 0;
+    let retry = ["coordinator_plan_invalid", "coordinator_replan_invalid"]
+        .contains(&detail["code"].as_str().unwrap_or(""))
+        && prior.is_some()
+        && retries == 0;
     *saved = Some(
         json!({"action_id":action["id"],"error":friendly(&detail),"prior_result":prior,"automatic_retries":retries + u64::from(retry)}),
     );
@@ -745,6 +749,39 @@ impl Workbench {
         self.status()
     }
 
+    pub fn report(&self, body: &Value) -> Result<Value, Value> {
+        let _control = CONTROL.lock().map_err(|_| lock_error())?;
+        if body.as_object().is_none_or(|obj| {
+            obj.keys()
+                .any(|key| !["id", "task_id", "message"].contains(&key.as_str()))
+        }) {
+            return Err(error("invalid_feedback", "전달할 내용을 입력하세요."));
+        }
+        let run = self
+            .current
+            .lock()
+            .map_err(|_| lock_error())?
+            .clone()
+            .ok_or_else(|| error("run_missing", "먼저 업무를 시작하세요."))?;
+        let mut report = json!({"id":body["id"],"source":"user","kind":"request_change","message":body["message"]});
+        if let Some(task) = body.get("task_id") {
+            report["task_id"] = task.clone();
+        }
+        let workflow = Workflow::new(run.root.clone());
+        let state = workflow.report(&run.id, &report).map_err(|e| {
+            let mut detail = e.to_value();
+            detail["message"] =
+                json!("실행 중인 작업을 선택하고 내용을 8,000바이트 이내로 입력하세요.");
+            detail
+        })?;
+        if state["status"] == "running" && !run.alive.load(Ordering::Acquire) {
+            run.attempt.fetch_add(1, Ordering::AcqRel);
+            *run.coordinator.lock().map_err(|_| lock_error())? = json!({"status":"replanning"});
+            self.spawn(run);
+        }
+        self.status()
+    }
+
     pub fn control(&self, action: &str) -> Result<Value, Value> {
         let _control = CONTROL.lock().map_err(|_| lock_error())?;
         let run = self
@@ -826,16 +863,35 @@ impl Workbench {
     }
 }
 
+fn has_new_feedback(state: &Value, seen: &mut std::collections::BTreeSet<String>) -> bool {
+    let mut added = false;
+    for report in state["feedback"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|report| report["status"] == "pending")
+    {
+        if let Some(id) = report["id"].as_str() {
+            added |= seen.insert(id.to_owned());
+        }
+    }
+    added
+}
+
 fn drive(run: &Run, judge: Option<Arc<ConfiguredJudge>>) -> Result<(), Value> {
     let workflow = Workflow::new(run.root.clone());
     let mut coordinator_job: Option<(Value, thread::JoinHandle<Result<Value, Value>>)> = None;
     let mut attention = None;
+    let mut feedback_seen = std::collections::BTreeSet::new();
     loop {
         let state =
             workflow_runner::advance_inner(&run.root, &run.id, judge.clone(), attention.is_some())
                 .map_err(|e| e.to_value())?;
         if attention.is_none() {
             attention = state.get("attention").cloned();
+        }
+        if has_new_feedback(&state, &mut feedback_seen) && attention.take().is_some() {
+            run.attempt.fetch_add(1, Ordering::AcqRel);
         }
         let active = state["driver"]["active_actions"].as_u64().unwrap_or(0);
         if coordinator_job
@@ -864,8 +920,10 @@ fn drive(run: &Run, judge: Option<Arc<ConfiguredJudge>>) -> Result<(), Value> {
                                     json!({"status":"coordinating"});
                             }
                             Err(error) => {
-                                let detail = if action["kind"] == "plan" {
-                                    json!({"code":"coordinator_plan_invalid","stage":"plan_validation","field":"plan","expected":"valid workflow DAG","prior_result":result,"cause":error.to_value()})
+                                let detail = if action["kind"] == "plan"
+                                    || action["kind"] == "replan"
+                                {
+                                    json!({"code":if action["kind"] == "replan" {"coordinator_replan_invalid"} else {"coordinator_plan_invalid"},"stage":"plan_validation","field":"plan","expected":"valid workflow DAG preserving completed and active tasks","prior_result":result,"cause":error.to_value()})
                                 } else {
                                     error.to_value()
                                 };
@@ -908,11 +966,12 @@ fn drive(run: &Run, judge: Option<Arc<ConfiguredJudge>>) -> Result<(), Value> {
                 .as_array()
                 .into_iter()
                 .flatten()
-                .find(|a| {
-                    ["plan", "repair", "review_route"]
+                .filter(|a| {
+                    ["replan", "plan", "repair", "review_route"]
                         .iter()
                         .any(|kind| a["kind"] == *kind)
                 })
+                .min_by_key(|action| if action["kind"] == "replan" { 0 } else { 1 })
                 .cloned()
             {
                 action["coordinator_attempt"] = json!(run.attempt.load(Ordering::Acquire));
@@ -931,7 +990,7 @@ fn drive(run: &Run, judge: Option<Arc<ConfiguredJudge>>) -> Result<(), Value> {
                     *run.latest_coordinator_action
                         .lock()
                         .map_err(|_| lock_error())? = Some(action.clone());
-                    *run.coordinator.lock().map_err(|_| lock_error())? = json!({"status":if action["kind"] == "plan" {"planning"} else if action["kind"] == "review_route" {"routing"} else {"repairing"}});
+                    *run.coordinator.lock().map_err(|_| lock_error())? = json!({"status":if action["kind"] == "replan" {"replanning"} else if action["kind"] == "plan" {"planning"} else if action["kind"] == "review_route" {"routing"} else {"repairing"}});
                     run.checkpoint()?;
                     // Recheck after publishing the cancellation target.
                     if workflow.status(&run.id).map_err(|e| e.to_value())?["status"] != "cancelled"
@@ -984,6 +1043,19 @@ mod parallel_tests {
         fs, thread,
         time::{Duration, Instant},
     };
+
+    #[test]
+    fn rejected_replan_is_not_retried_forever_by_its_own_pending_report() {
+        let mut seen = std::collections::BTreeSet::new();
+        let state =
+            json!({"actions":[{"kind":"replan"}],"feedback":[{"id":"one","status":"pending"}]});
+        assert!(has_new_feedback(&state, &mut seen));
+        assert!(!has_new_feedback(&state, &mut seen));
+        let newer =
+            json!({"feedback":[{"id":"one","status":"pending"},{"id":"two","status":"pending"}]});
+        assert!(has_new_feedback(&newer, &mut seen));
+        assert!(!has_new_feedback(&newer, &mut seen));
+    }
 
     #[test]
     fn plan_retry_keeps_existing_result_and_stops_after_one_automatic_repair() {

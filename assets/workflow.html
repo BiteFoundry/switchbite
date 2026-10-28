@@ -106,6 +106,16 @@
         <p id="wim-coordinator-status" class="wim-coord__status">작업 경로와 목표를 입력하면 조율자가 계획을 세웁니다.</p>
         <ol id="wim-coordinator-plan" class="wim-plan" aria-label="조율자 계획"></ol>
         <div id="wim-coordinator-output"></div>
+        <form id="wim-feedback-form" class="wim-feedback" hidden>
+          <label for="wim-feedback-task">대상</label>
+          <select id="wim-feedback-task"><option value="">전체 작업</option></select>
+          <label for="wim-feedback-message">조율자에게 전달</label>
+          <textarea id="wim-feedback-message" rows="3" placeholder="막힌 점이나 바꾸고 싶은 방향을 알려주세요." required></textarea>
+          <button id="wim-feedback-send" class="wim-btn wim-btn--primary" type="submit">전달</button>
+          <p id="wim-feedback-status" class="wim-help" role="status"></p>
+        </form>
+        <p id="wim-plan-revision" class="wim-help"></p>
+        <ol id="wim-feedback-feed" class="wim-feedback-feed" aria-label="보고와 조율 결정" aria-live="polite"></ol>
         <p class="wim-help">조율자가 작업을 나누고, 선택한 도구와 모델 안에서 담당자를 배정합니다.</p>
       </section>
 
