@@ -22,7 +22,8 @@ fn viewer_restricts_origin_and_session_and_only_exposes_summary() {
     let tmp = tempfile::tempdir().unwrap();
     let root = tmp.path().to_path_buf();
     let flow = Workflow::new(root.join(".switchbite/workflow"));
-    let state=flow.start(&json!({"workspace":root.to_str().unwrap(),"goal":"Build","pool":[],"host":{"secret":"secret-value"}})).unwrap();
+    let long_role = "긴 역할 지시와 완료 조건을 보존합니다. ".repeat(100);
+    let state=flow.start(&json!({"workspace":root.to_str().unwrap(),"goal":"Build","pool":[],"host":{"secret":"secret-value"},"plan":{"nodes":[{"id":"long-role","objective":long_role}]}})).unwrap();
     let run = state["run_id"].as_str().unwrap().to_string();
     let socket = TcpListener::bind(("127.0.0.1", 0)).unwrap();
     let port = socket.local_addr().unwrap().port();
@@ -86,6 +87,10 @@ fn viewer_restricts_origin_and_session_and_only_exposes_summary() {
     let body = state.split("\r\n\r\n").nth(1).unwrap();
     let value: Value = serde_json::from_str(body).unwrap();
     assert_eq!(value["status"], "running");
+    assert_eq!(
+        value["tasks"][0]["objective"], long_role,
+        "editable role text must not be truncated to the former 500-character summary"
+    );
     std::fs::write(root.join(".switchbite/workflow").join(value["run_id"].as_str().unwrap()).join("web-session.json"),
         serde_json::to_vec(&json!({"coordinator":{"status":"needs_attention","error":{"code":"invalid_receipt","message":"Repair plan needs attention"}},"trace":{}})).unwrap()).unwrap();
     let updated = request(
