@@ -1,0 +1,54 @@
+{
+  "verified_at": "2026-10-28T16:13:51.5102526+09:00",
+  "release": {
+    "prerelease": true,
+    "url": "https://github.com/BiteFoundry/switchbite/releases/tag/v0.9.0-preview.4",
+    "tag_commit": "9832b0b8f2faf8505617750dce3de1386aeb059f",
+    "runtime_source_commit": "4a9c6cfd044742ffaea6c7f0eef5fb2627e23e45",
+    "draft": false,
+    "tag": "v0.9.0-preview.4"
+  },
+  "channel": {
+    "sha256": "439787373ad2b7b997225c97543575c7d48011548bf15fdef9e48083cfd07054",
+    "url": "https://github.com/BiteFoundry/switchbite/releases/download/runtime-preview/channel-windows-x64.json",
+    "bundle_id": "v0.9.0-preview.4-windows-x64"
+  },
+  "ci": {
+    "node_tests_passed": 9,
+    "conclusion": "success",
+    "rust_tests_ignored": 2,
+    "rust_tests_passed": 303,
+    "run_id": 40647734343,
+    "rust_tests_failed": 0,
+    "url": "https://github.com/BiteFoundry/switchbite/actions/runs/40647734343"
+  },
+  "pages": {
+    "conclusion": "success",
+    "anonymous_build_json_matches": true,
+    "pages_commit": "c99f565cc7b59aedb02f8641307f83a36e38a831",
+    "run_id": 40647800636,
+    "source_commit": "9832b0b8f2faf8505617750dce3de1386aeb059f",
+    "aside_loaded": true,
+    "url": "https://bitefoundry.github.io/switchbite/"
+  },
+  "verified": {
+    "installed_executable_hashes": "matched",
+    "fresh_public_channel_install": "passed",
+    "uploaded_asset_digests": 8,
+    "anonymous_version_manifest_http": 200,
+    "switchbite_version": "0.9.0-preview.4",
+    "local_app": "http://127.0.0.1:58431/",
+    "protocol_version": 1,
+    "stackbite_engine_version": "0.5.75",
+    "original_stackbite_modified": false,
+    "active_local_runtime_channel": "GitHub runtime-preview",
+    "preserved_run": "run-1793162389339754200-52752",
+    "archive_extraction_hashes": "matched",
+    "preserved_progress": "8/8 completed"
+  },
+  "runtime_assets": {
+    "switchbite_sha256": "ccebfc4cdef0862f4b2d3fc47b92474ac8ea63164fb1688781911658e87cf31e",
+    "stackbite_sha256": "dcd388fe91ad6b966cd2a0cd112bba4f509e4560c81a3822bdac73b8cf33381e",
+    "archive_sha256": "b8ee0e92db09213a01e05f2f57ec75642d39055e605684ec73a59aab792b7363"
+  }
+}
