@@ -218,7 +218,7 @@ export function createGraph(mount, options) {
     const meta = el(doc, 'span', 'wim-graph__meta');
     const status = el(doc, 'span', 'wim-graph__status');
     const diffPrefix = el(doc, 'span', 'wim-graph__vh');
-    diffPrefix.textContent = '난이도 ';
+    diffPrefix.textContent = '역할 ';
     const diff = el(doc, 'span', 'wim-graph__diff');
     const sep = el(doc, 'span', 'wim-graph__sep');
     sep.setAttribute('aria-hidden', 'true');

@@ -2,7 +2,7 @@ import { createGraph } from './graph.js';
 import { createOutputView } from './worker-output.js';
 import { ACTIVE, label, pathLabel, duration, graphModel, taskView, streamsFor, waitReason, outputChunks, artifactOrder, usableToolIds } from './model.js';
 
-const { token, appMode } = globalThis.switchbite;
+const { token, appMode, publicPreview = false, publicApi, publicInfo } = globalThis.switchbite;
 const $ = id => document.getElementById(id);
 const root = $('wim-app');
 const graph = createGraph($('wim-graph-mount'), { eventTarget: root });
@@ -16,6 +16,7 @@ const setText = (node, text) => { const value = String(text ?? ''); if (node.tex
 const element = (tag, className, text) => { const node = document.createElement(tag); if (className) node.className = className; if (text != null) node.textContent = text; return node; };
 
 async function api(path, body) {
+  if (publicPreview) return publicApi(path, body);
   const response = await fetch(path, { method: body === undefined ? 'GET' : 'POST', cache: 'no-store',
     headers: { 'X-Switchbite-Session': token, ...(body === undefined ? {} : { 'Content-Type': 'application/json' }) },
     ...(body === undefined ? {} : { body: JSON.stringify(body) }) });
@@ -30,13 +31,13 @@ function notice(text) {
   $('wim-ui-message').hidden = inForm || !text;
 }
 function connection(ok) {
-  setText($('wim-connection'), ok ? 'Live' : '재연결 중');
-  $('wim-connection').dataset.connected = String(ok);
+  setText($('wim-connection'), publicPreview ? '공개 미리보기' : ok ? 'Live' : '재연결 중');
+  $('wim-connection').dataset.connected = publicPreview ? 'preview' : String(ok);
 }
 function setBusy(value) {
   busy = value;
   $('wim-btn-start').disabled = value || !usableToolIds(info?.tools, selectedTools).length || !validCoordinators().length;
-  for (const id of ['wim-btn-pause', 'wim-btn-resume', 'wim-btn-cancel']) $(id).disabled = value || !state.run_id || !ACTIVE.has(state.status);
+  for (const id of ['wim-btn-pause', 'wim-btn-resume', 'wim-btn-cancel']) $(id).disabled = publicPreview || value || !state.run_id || !ACTIVE.has(state.status);
   $('wim-tools-refresh').disabled = value;
   for (const input of $('wim-tools-list').querySelectorAll('input')) input.disabled = value || input.dataset.selectable !== 'true';
 }
@@ -104,6 +105,7 @@ function renderPool() {
   }
 }
 function renderRuntime(update) {
+  if (publicPreview) { setText($('wim-runtime'), '공개 미리보기 · 예시 작업과 출력'); setText($('wim-engine-updates'), '실제 CLI 실행은 로컬 앱에서 진행합니다.'); return; }
   const runtime = state.runtime || {}, backend = runtime.backend || {};
   setText($('wim-runtime'), [info?.app_version ? `SwitchBite ${info.app_version}` : 'SwitchBite',
     backend.version ? `현재 작업 엔진 ${backend.version}` : '',
@@ -377,6 +379,7 @@ document.addEventListener('selectionchange', () => { if (!document.getSelection(
 
 async function init() {
   try {
+    if (publicPreview) applyInfo(publicInfo, true);
     if (appMode) { const data = await api('/api/app'); applyInfo(data, true); state = data.current || state; composing = !data.current || data.current.status === 'idle'; }
     else { composing = false; $('wim-start-form').hidden = true; }
     if (!formDirty) goalBytes(); render(); await poll();
