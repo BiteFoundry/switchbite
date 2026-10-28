@@ -13,6 +13,40 @@ use std::{
 const HTML: &str = include_str!("../assets/workflow.html");
 const MAX_REQUEST: usize = 40 * 1024;
 
+fn asset(path: &str) -> Option<(&'static str, &'static str)> {
+    Some(match path {
+        "/ui/styles.css" => (
+            "text/css; charset=utf-8",
+            include_str!("../assets/workflow-ui/styles.css"),
+        ),
+        "/ui/graph-output.css" => (
+            "text/css; charset=utf-8",
+            include_str!("../assets/workflow-ui/graph-output.css"),
+        ),
+        "/ui/live.css" => (
+            "text/css; charset=utf-8",
+            include_str!("../assets/workflow-ui/live.css"),
+        ),
+        "/ui/app.js" => (
+            "text/javascript; charset=utf-8",
+            include_str!("../assets/workflow-ui/app.js"),
+        ),
+        "/ui/model.js" => (
+            "text/javascript; charset=utf-8",
+            include_str!("../assets/workflow-ui/model.js"),
+        ),
+        "/ui/graph.js" => (
+            "text/javascript; charset=utf-8",
+            include_str!("../assets/workflow-ui/graph.js"),
+        ),
+        "/ui/worker-output.js" => (
+            "text/javascript; charset=utf-8",
+            include_str!("../assets/workflow-ui/worker-output.js"),
+        ),
+        _ => return None,
+    })
+}
+
 type AnyError = Box<dyn Error + Send + Sync>;
 
 #[cfg(windows)]
@@ -84,6 +118,22 @@ fn view(state: &Value) -> Value {
         json!({"id":id,"objective":safe_string(&t["task"]["objective"], 500),"role":safe_string(&t["task"]["role"],64),"status":safe_string(&t["status"],64),"model":safe_string(&candidate["model"],128),"effort":safe_string(&candidate["effort"],32),"provider":safe_string(&candidate["provider"],128),"candidate_id":safe_string(&candidate["id"],128),"observed":{"model":safe_string(&t["observed"]["model"],128),"effort":safe_string(&t["observed"]["effort"],32)},"depends_on":t["task"]["depends_on"].as_array().into_iter().flatten().map(|v| safe_string(v,128)).collect::<Vec<_>>(),"wait_reason":safe_wait_reason(&t["wait_reason"]),"next_action":action.map(|a| safe_string(&a["kind"],64)).unwrap_or_default(),"repair_rounds":t["repair_rounds"].as_u64().unwrap_or(0),"acceptance_count":t["task"]["acceptance"].as_array().map_or(0,Vec::len),"evidence":t["evidence"].as_array().into_iter().flatten().take(64).map(|e| { let stage=e["stage"].as_str().filter(|s| ["route","review_route","prepare","launch","inspect","verify","integrate","gather_context","repair"].contains(s)).unwrap_or("other"); let status=e["status"].as_str().filter(|s| ["ready","hold","prepared","running","unknown","completed","failed","cancelled","passed","integrated","gathered","accepted"].contains(s)).unwrap_or("accepted"); let code=safe_string(&e["error_code"],128); let commit=safe_string(&e["commit"],64); json!({"stage":stage,"status":status,"error_code":if code.bytes().all(|b|b.is_ascii_alphanumeric()||b"_-".contains(&b)){code}else{String::new()},"checks_passed":e["checks_passed"].as_u64(),"checks_failed":e["checks_failed"].as_u64(),"evidence_count":e["evidence_count"].as_u64(),"permission_denial_count":e["permission_denial_count"].as_u64(),"commit":if (commit.len()==40||commit.len()==64)&&commit.bytes().all(|b|b.is_ascii_hexdigit()){commit}else{String::new()}}) }).collect::<Vec<_>>()})
     }).collect();
     let mut result = json!({"run_id":safe_string(&state["run_id"],128),"status":safe_string(&state["status"],64),"summary":safe_string(&state["summary"],200),"progress":{"done":state["progress"]["done"].as_u64().unwrap_or(0),"total":state["progress"]["total"].as_u64().unwrap_or(0)},"tasks":tasks,"actions":actions.iter().map(|a|json!({"kind":safe_string(&a["kind"],64),"task_id":safe_string(&a["task_id"],128)})).collect::<Vec<_>>(),"event_count":state["event_count"].as_u64().unwrap_or_else(|| state["events"].as_array().map_or(0, Vec::len) as u64)});
+    for (row, task) in result["tasks"]
+        .as_array_mut()
+        .unwrap()
+        .iter_mut()
+        .zip(state["tasks"].as_array().into_iter().flatten())
+    {
+        row["outputs"] = json!(
+            task["task"]["outputs"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .take(128)
+                .map(|value| safe_string(value, 2048))
+                .collect::<Vec<_>>()
+        );
+    }
     for field in [
         "workspace",
         "goal",
@@ -131,7 +181,7 @@ fn response(
 ) -> std::io::Result<()> {
     write!(
         stream,
-        "HTTP/1.1 {status}\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nCache-Control: no-store\r\nX-Content-Type-Options: nosniff\r\nContent-Security-Policy: default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; connect-src 'self'; base-uri 'none'; frame-ancestors 'none'\r\nConnection: close\r\n\r\n",
+        "HTTP/1.1 {status}\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nCache-Control: no-store\r\nReferrer-Policy: no-referrer\r\nX-Content-Type-Options: nosniff\r\nContent-Security-Policy: default-src 'none'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; connect-src 'self'; base-uri 'none'; frame-ancestors 'none'\r\nConnection: close\r\n\r\n",
         body.len()
     )?;
     stream.write_all(body.as_bytes())
@@ -258,6 +308,76 @@ fn handle(
         return response(&mut stream, "403 Forbidden", "text/plain", "Forbidden");
     }
     match line {
+        line if line.starts_with("GET /ui/") => {
+            let path = line
+                .strip_prefix("GET ")
+                .and_then(|s| s.strip_suffix(" HTTP/1.1"))
+                .unwrap_or("");
+            match asset(path) {
+                Some((mime, content)) => response(&mut stream, "200 OK", mime, content),
+                None => response(&mut stream, "404 Not Found", "text/plain", "Not found"),
+            }
+        }
+        line if line.starts_with("GET /api/artifacts")
+            || line == "POST /api/artifacts/preview HTTP/1.1" =>
+        {
+            if header("x-switchbite-session") != Some(token)
+                || header("origin").is_some_and(|origin| origin != format!("http://{host}"))
+                || header("sec-fetch-site").is_some_and(|site| site != "same-origin")
+            {
+                return response(
+                    &mut stream,
+                    "403 Forbidden",
+                    "application/json",
+                    "{\"error\":{\"code\":\"forbidden\"}}",
+                );
+            }
+            let state = app.map_or_else(
+                || crate::web_workbench::recorded_state(workflow, run_id),
+                Workbench::status,
+            );
+            let result = state.map_err(|_| "run_unavailable").and_then(|state| {
+                if line == "GET /api/artifacts HTTP/1.1" {
+                    return crate::workflow_artifacts::list(&state);
+                }
+                if line == "POST /api/artifacts/preview HTTP/1.1" {
+                    let body: Value = serde_json::from_slice(&data[head_end..head_end + length])
+                        .map_err(|_| "invalid_request")?;
+                    if body.as_object().is_none_or(|o| o.len() != 1) {
+                        return Err("invalid_request");
+                    }
+                    return crate::workflow_artifacts::preview(
+                        &state,
+                        body["path"].as_str().ok_or("invalid_path")?,
+                    );
+                }
+                let target = line
+                    .strip_prefix("GET ")
+                    .and_then(|s| s.strip_suffix(" HTTP/1.1"))
+                    .ok_or("invalid_request")?;
+                let url = reqwest::Url::parse(&format!("http://{host}{target}"))
+                    .map_err(|_| "invalid_request")?;
+                let pairs: Vec<_> = url.query_pairs().collect();
+                if url.path() != "/api/artifacts/text" || pairs.len() != 1 || pairs[0].0 != "path" {
+                    return Err("invalid_request");
+                }
+                crate::workflow_artifacts::text(&state, &pairs[0].1)
+            });
+            match result {
+                Ok(value) => response(
+                    &mut stream,
+                    "200 OK",
+                    "application/json",
+                    &value.to_string(),
+                ),
+                Err(code) => response(
+                    &mut stream,
+                    "400 Bad Request",
+                    "application/json",
+                    &json!({"error":{"code":code}}).to_string(),
+                ),
+            }
+        }
         line if line.starts_with("GET /api/activity") => {
             if header("x-switchbite-session") != Some(token)
                 || header("origin").is_some_and(|origin| origin != format!("http://{host}"))
@@ -349,6 +469,7 @@ fn handle(
             let result = app.unwrap().info();
             match result {
                 Ok(mut value) => {
+                    value["app_version"] = json!(env!("CARGO_PKG_VERSION"));
                     if !value["current"].is_null() {
                         value["current"] = view(&value["current"]);
                     }

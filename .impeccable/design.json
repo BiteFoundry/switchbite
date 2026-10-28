@@ -1,0 +1,37 @@
+{
+  "schemaVersion": 2,
+  "generatedAt": "2026-10-28T00:00:00+09:00",
+  "title": "Design System: SwitchBite",
+  "extensions": {
+    "shadows": [
+      {"name":"selected-attempt","value":"inset 0 -2px 0 #f0b429","purpose":"선택한 시도를 표시한다."},
+      {"name":"running-node","value":"inset 3px 0 0 #7cb8ff","purpose":"실행 중 그래프 노드를 표시한다."}
+    ],
+    "motion": [
+      {"name":"state-short","value":"120ms cubic-bezier(.2,.7,.2,1)","purpose":"버튼과 노드의 상태 전환."},
+      {"name":"edge","value":"200ms cubic-bezier(.2,.7,.2,1)","purpose":"그래프 연결선 색 전환."},
+      {"name":"running-track","value":"1.6s linear infinite","purpose":"실행 중 카드의 진행 선; reduced-motion에서는 정적 패턴."}
+    ],
+    "breakpoints": [
+      {"name":"rail-narrow","value":"1279px"},
+      {"name":"single-column","value":"959px"},
+      {"name":"compact","value":"639px"}
+    ]
+  },
+  "components": [
+    {"name":"주요 버튼","kind":"button","refersTo":"button-primary","description":"작업 시작 동작.","html":"<button class=\"ds-primary\">작업 시작</button>","css":".ds-primary{width:100%;min-height:44px;padding:6px 14px;background:#f0b429;color:#1a1408;border:1px solid #f0b429;border-radius:6px;font:600 1rem/1.35 'Pretendard Variable',sans-serif;cursor:pointer;transition:background-color 120ms cubic-bezier(.2,.7,.2,1)}.ds-primary:hover{background:#ffc94d;border-color:#ffc94d}.ds-primary:active{background:#d99d18}.ds-primary:focus-visible{outline:2px solid #ffd166;outline-offset:2px}"},
+    {"name":"보조 버튼","kind":"button","refersTo":"button-secondary","description":"일시정지 등 보조 조작.","html":"<button class=\"ds-button\">일시정지</button>","css":".ds-button{min-height:36px;padding:6px 14px;background:transparent;color:#ecebe6;border:1px solid #4b5056;border-radius:6px;font:600 .875rem/1.35 'Pretendard Variable',sans-serif;cursor:pointer}.ds-button:hover{background:#2a2d31;border-color:#95928a}.ds-button:active{background:#31353a}.ds-button:focus-visible{outline:2px solid #ffd166;outline-offset:2px}"},
+    {"name":"경로 입력","kind":"input","refersTo":"input","description":"작업 경로를 입력한다.","html":"<label class=\"ds-label\">작업 경로<input class=\"ds-input\" type=\"text\" value=\"C:\\project\"></label>","css":".ds-label{display:grid;gap:6px;color:#ecebe6;font:600 .875rem/1.5 sans-serif}.ds-input{min-height:40px;padding:8px 10px;color:#ecebe6;background:#121314;border:1px solid #4b5056;border-radius:6px;font:400 .875rem/1.45 'D2Coding',monospace}.ds-input:hover{border-color:#95928a}.ds-input:focus-visible{outline:2px solid #ffd166;outline-offset:2px}"},
+    {"name":"상태 배지","kind":"chip","refersTo":"status","description":"실행 상태를 색과 텍스트로 표시한다.","html":"<span class=\"ds-status\">실행 중</span>","css":".ds-status{display:inline-flex;align-items:center;gap:6px;padding:2px 10px;border:1px solid currentColor;border-radius:999px;color:#7cb8ff;font:600 .8125rem/1.35 sans-serif;white-space:nowrap}"},
+    {"name":"패널","kind":"card","refersTo":"panel","description":"화면의 관련 정보를 묶는다.","html":"<section class=\"ds-panel\"><strong>작업 흐름</strong><p>작업과 의존 관계</p></section>","css":".ds-panel{padding:16px;background:#1a1c1e;color:#ecebe6;border:1px solid #34383c;border-radius:6px;font:400 .875rem/1.5 sans-serif}.ds-panel strong{font-size:1rem;font-weight:600}.ds-panel p{color:#95928a;font-size:.8125rem}"},
+    {"name":"그래프 노드","kind":"custom","description":"작업과 상태를 선택한다.","html":"<button class=\"ds-node\" aria-pressed=\"true\"><strong>작업</strong><span>실행 중</span></button>","css":".ds-node{display:grid;gap:2px;min-height:56px;padding:4px 10px;text-align:left;color:#ecebe6;background:#202326;border:1px solid #4b5056;border-radius:6px;font:400 .8125rem/1.35 sans-serif;cursor:pointer}.ds-node[aria-pressed=true]{border-color:#f0b429;background:#2a2414}.ds-node:hover{background:#2a2d31}.ds-node:focus-visible{outline:2px solid #ffd166;outline-offset:2px}.ds-node span{color:#bdbab2;font-size:.75rem}"}
+  ],
+  "narrative": {
+    "northStar":"야간 관제 보드",
+    "overview":"승인된 Work in motion 목업의 어두운 운영 화면을 따른다. 설정과 조율, 작업 흐름과 실행 출력을 가까이 배치하고 실제 상태를 읽을 수 있게 한다.",
+    "keyCharacteristics":["어두운 면과 가는 경계선으로 구획한다.","노란색은 주요 실행과 선택에, 상태색은 실행 의미에 쓴다.","경로와 출력은 고정폭 글꼴로 표시한다.","상태는 색과 텍스트, 테두리 모양을 함께 사용한다."],
+    "rules":[],
+    "dos":["Do 실제 상태를 텍스트와 색 및 경계 모양으로 함께 전달한다.","Do 긴 경로와 로그를 해당 영역 안에서 읽을 수 있게 한다.","Do reduced-motion 설정을 존중한다."],
+    "donts":["Don't 실제로 알 수 없는 실행 정보를 추정해 표시한다.","Don't 승인된 목업의 시각 체계를 임의로 교체한다."]
+  }
+}

@@ -26,6 +26,7 @@ pub mod stackbite_plugin;
 pub mod web_coordinator;
 pub mod web_workbench;
 pub mod workflow;
+mod workflow_artifacts;
 pub mod workflow_interface;
 pub mod workflow_runner;
 pub mod workflow_ui;

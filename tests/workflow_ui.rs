@@ -51,6 +51,33 @@ fn viewer_restricts_origin_and_session_and_only_exposes_summary() {
         .next()
         .unwrap();
     assert_eq!(token.len(), 64);
+    assert!(page.contains("/ui/app.js"));
+    assert!(!page.contains("fixtures.js"));
+    for (path, content_type) in [
+        ("/ui/app.js", "text/javascript"),
+        ("/ui/styles.css", "text/css"),
+    ] {
+        let asset = request(
+            port,
+            &format!("GET {path} HTTP/1.1\r\nHost: {host}\r\n\r\n"),
+        );
+        assert!(asset.starts_with("HTTP/1.1 200"));
+        assert!(asset.contains(content_type));
+    }
+    assert!(
+        request(
+            port,
+            &format!("GET /ui/../../Cargo.toml HTTP/1.1\r\nHost: {host}\r\n\r\n")
+        )
+        .starts_with("HTTP/1.1 404")
+    );
+    assert!(
+        request(
+            port,
+            &format!("GET /api/artifacts HTTP/1.1\r\nHost: {host}\r\n\r\n")
+        )
+        .starts_with("HTTP/1.1 403")
+    );
     let state = request(
         port,
         &format!("GET /api/state HTTP/1.1\r\nHost: {host}\r\n\r\n"),
