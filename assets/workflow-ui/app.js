@@ -1,6 +1,6 @@
 import { createGraph } from './graph.js';
 import { createOutputView } from './worker-output.js';
-import { ACTIVE, label, pathLabel, duration, graphModel, taskView, streamsFor, waitReason, outputChunks, artifactOrder, usableToolIds } from './model.js';
+import { ACTIVE, label, pathLabel, duration, graphModel, taskView, streamsFor, waitReason, outputChunks, artifactOrder, usableToolIds, failureText } from './model.js';
 
 const { token, appMode, publicPreview = false, publicApi, publicInfo } = globalThis.switchbite;
 const $ = id => document.getElementById(id);
@@ -130,7 +130,8 @@ function renderCoordinator() {
   setText($('wim-coordinator-identity'), [coordinator.provider, coordinator.model, coordinator.effort].filter(Boolean).join(' / ')
     || (validCoordinators().find(c => c.id === $('wim-input-coordinator').value)?.label || '조율자를 선택하세요'));
   const stream = streamChoice(null);
-  setText($('wim-coordinator-status'), coordinator.error?.message || coordinator.error?.code
+  setText($('wim-coordinator-status'), failureText(coordinator.error)
+    || (coordinator.status === 'repairing_plan' ? '기존 계획의 형식을 수정하고 있습니다.' : '')
     || (state.status === 'completed' ? '계획과 실행 조율을 마쳤습니다.' : state.status === 'cancelled' ? '작업이 취소되었습니다.' : '')
     || (stream ? `${label(stream.health)} · ${duration(stream.elapsed_ms)}` : state.run_id ? label(coordinator.status || state.status) : '목표를 입력하면 작업을 나누고 담당자를 배정합니다.'));
   const plan = $('wim-coordinator-plan');
@@ -253,7 +254,7 @@ function render() {
   if (document.activeElement !== $('wim-live-parallel')) $('wim-live-parallel').value = state.max_parallel || 3;
   const problem = state.attention || state.coordinator?.error;
   $('wim-attention').hidden = !problem;
-  setText($('wim-attention-message'), problem?.message || problem?.code || '');
+  setText($('wim-attention-message'), failureText(problem));
   if (state.startup_submission && recoveryKey !== JSON.stringify(state.startup_submission)) {
     const submission = state.startup_submission; recoveryKey = JSON.stringify(submission); composing = true;
     $('wim-input-workspace').value = pathLabel(submission.workspace); $('wim-input-goal').value = submission.goal || '';

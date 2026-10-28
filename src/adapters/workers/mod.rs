@@ -1,26 +1,42 @@
 use super::{HostError, configure_codex_shell, path_string};
 use serde_json::Value;
-use std::{path::Path, process::Command};
+use std::{
+    io::{BufRead, BufReader, Read},
+    path::Path,
+    process::Command,
+};
 
+#[cfg(test)]
+use std::io::Cursor;
+
+#[cfg(test)]
 pub(super) fn verified_receipt(
     provider: &str,
     output: &[u8],
     session: &str,
 ) -> (bool, Option<String>) {
+    verified_receipt_lines(provider, lines(Cursor::new(output)), session)
+}
+
+fn verified_receipt_lines(
+    provider: &str,
+    output: impl Iterator<Item = Vec<u8>>,
+    session: &str,
+) -> (bool, Option<String>) {
     if provider == "antigravity" {
-        let receipt = antigravity_receipt(output);
+        let receipt = antigravity_receipt_lines(output);
         return (receipt.is_some(), receipt.and_then(|r| r.1));
     }
     if provider == "cursor" || provider == "opencode" {
-        return native_receipt(provider, output);
+        return native_receipt_lines(provider, output);
     }
     let mut init = false;
     let mut turn = false;
     let mut terminal = false;
     let mut model = None;
     let mut valid = true;
-    for line in output.split(|b| *b == b'\n').filter(|l| !l.is_empty()) {
-        let Ok(v) = serde_json::from_slice::<Value>(line) else {
+    for line in output {
+        let Ok(v) = serde_json::from_slice::<Value>(&line) else {
             return (false, None);
         };
         let Some(kind) = v.get("type").and_then(Value::as_str) else {
@@ -87,6 +103,9 @@ pub(super) fn verified_receipt(
                     }
                     init = true;
                 }
+                "item.completed" if init && !turn && v["item"]["type"] == "error" => {
+                    // Codex can report MCP startup failures before starting the turn.
+                }
                 "turn.started" => {
                     if !init || turn {
                         valid = false;
@@ -116,17 +135,241 @@ pub(super) fn verified_receipt(
     (valid && init && terminal, model)
 }
 
+#[cfg(test)]
 pub(super) fn permission_denial_count(output: &[u8]) -> Option<usize> {
+    permission_denial_count_lines(lines(Cursor::new(output)))
+}
+fn permission_denial_count_lines(output: impl Iterator<Item = Vec<u8>>) -> Option<usize> {
     output
-        .split(|b| *b == b'\n')
-        .filter(|line| !line.is_empty())
-        .find_map(|line| {
-            let value = serde_json::from_slice::<Value>(line).ok()?;
+        .filter_map(|line| serde_json::from_slice::<Value>(&line).ok())
+        .find_map(|value| {
             if value["type"] != "result" {
                 return None;
             }
             value["permission_denials"].as_array().map(Vec::len)
         })
+}
+
+// Keep memory bounded even when a provider emits a malformed oversized JSONL record.
+const MAX_RECORD: usize = 16 * 1024 * 1024;
+fn lines<R: BufRead>(mut reader: R) -> impl Iterator<Item = Vec<u8>> {
+    let mut failed = false;
+    std::iter::from_fn(move || {
+        loop {
+            if failed {
+                return None;
+            }
+            let mut line = Vec::new();
+            loop {
+                let buf = match reader.fill_buf() {
+                    Ok(b) => b,
+                    Err(_) => {
+                        failed = true;
+                        return Some(b"invalid-json".to_vec());
+                    }
+                };
+                if buf.is_empty() {
+                    return if line.is_empty() { None } else { Some(line) };
+                }
+                let len = buf
+                    .iter()
+                    .position(|b| *b == b'\n')
+                    .map_or(buf.len(), |i| i + 1);
+                if line.len() + len > MAX_RECORD {
+                    failed = true;
+                    return Some(b"invalid-json".to_vec());
+                }
+                let end = buf[len - 1] == b'\n';
+                line.extend_from_slice(&buf[..len]);
+                reader.consume(len);
+                if end {
+                    break;
+                }
+            }
+            if line != b"\n" {
+                return Some(line);
+            }
+        }
+    })
+}
+fn file_lines(path: &Path) -> Result<impl Iterator<Item = Vec<u8>>, HostError> {
+    Ok(lines(BufReader::new(
+        std::fs::File::open(path).map_err(|_| HostError("output_read_failed"))?,
+    )))
+}
+// Read one JSONL record through a streaming deserializer. Unused fields (including
+// command/MCP output) are skipped by serde rather than materialized in memory.
+struct RecordReader<'a, R> {
+    reader: &'a mut R,
+    ended: bool,
+}
+impl<R: BufRead> Read for RecordReader<'_, R> {
+    fn read(&mut self, out: &mut [u8]) -> std::io::Result<usize> {
+        if self.ended || out.is_empty() {
+            return Ok(0);
+        }
+        let buf = self.reader.fill_buf()?;
+        if buf.is_empty() {
+            self.ended = true;
+            return Ok(0);
+        }
+        let window = &buf[..buf.len().min(out.len())];
+        let n = window
+            .iter()
+            .position(|b| *b == b'\n')
+            .unwrap_or(window.len());
+        if n == 0 {
+            self.reader.consume(1);
+            self.ended = true;
+            return Ok(0);
+        }
+        out[..n].copy_from_slice(&buf[..n]);
+        self.reader.consume(n);
+        Ok(n)
+    }
+}
+
+struct ReceiptValue;
+impl<'de> serde::de::DeserializeSeed<'de> for ReceiptValue {
+    type Value = Value;
+    fn deserialize<D: serde::Deserializer<'de>>(self, d: D) -> Result<Value, D::Error> {
+        d.deserialize_any(ReceiptVisitor)
+    }
+}
+struct ReceiptVisitor;
+impl<'de> serde::de::Visitor<'de> for ReceiptVisitor {
+    type Value = Value;
+    fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        f.write_str("receipt JSON")
+    }
+    fn visit_bool<E: serde::de::Error>(self, v: bool) -> Result<Value, E> {
+        Ok(Value::Bool(v))
+    }
+    fn visit_i64<E: serde::de::Error>(self, v: i64) -> Result<Value, E> {
+        Ok(v.into())
+    }
+    fn visit_u64<E: serde::de::Error>(self, v: u64) -> Result<Value, E> {
+        Ok(v.into())
+    }
+    fn visit_f64<E: serde::de::Error>(self, v: f64) -> Result<Value, E> {
+        Ok(serde_json::Number::from_f64(v)
+            .map(Value::Number)
+            .unwrap_or(Value::Null))
+    }
+    fn visit_str<E: serde::de::Error>(self, v: &str) -> Result<Value, E> {
+        Ok(Value::String(v.to_owned()))
+    }
+    fn visit_string<E: serde::de::Error>(self, v: String) -> Result<Value, E> {
+        Ok(Value::String(v))
+    }
+    fn visit_unit<E: serde::de::Error>(self) -> Result<Value, E> {
+        Ok(Value::Null)
+    }
+    fn visit_none<E: serde::de::Error>(self) -> Result<Value, E> {
+        Ok(Value::Null)
+    }
+    fn visit_seq<A: serde::de::SeqAccess<'de>>(self, mut seq: A) -> Result<Value, A::Error> {
+        let mut values = Vec::new();
+        while let Some(v) = seq.next_element_seed(ReceiptValue)? {
+            values.push(v);
+        }
+        Ok(Value::Array(values))
+    }
+    fn visit_map<A: serde::de::MapAccess<'de>>(self, mut map: A) -> Result<Value, A::Error> {
+        let mut values = serde_json::Map::new();
+        while let Some(key) = map.next_key::<String>()? {
+            if matches!(
+                key.as_str(),
+                "type"
+                    | "subtype"
+                    | "session_id"
+                    | "sessionID"
+                    | "thread_id"
+                    | "event"
+                    | "conversation_id"
+                    | "model"
+                    | "is_error"
+                    | "permission_denials"
+                    | "error"
+                    | "message"
+                    | "stop_reason"
+                    | "content"
+                    | "part"
+                    | "reason"
+                    | "text"
+                    | "result"
+                    | "status"
+                    | "response"
+                    | "step_update"
+                    | "item"
+                    | "state"
+            ) {
+                values.insert(key, map.next_value_seed(ReceiptValue)?);
+            } else {
+                map.next_value::<serde::de::IgnoredAny>()?;
+            }
+        }
+        Ok(Value::Object(values))
+    }
+}
+fn receipt_file_lines(path: &Path) -> Result<impl Iterator<Item = Vec<u8>>, HostError> {
+    use serde::de::DeserializeSeed;
+    let mut reader =
+        BufReader::new(std::fs::File::open(path).map_err(|_| HostError("output_read_failed"))?);
+    let mut failed = false;
+    Ok(std::iter::from_fn(move || {
+        if failed {
+            return None;
+        }
+        loop {
+            match reader.fill_buf() {
+                Ok([]) => return None,
+                Ok(buf) if buf[0] == b'\n' => {
+                    reader.consume(1);
+                }
+                Ok(_) => break,
+                Err(_) => {
+                    failed = true;
+                    return Some(b"invalid-json".to_vec());
+                }
+            }
+        }
+        let record = RecordReader {
+            reader: &mut reader,
+            ended: false,
+        };
+        let mut de = serde_json::Deserializer::from_reader(record);
+        match ReceiptValue.deserialize(&mut de).and_then(|v| {
+            de.end()?;
+            Ok(v)
+        }) {
+            Ok(value) => Some(serde_json::to_vec(&value).expect("receipt values serialize")),
+            Err(_) => {
+                failed = true;
+                Some(b"invalid-json".to_vec())
+            }
+        }
+    }))
+}
+pub(super) fn verified_receipt_file(
+    provider: &str,
+    path: &Path,
+    session: &str,
+) -> Result<(bool, Option<String>), HostError> {
+    Ok(verified_receipt_lines(
+        provider,
+        receipt_file_lines(path)?,
+        session,
+    ))
+}
+pub(super) fn permission_denial_count_file(path: &Path) -> Result<Option<usize>, HostError> {
+    Ok(permission_denial_count_lines(file_lines(path)?))
+}
+pub(super) fn message_file(provider: &str, path: &Path) -> Result<Option<String>, HostError> {
+    Ok(message_lines(provider, file_lines(path)?))
+}
+pub(super) fn antigravity_session_file(path: &Path) -> Result<Option<String>, HostError> {
+    Ok(antigravity_receipt_lines(file_lines(path)?).map(|r| r.0))
 }
 
 #[allow(clippy::too_many_arguments)] // Keep native argv construction at one protocol boundary.
@@ -139,6 +382,7 @@ pub(super) fn command(
     message: &Path,
     dir: &Path,
     prompt: &str,
+    schema: Option<&Path>,
 ) -> Result<Command, HostError> {
     let mut cmd = native_command(provider, executable)?;
     match provider {
@@ -151,7 +395,6 @@ pub(super) fn command(
                 model,
                 "--sandbox",
                 "workspace-write",
-                "--ignore-user-config",
                 "--ephemeral",
                 "--output-last-message",
                 path_string(message)?,
@@ -171,6 +414,9 @@ pub(super) fn command(
                     return Err(HostError("unsupported_effort"));
                 }
                 cmd.args(["-c", &format!("model_reasoning_effort=\"{effort}\"")]);
+            }
+            if let Some(schema) = schema {
+                cmd.args(["--output-schema", path_string(schema)?]);
             }
             cmd.arg(prompt);
         }
@@ -192,25 +438,26 @@ pub(super) fn command(
             cmd.args([
                 "--session-id",
                 session,
-                "--restricted",
-                "--safe-mode",
                 "--no-session-persistence",
-                "--disable-slash-commands",
                 "--permission-mode",
                 "acceptEdits",
                 "--permission-prompts",
                 "none",
                 "--allowedTools",
-                "Read",
-                "Write",
-                "Edit",
-                "--tools",
-                "Read,Write,Edit",
-                "--strict-mcp-config",
-                "--mcp-config",
-                "{\"mcpServers\":{}}",
-                "--settings",
-                "{\"disableAllHooks\":true}",
+                "Bash(cargo build)",
+                "Bash(cargo build *)",
+                "Bash(cargo check)",
+                "Bash(cargo check *)",
+                "Bash(cargo test)",
+                "Bash(cargo test *)",
+                "Bash(npm test)",
+                "Bash(npm test *)",
+                "Bash(npm run build)",
+                "Bash(npm run build *)",
+                "Bash(pnpm test)",
+                "Bash(pnpm test *)",
+                "Bash(pnpm run build)",
+                "Bash(pnpm run build *)",
                 "--",
                 prompt,
             ]);
@@ -358,13 +605,17 @@ fn native_command(provider: &str, executable: &str) -> Result<Command, HostError
     Ok(Command::new(executable))
 }
 
+#[cfg(test)]
 pub(super) fn message(provider: &str, output: &[u8]) -> Option<String> {
+    message_lines(provider, lines(Cursor::new(output)))
+}
+fn message_lines(provider: &str, output: impl Iterator<Item = Vec<u8>>) -> Option<String> {
     if provider == "antigravity" {
-        return antigravity_receipt(output).map(|r| r.2);
+        return antigravity_receipt_lines(output).map(|r| r.2);
     }
     let mut text = String::new();
-    for line in output.split(|b| *b == b'\n').filter(|l| !l.is_empty()) {
-        let v: Value = serde_json::from_slice(line).ok()?;
+    for line in output {
+        let v: Value = serde_json::from_slice(&line).ok()?;
         let part = match provider {
             "cursor" if v["type"] == "result" => v["result"].as_str(),
             "opencode" if v["type"] == "text" => v["part"]["text"].as_str(),
@@ -374,6 +625,9 @@ pub(super) fn message(provider: &str, output: &[u8]) -> Option<String> {
             if !text.is_empty() {
                 text.push('\n');
             }
+            if text.len() + part.len() > MAX_RECORD {
+                return None;
+            }
             text.push_str(part);
         }
     }
@@ -382,11 +636,17 @@ pub(super) fn message(provider: &str, output: &[u8]) -> Option<String> {
 
 // The observed stream has one init and one matching successful result. The
 // native conversation ID is allocated by agy, not the host's session UUID.
+#[cfg(test)]
 fn antigravity_receipt(output: &[u8]) -> Option<(String, Option<String>, String)> {
+    antigravity_receipt_lines(lines(Cursor::new(output)))
+}
+fn antigravity_receipt_lines(
+    output: impl Iterator<Item = Vec<u8>>,
+) -> Option<(String, Option<String>, String)> {
     let mut session: Option<String> = None;
     let mut result: Option<(String, Option<String>, String)> = None;
-    for line in output.split(|b| *b == b'\n').filter(|l| !l.is_empty()) {
-        let v: Value = serde_json::from_slice(line).ok()?;
+    for line in output {
+        let v: Value = serde_json::from_slice(&line).ok()?;
         let event = v.get("event")?.as_str()?;
         if result.is_some() {
             return None;
@@ -443,19 +703,23 @@ fn antigravity_receipt(output: &[u8]) -> Option<(String, Option<String>, String)
     }
     result
 }
+#[cfg(test)]
 pub(super) fn antigravity_session(output: &[u8]) -> Option<String> {
     antigravity_receipt(output).map(|r| r.0)
 }
 
-fn native_receipt(provider: &str, output: &[u8]) -> (bool, Option<String>) {
+fn native_receipt_lines(
+    provider: &str,
+    output: impl Iterator<Item = Vec<u8>>,
+) -> (bool, Option<String>) {
     let mut session: Option<String> = None;
     let mut init = false;
     let mut terminal = false;
     let mut model = None;
     let mut valid = true;
     let mut projected_text = false;
-    for line in output.split(|b| *b == b'\n').filter(|l| !l.is_empty()) {
-        let Ok(v) = serde_json::from_slice::<Value>(line) else {
+    for line in output {
+        let Ok(v) = serde_json::from_slice::<Value>(&line) else {
             return (false, None);
         };
         let Some(kind) = v["type"].as_str() else {
@@ -555,6 +819,206 @@ fn native_receipt(provider: &str, output: &[u8]) -> (bool, Option<String>) {
 mod tests {
     use super::*;
     #[test]
+    fn codex_schema_is_optional_and_user_config_is_preserved() {
+        for schema in [None, Some(Path::new("schema.json"))] {
+            let cmd = command(
+                "codex",
+                "codex",
+                "model",
+                "default",
+                "s",
+                Path::new("message"),
+                Path::new("."),
+                "-",
+                schema,
+            )
+            .unwrap();
+            let args: Vec<_> = cmd
+                .get_args()
+                .map(|a| a.to_string_lossy().to_string())
+                .collect();
+            assert!(!args.iter().any(|a| a == "--ignore-user-config"));
+            assert!(
+                args.windows(2)
+                    .any(|a| a == ["--sandbox", "workspace-write"])
+            );
+            assert!(args.iter().any(|a| a == "approval_policy=\"never\""));
+            assert_eq!(
+                args.iter().any(|a| a == "--output-schema"),
+                schema.is_some()
+            );
+            if schema.is_some() {
+                assert!(
+                    args.windows(2)
+                        .any(|a| a == ["--output-schema", "schema.json"])
+                );
+            }
+            assert_eq!(args.last().unwrap(), "-");
+        }
+    }
+    #[test]
+    fn claude_loads_user_configuration_and_allows_build_tests_without_bypass() {
+        let cmd = command(
+            "claude",
+            "claude",
+            "model",
+            "default",
+            "s",
+            Path::new("message"),
+            Path::new("."),
+            "prompt",
+            None,
+        )
+        .unwrap();
+        let args: Vec<_> = cmd
+            .get_args()
+            .map(|a| a.to_string_lossy().to_string())
+            .collect();
+        for omitted in [
+            "--restricted",
+            "--safe-mode",
+            "--strict-mcp-config",
+            "--dangerously-skip-permissions",
+            "--tools",
+        ] {
+            assert!(!args.iter().any(|a| a == omitted));
+        }
+        assert!(args.iter().any(|a| a == "Bash(cargo test *)"));
+        assert!(
+            args.windows(2)
+                .any(|a| a == ["--permission-prompts", "none"])
+        );
+    }
+    #[test]
+    fn codex_startup_diagnostics_do_not_hide_turn_failures_or_bad_order() {
+        let start = "{\"type\":\"thread.started\",\"thread_id\":\"s\"}\n";
+        let diagnostic = "{\"type\":\"item.completed\",\"item\":{\"type\":\"error\",\"message\":\"MCP startup failed\"}}\n";
+        let turn = "{\"type\":\"turn.started\"}\n{\"type\":\"turn.completed\"}\n";
+        let valid = format!("{start}{diagnostic}{diagnostic}{turn}");
+        let file = tempfile::NamedTempFile::new().unwrap();
+        let check = |stream: &str| {
+            std::fs::write(file.path(), stream).unwrap();
+            let slice = verified_receipt("codex", stream.as_bytes(), "").0;
+            assert_eq!(
+                verified_receipt_file("codex", file.path(), "").unwrap().0,
+                slice
+            );
+            slice
+        };
+        assert!(check(&valid));
+        assert!(!check(&format!("{diagnostic}{start}{turn}")));
+        assert!(!check(&format!(
+            "{start}{}{turn}",
+            diagnostic.replace("item.completed", "item.started")
+        )));
+        assert!(!check(&format!(
+            "{start}{}{turn}",
+            diagnostic.replace("\"error\"", "\"agent_message\"")
+        )));
+        assert!(!check(&format!("{start}{{\"type\":\"error\"}}\n{turn}")));
+        assert!(!check(&format!(
+            "{start}{diagnostic}{{\"type\":\"turn.started\"}}\n{{\"type\":\"turn.failed\"}}\n"
+        )));
+        assert!(!check(&format!(
+            "{start}{diagnostic}{{\"type\":\"turn.completed\"}}\n"
+        )));
+    }
+    #[test]
+    fn replay_codex_startup_diagnostics_when_fixture_is_supplied() {
+        if let Some(path) = std::env::var_os("SWITCHBITE_RECEIPT_REPLAY") {
+            assert!(
+                verified_receipt_file("codex", Path::new(&path), "")
+                    .unwrap()
+                    .0
+            );
+        }
+    }
+    #[test]
+    fn file_receipts_handle_large_stream_and_errors() {
+        use std::io::Write;
+        let mut file = tempfile::NamedTempFile::new().unwrap();
+        writeln!(file, "{{\"type\":\"thread.started\",\"thread_id\":\"s\"}}").unwrap();
+        writeln!(file, "{{\"type\":\"turn.started\"}}").unwrap();
+        for _ in 0..20000 {
+            writeln!(
+                file,
+                "{{\"type\":\"item.completed\",\"payload\":\"{}\"}}",
+                "x".repeat(100)
+            )
+            .unwrap();
+        }
+        writeln!(file, "{{\"type\":\"turn.completed\"}}").unwrap();
+        assert!(verified_receipt_file("codex", file.path(), "s").unwrap().0);
+        writeln!(file, "{{\"type\":\"error\"}}").unwrap();
+        assert!(!verified_receipt_file("codex", file.path(), "s").unwrap().0);
+        assert!(
+            verified_receipt_file("codex", &file.path().with_extension("missing"), "s").is_err()
+        );
+    }
+    #[test]
+    fn receipt_ignores_large_single_command_output_record() {
+        use std::io::Write;
+        let mut file = tempfile::NamedTempFile::new().unwrap();
+        writeln!(
+            file,
+            "{{\"type\":\"thread.started\",\"thread_id\":\"s\"}}\n{{\"type\":\"turn.started\"}}"
+        )
+        .unwrap();
+        write!(
+            file,
+            "{{\"type\":\"item.completed\",\"item\":{{\"aggregated_output\":\""
+        )
+        .unwrap();
+        for _ in 0..17 {
+            file.write_all(&vec![b'x'; 1024 * 1024]).unwrap();
+        }
+        writeln!(file, "\"}}}}\n{{\"type\":\"turn.completed\"}}").unwrap();
+        assert!(verified_receipt_file("codex", file.path(), "s").unwrap().0);
+    }
+    #[test]
+    fn file_receipts_match_native_memory_receipts() {
+        let samples: [(&str, &str, &str); 4] = [
+            (
+                "claude",
+                "s",
+                "{\"type\":\"system\",\"subtype\":\"init\",\"session_id\":\"s\",\"model\":\"m\"}\n{\"type\":\"result\",\"session_id\":\"s\",\"subtype\":\"success\",\"is_error\":false,\"permission_denials\":[]}\n",
+            ),
+            (
+                "cursor",
+                "",
+                "{\"type\":\"system\",\"subtype\":\"init\",\"session_id\":\"s\"}\n{\"type\":\"result\",\"session_id\":\"s\",\"subtype\":\"success\",\"is_error\":false,\"result\":\"ok\"}\n",
+            ),
+            (
+                "opencode",
+                "",
+                "{\"type\":\"step_start\",\"sessionID\":\"s\"}\n{\"type\":\"text\",\"sessionID\":\"s\",\"part\":{\"text\":\"ok\"}}\n",
+            ),
+            (
+                "antigravity",
+                "",
+                "{\"event\":\"init\",\"conversation_id\":\"s\"}\n{\"event\":\"result\",\"result\":{\"conversation_id\":\"s\",\"status\":\"SUCCESS\",\"response\":\"ok\"}}\n",
+            ),
+        ];
+        let file = tempfile::NamedTempFile::new().unwrap();
+        for (provider, session, sample) in samples {
+            std::fs::write(file.path(), sample).unwrap();
+            assert_eq!(
+                verified_receipt_file(provider, file.path(), session).unwrap(),
+                verified_receipt(provider, sample.as_bytes(), session)
+            );
+            assert_eq!(
+                message_file(provider, file.path()).unwrap(),
+                message(provider, sample.as_bytes())
+            );
+            std::fs::write(file.path(), format!("{sample}invalid-json\n")).unwrap();
+            assert!(
+                !verified_receipt_file(provider, file.path(), session)
+                    .unwrap()
+                    .0
+            );
+        }
+    }
+    #[test]
     fn antigravity_observed_receipt_requires_matching_successful_terminal() {
         // Derived from the observed successful stream; identifiers and response are sanitized.
         let success = b"{\"event\":\"init\",\"conversation_id\":\"s\",\"init\":{}}\n{\"event\":\"step_update\",\"step_update\":{\"conversation_id\":\"s\",\"step_index\":1,\"state\":\"DONE\",\"step_type\":\"agent_response\",\"text_delta\":\"OK\"}}\n{\"event\":\"result\",\"result\":{\"conversation_id\":\"s\",\"status\":\"SUCCESS\",\"response\":\"OK\\n\"}}\n";
@@ -620,6 +1084,7 @@ mod tests {
             Path::new("message"),
             Path::new("."),
             "prompt",
+            None,
         )
         .unwrap();
         let args: Vec<_> = cmd
@@ -651,7 +1116,8 @@ mod tests {
                 "",
                 Path::new("message"),
                 Path::new("."),
-                "prompt"
+                "prompt",
+                None
             )
             .is_err()
         );
@@ -685,7 +1151,7 @@ mod tests {
         let dir = Path::new(".");
         for provider in ["claude", "codex", "cursor", "opencode"] {
             let cmd = command(
-                provider, "test", "model", "default", "session", path, dir, "prompt",
+                provider, "test", "model", "default", "session", path, dir, "prompt", None,
             )
             .unwrap();
             assert!(
@@ -695,7 +1161,7 @@ mod tests {
             if ["claude", "codex"].contains(&provider) {
                 assert!(
                     command(
-                        provider, "test", "model", "invalid", "session", path, dir, "prompt"
+                        provider, "test", "model", "invalid", "session", path, dir, "prompt", None
                     )
                     .is_err()
                 );
@@ -773,6 +1239,7 @@ mod tests {
                 Path::new("message"),
                 Path::new("."),
                 "prompt",
+                None,
             )
             .unwrap();
             assert!(cmd.get_args().any(|a| a.to_string_lossy().contains(effort)));

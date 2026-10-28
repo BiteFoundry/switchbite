@@ -2,6 +2,7 @@ use serde_json::{Value, json};
 mod process;
 pub mod stackbite_backend;
 mod workers;
+#[cfg(test)]
 use workers::verified_receipt;
 
 pub fn supports_provider(provider: &str) -> bool {
@@ -14,7 +15,7 @@ use sha2::{Digest, Sha256};
 use std::{
     fmt,
     fs::{self, OpenOptions},
-    io::{Read, Seek, SeekFrom, Write},
+    io::{Read, Write},
     path::{Path, PathBuf},
     process::{Command, Stdio},
     thread,
@@ -93,7 +94,7 @@ pub struct LocalHost {
     state: PathBuf,
     worktrees: PathBuf,
     base: String,
-    timeout: u64,
+    timeout: Option<u64>,
     backend: Option<PathBuf>,
 }
 fn git_lock(root: &Path) -> Result<fs::File, HostError> {
@@ -229,35 +230,113 @@ fn read_bounded(path: &Path) -> Result<Vec<u8>, HostError> {
     }
     Ok(b)
 }
+// Match the coordinator observation artifact limit without modifying the raw message.
+fn read_final_result(path: &Path) -> Result<Value, HostError> {
+    const MAX_FINAL_RESULT: u64 = 128 * 1024;
+    let file =
+        fs::File::open(path).map_err(|_| HostError("coordinator_final_result_unreadable"))?;
+    let mut bytes = Vec::new();
+    file.take(MAX_FINAL_RESULT + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|_| HostError("coordinator_final_result_unreadable"))?;
+    if bytes.len() as u64 > MAX_FINAL_RESULT {
+        return Err(HostError("coordinator_final_result_too_large"));
+    }
+    serde_json::from_slice(&bytes).map_err(|_| HostError("coordinator_final_result_invalid"))
+}
+fn worker_prompt(payload: &Value) -> Result<String, HostError> {
+    let task = payload.get("task").ok_or(HostError("invalid_action"))?;
+    string(task, "objective")?;
+    let context = match payload.get("workflow_goal").and_then(Value::as_str) {
+        Some(goal) if !goal.is_empty() => format!(
+            " Original user goal (context only; the assigned task defines your execution and write scope): {}.",
+            serde_json::to_string(goal).map_err(|_| HostError("invalid_action"))?
+        ),
+        _ => String::new(),
+    };
+    let prompt = format!(
+        "Complete the following task only within this working directory. Treat outputs beginning with artifact: as references, not writable paths. On Windows use non-login shell commands (login=false) and PowerShell -NoProfile so profiles do not change the working directory or write outside it.{context} Task: {}",
+        serde_json::to_string(task).map_err(|_| HostError("invalid_action"))?
+    );
+    if prompt.len() > 128 * 1024 {
+        return Err(HostError("invalid_action"));
+    }
+    Ok(prompt)
+}
+fn configured_timeout(config: &Value) -> Option<u64> {
+    config
+        .get("timeout_seconds")
+        .and_then(Value::as_u64)
+        .filter(|&seconds| seconds > 0)
+        .map(|seconds| seconds.min(3600))
+}
 fn cursor_weekly_limit(bytes: &[u8]) -> bool {
     bytes
         .windows(b"ActionRequiredError: Weekly usage limit reached.".len())
         .any(|window| window == b"ActionRequiredError: Weekly usage limit reached.")
 }
-fn failure_hint(bytes: &[u8]) -> Option<&'static str> {
-    let message = String::from_utf8_lossy(bytes).to_ascii_lowercase();
-    if (message.contains("effort") || message.contains("variant"))
-        && (message.contains("unsupported")
-            || message.contains("invalid")
-            || message.contains("not found"))
-    {
-        Some("unsupported_effort")
-    } else if message.contains("authentication")
-        || message.contains("unauthorized")
-        || message.contains("login required")
-    {
-        Some("authentication_failed")
-    } else if message.contains("quota") || message.contains("rate limit") {
-        Some("quota_or_rate_limit")
-    } else if message.contains("model")
-        && (message.contains("not found") || message.contains("unsupported"))
-    {
-        Some("model_unavailable")
-    } else if message.contains("permission denied") {
-        Some("permission_denied")
-    } else {
-        None
+// Scan logs with fixed-size buffers. Preserve the old failure classification
+// precedence even when its keywords appear in different parts of the file.
+#[derive(Default)]
+struct LogSignals {
+    found: [bool; 12],
+    cursor_limit: bool,
+}
+impl LogSignals {
+    fn failure_hint(&self) -> Option<&'static str> {
+        let f = &self.found;
+        if (f[0] || f[1]) && (f[2] || f[3] || f[4]) {
+            Some("unsupported_effort")
+        } else if f[5] || f[6] || f[7] {
+            Some("authentication_failed")
+        } else if f[8] || f[9] {
+            Some("quota_or_rate_limit")
+        } else if f[10] && (f[4] || f[2]) {
+            Some("model_unavailable")
+        } else if f[11] {
+            Some("permission_denied")
+        } else {
+            None
+        }
     }
+    fn consume(&mut self, bytes: &[u8]) {
+        const PATTERNS: [&[u8]; 12] = [
+            b"effort",
+            b"variant",
+            b"unsupported",
+            b"invalid",
+            b"not found",
+            b"authentication",
+            b"unauthorized",
+            b"login required",
+            b"quota",
+            b"rate limit",
+            b"model",
+            b"permission denied",
+        ];
+        let lower: Vec<u8> = bytes.iter().map(u8::to_ascii_lowercase).collect();
+        for (i, pattern) in PATTERNS.iter().enumerate() {
+            self.found[i] |= lower.windows(pattern.len()).any(|w| w == *pattern);
+        }
+        self.cursor_limit |= cursor_weekly_limit(bytes);
+    }
+}
+fn scan_log(path: &Path) -> Result<LogSignals, HostError> {
+    let mut file = fs::File::open(path).map_err(|_| HostError("io_error"))?;
+    let mut signals = LogSignals::default();
+    let mut overlap = Vec::new();
+    let mut buf = [0u8; 8192];
+    loop {
+        let n = file.read(&mut buf).map_err(|_| HostError("io_error"))?;
+        if n == 0 {
+            break;
+        }
+        overlap.extend_from_slice(&buf[..n]);
+        signals.consume(&overlap);
+        let keep = overlap.len().min(64);
+        overlap.drain(..overlap.len() - keep);
+    }
+    Ok(signals)
 }
 fn attach_rate_limit_error(result: &mut Value) {
     if let Some(code @ ("rate_limited" | "quota_or_rate_limit")) = result["reason"].as_str() {
@@ -324,28 +403,6 @@ fn output_len(path: &Path) -> u64 {
     fs::metadata(path).map(|m| m.len()).unwrap_or(0)
 }
 
-fn retain_tail(path: &Path) -> Result<(), HostError> {
-    const TAIL: u64 = 64 * 1024;
-    let mut file = OpenOptions::new()
-        .read(true)
-        .write(true)
-        .open(path)
-        .map_err(|_| HostError("io_error"))?;
-    let len = file.metadata().map_err(|_| HostError("io_error"))?.len();
-    if len > TAIL {
-        file.seek(SeekFrom::End(-(TAIL as i64)))
-            .map_err(|_| HostError("io_error"))?;
-        let mut tail = Vec::with_capacity(TAIL as usize);
-        file.read_to_end(&mut tail)
-            .map_err(|_| HostError("io_error"))?;
-        file.seek(SeekFrom::Start(0))
-            .map_err(|_| HostError("io_error"))?;
-        file.write_all(&tail).map_err(|_| HostError("io_error"))?;
-        file.set_len(tail.len() as u64)
-            .map_err(|_| HostError("io_error"))?;
-    }
-    Ok(())
-}
 fn path_string(p: &Path) -> Result<&str, HostError> {
     p.to_str()
         .map(|s| {
@@ -436,11 +493,7 @@ impl LocalHost {
             worktrees,
             base,
             backend: stackbite_backend::configured(config)?,
-            timeout: config
-                .get("timeout_seconds")
-                .and_then(Value::as_u64)
-                .unwrap_or(900)
-                .clamp(1, 3600),
+            timeout: configured_timeout(config),
         })
     }
     pub fn describe(&self) -> Value {
@@ -604,7 +657,7 @@ impl LocalHost {
         launch: bool,
         cursor: bool,
         stdin_file: Option<&Path>,
-    ) -> Result<(bool, Vec<u8>, Option<&'static str>), HostError> {
+    ) -> Result<(bool, PathBuf, Option<&'static str>), HostError> {
         let logs = self.state.join("output");
         let execution_dir = self.state.join("executions");
         fs::create_dir_all(&logs).map_err(|_| HostError("io_error"))?;
@@ -682,26 +735,20 @@ impl LocalHost {
             }
             let started = Instant::now();
             let mut heartbeat = started;
+            let mut cursor_log = fs::File::open(&err).map_err(|_| HostError("io_error"))?;
+            let mut cursor_overlap = Vec::new();
             loop {
                 let status = tree
                     .child
                     .try_wait()
                     .map_err(|_| HostError("process_failed"))?
                     .filter(|_| tree.active().is_ok_and(|n| n == 0));
-                if output_len(&out) > MAX_OUTPUT || output_len(&err) > MAX_OUTPUT {
-                    tree.terminate()
-                        .map_err(|_| HostError("process_ownership_unavailable"))?;
-                    terminal = "output_limit";
-                    retain_tail(&out)?;
-                    retain_tail(&err)?;
-                    return Err(HostError("output_limit"));
-                }
                 if let Some(status) = status {
                     exit_code = status.code();
-                    let bytes = read_bounded(&out)?;
-                    let stderr = read_bounded(&err)?;
-                    if launch && cursor && cursor_weekly_limit(&stderr) {
-                        return Ok((false, bytes, Some("rate_limited")));
+                    let signals = scan_log(&err)?;
+                    if launch && cursor && signals.cursor_limit {
+                        terminal = "failed";
+                        return Ok((false, out.clone(), Some("rate_limited")));
                     }
                     terminal = if status.success() {
                         "completed"
@@ -711,9 +758,9 @@ impl LocalHost {
                     let hint = if status.success() {
                         None
                     } else {
-                        failure_hint(&stderr)
+                        signals.failure_hint()
                     };
-                    return Ok((status.success(), bytes, hint));
+                    return Ok((status.success(), out.clone(), hint));
                 }
                 if launch && cancel.exists() {
                     tree.terminate()
@@ -721,7 +768,10 @@ impl LocalHost {
                     terminal = "cancelled";
                     return Err(HostError("cancelled"));
                 }
-                if started.elapsed() >= Duration::from_secs(self.timeout) {
+                if self
+                    .timeout
+                    .is_some_and(|seconds| started.elapsed() >= Duration::from_secs(seconds))
+                {
                     tree.terminate()
                         .map_err(|_| HostError("process_ownership_unavailable"))?;
                     terminal = "timeout";
@@ -730,22 +780,34 @@ impl LocalHost {
                 if heartbeat.elapsed() >= Duration::from_millis(500) {
                     heartbeat = Instant::now();
                     publish(&mut record, "running", None)?;
-                    if launch && cursor && cursor_weekly_limit(&read_bounded(&err)?) {
+                    let mut cursor_limit = false;
+                    if launch && cursor {
+                        let mut chunk = [0u8; 8192];
+                        // Return to cancellation/deadline checks even if stderr is
+                        // being written faster than it can be scanned.
+                        for _ in 0..32 {
+                            let n = cursor_log
+                                .read(&mut chunk)
+                                .map_err(|_| HostError("io_error"))?;
+                            if n == 0 {
+                                break;
+                            }
+                            cursor_overlap.extend_from_slice(&chunk[..n]);
+                            cursor_limit |= cursor_weekly_limit(&cursor_overlap);
+                            let keep = cursor_overlap.len().min(64);
+                            cursor_overlap.drain(..cursor_overlap.len() - keep);
+                        }
+                    }
+                    if cursor_limit {
                         tree.terminate()
                             .map_err(|_| HostError("process_ownership_unavailable"))?;
-                        return Ok((false, read_bounded(&out)?, Some("rate_limited")));
+                        terminal = "failed";
+                        return Ok((false, out.clone(), Some("rate_limited")));
                     }
                 }
                 thread::sleep(Duration::from_millis(50));
             }
         })();
-        if output_len(&out) > MAX_OUTPUT || output_len(&err) > MAX_OUTPUT {
-            retain_tail(&out)?;
-            retain_tail(&err)?;
-            terminal = "output_limit";
-            publish(&mut record, terminal, exit_code)?;
-            return Err(HostError("output_limit"));
-        }
         publish(&mut record, terminal, exit_code)?;
         result
     }
@@ -763,15 +825,7 @@ impl LocalHost {
         {
             return Err(HostError("invalid_action"));
         }
-        let task = p.get("task").ok_or(HostError("invalid_action"))?;
-        string(task, "objective")?;
-        let prompt = format!(
-            "Complete the following task only within this working directory. Treat outputs beginning with artifact: as references, not writable paths. On Windows use non-login shell commands (login=false) and PowerShell -NoProfile so profiles do not change the working directory or write outside it. Task: {}",
-            serde_json::to_string(task).map_err(|_| HostError("invalid_action"))?
-        );
-        if prompt.len() > 128 * 1024 {
-            return Err(HostError("invalid_action"));
-        }
+        let prompt = worker_prompt(p)?;
         if c.get("args")
             .and_then(Value::as_array)
             .is_some_and(|args| !args.is_empty())
@@ -790,6 +844,21 @@ impl LocalHost {
         } else {
             None
         };
+        let schema_path = if provider == "codex" {
+            if let Some(schema) = p.get("result_schema") {
+                let path = messages.join(format!("{}.schema.json", hash(id)));
+                fs::write(
+                    &path,
+                    serde_json::to_vec(schema).map_err(|_| HostError("invalid_action"))?,
+                )
+                .map_err(|_| HostError("io_error"))?;
+                Some(path)
+            } else {
+                None
+            }
+        } else {
+            None
+        };
         let mut cmd = workers::command(
             provider,
             executable,
@@ -799,6 +868,7 @@ impl LocalHost {
             &message_path,
             &dir,
             if prompt_path.is_some() { "-" } else { &prompt },
+            schema_path.as_deref(),
         )?;
         if let Some(backend) = &self.backend {
             cmd = stackbite_backend::wrap(
@@ -850,28 +920,35 @@ impl LocalHost {
             }
             Err(error) => return Err(error),
         };
-        let (verified, resolved_model) = verified_receipt(provider, &output, &session);
+        let (verified, resolved_model) =
+            workers::verified_receipt_file(provider, &output, &session)?;
         if !message_path.exists()
-            && let Some(message) = workers::message(provider, &output)
+            && let Some(message) = workers::message_file(provider, &output)?
         {
             fs::write(&message_path, message).map_err(|_| HostError("io_error"))?;
         }
         // Private context pointers let the coordinator inspect a failed attempt
         // and prepare a repair. Browser summaries never expose these raw logs.
         let stream_path = messages.join(format!("{}.jsonl", hash(id)));
-        fs::write(&stream_path, &output).map_err(|_| HostError("io_error"))?;
-        let mut result = json!({"status":if ok && verified {"completed"} else {"failed"},"execution_id":id,"completion_verified":ok && verified,"requested_model":model,"resolved_model":resolved_model,"message_ref":if message_path.exists(){Some(message_path)}else{None},"stream_ref":stream_path,"reason":if !ok {Some(stderr_hint.or_else(|| failure_hint(&output)).unwrap_or("provider_exit_failed"))} else if !verified {Some("provider_receipt_invalid")} else {None}});
+        fs::copy(&output, &stream_path).map_err(|_| HostError("io_error"))?;
+        let mut result = json!({"status":if ok && verified {"completed"} else {"failed"},"execution_id":id,"completion_verified":ok && verified,"requested_model":model,"resolved_model":resolved_model,"message_ref":if message_path.exists(){Some(&message_path)}else{None},"stream_ref":stream_path,"reason":if !ok {Some(stderr_hint.or_else(|| scan_log(&output).ok().and_then(|s| s.failure_hint())).unwrap_or("provider_exit_failed"))} else if !verified {Some("provider_receipt_invalid")} else {None}});
+        if schema_path.is_some() && ok && verified && message_path.exists() {
+            match read_final_result(&message_path) {
+                Ok(final_result) => result["final_result"] = final_result,
+                Err(error) => result["final_result_error"] = json!(error.0),
+            }
+        }
         if self.backend.is_some() {
             result["backend"] = json!("stackbite_private_clone");
         }
         if provider == "claude"
             && verified
-            && let Some(count) = workers::permission_denial_count(&output)
+            && let Some(count) = workers::permission_denial_count_file(&output)?
         {
             result["permission_denial_count"] = json!(count);
         }
         if ok && verified && provider == "antigravity" {
-            result["session_id"] = json!(workers::antigravity_session(&output));
+            result["session_id"] = json!(workers::antigravity_session_file(&output)?);
         }
         attach_rate_limit_error(&mut result);
         if stderr_hint == Some("rate_limited") {
@@ -1242,6 +1319,84 @@ mod tests {
             b"ActionRequiredError: temporary rate limit"
         ));
     }
+    #[test]
+    fn timeout_is_optional_and_explicit_values_are_clamped() {
+        use super::*;
+        assert_eq!(configured_timeout(&json!({})), None);
+        assert_eq!(configured_timeout(&json!({"timeout_seconds": 0})), None);
+        assert_eq!(configured_timeout(&json!({"timeout_seconds": 1})), Some(1));
+        assert_eq!(
+            configured_timeout(&json!({"timeout_seconds": 7200})),
+            Some(3600)
+        );
+    }
+    #[test]
+    fn final_result_is_bounded_and_raw_message_is_preserved() {
+        use super::*;
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("message");
+        fs::write(&path, br#"{"plan":{"nodes":[]}}"#).unwrap();
+        assert_eq!(
+            read_final_result(&path).unwrap(),
+            json!({"plan":{"nodes":[]}})
+        );
+        let exact = format!("\"{}\"", "x".repeat(128 * 1024 - 2));
+        fs::write(&path, exact.as_bytes()).unwrap();
+        assert!(read_final_result(&path).is_ok());
+        let too_large = format!("{} ", exact);
+        fs::write(&path, too_large.as_bytes()).unwrap();
+        assert_eq!(
+            read_final_result(&path).unwrap_err().0,
+            "coordinator_final_result_too_large"
+        );
+        assert_eq!(fs::read(&path).unwrap(), too_large.as_bytes());
+        fs::write(&path, b"not-json").unwrap();
+        assert_eq!(
+            read_final_result(&path).unwrap_err().0,
+            "coordinator_final_result_invalid"
+        );
+        assert_eq!(fs::read(&path).unwrap(), b"not-json");
+    }
+    #[test]
+    fn large_log_scan_detects_signals_across_chunks() {
+        use super::*;
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("log");
+        let mut data = vec![b'x'; 8190];
+        data.extend_from_slice(b"effort");
+        data.extend_from_slice(&vec![b'x'; 1_100_000]);
+        data.extend_from_slice(b"unsupported");
+        fs::write(&path, &data).unwrap();
+        assert_eq!(
+            scan_log(&path).unwrap().failure_hint(),
+            Some("unsupported_effort")
+        );
+        assert_eq!(fs::read(path).unwrap(), data);
+    }
+    #[test]
+    fn worker_prompt_preserves_goal_and_task_scope() {
+        use super::*;
+        let payload = json!({"workflow_goal":"Set title and H1 to Exact text", "task":{"id":"review", "objective":"Compare requested exact text", "write_paths":["review.md"]}});
+        let prompt = worker_prompt(&payload).unwrap();
+        assert!(prompt.contains("Set title and H1 to Exact text"));
+        assert!(prompt.contains("assigned task defines your execution and write scope"));
+        assert!(prompt.contains("Compare requested exact text"));
+        assert!(prompt.contains("review.md"));
+        assert!(prompt.find("Original user goal").unwrap() < prompt.find("Task: ").unwrap());
+        assert!(
+            !worker_prompt(&json!({"task":{"objective":"work"}}))
+                .unwrap()
+                .contains("Original user goal")
+        );
+        assert_eq!(
+            worker_prompt(
+                &json!({"workflow_goal":"x".repeat(128 * 1024), "task":{"objective":"work"}})
+            )
+            .unwrap_err()
+            .0,
+            "invalid_action"
+        );
+    }
     #[cfg(windows)]
     #[test]
     fn owned_execution_receives_large_utf8_file_on_stdin() {
@@ -1252,10 +1407,13 @@ mod tests {
             state: temp.path().to_owned(),
             worktrees: temp.path().to_owned(),
             base: String::new(),
-            timeout: 20,
+            timeout: Some(20),
             backend: None,
         };
-        let prompt = format!("{}한글", "x".repeat(70_000));
+        let goal = format!("{}한글", "x".repeat(70_000));
+        let prompt =
+            worker_prompt(&json!({"workflow_goal":goal,"task":{"objective":"review exact text"}}))
+                .unwrap();
         let path = temp.path().join("prompt");
         fs::write(&path, prompt.as_bytes()).unwrap();
         let mut cmd = Command::new("powershell.exe");
@@ -1268,7 +1426,7 @@ mod tests {
             .execute(cmd, temp.path(), "large-stdin", true, false, Some(&path))
             .unwrap();
         assert!(ok);
-        assert_eq!(output, prompt.as_bytes());
+        assert_eq!(fs::read(output).unwrap(), prompt.as_bytes());
         let record = value_file(
             &temp
                 .path()
@@ -1289,7 +1447,7 @@ mod tests {
             state: temp.path().to_owned(),
             worktrees: temp.path().to_owned(),
             base: String::new(),
-            timeout: 20,
+            timeout: Some(20),
             backend: None,
         };
         let mut cmd = Command::new("powershell.exe");
@@ -1301,7 +1459,7 @@ mod tests {
         assert!(!ok);
         assert_eq!(hint, Some("rate_limited"));
         assert!(start.elapsed() < Duration::from_secs(10));
-        assert!(String::from_utf8_lossy(&output).contains("partial"));
+        assert!(String::from_utf8_lossy(&fs::read(output).unwrap()).contains("partial"));
         assert!(cursor_weekly_limit(
             &read_bounded(
                 &temp
@@ -1322,7 +1480,7 @@ mod tests {
             state: temp.path().to_owned(),
             worktrees: temp.path().to_owned(),
             base: String::new(),
-            timeout: 20,
+            timeout: Some(20),
             backend: None,
         };
         let mut cmd = Command::new("powershell.exe");
@@ -1336,7 +1494,7 @@ mod tests {
             .unwrap();
         assert!(!ok);
         let reason = hint
-            .or_else(|| failure_hint(&output))
+            .or_else(|| scan_log(&output).ok().and_then(|s| s.failure_hint()))
             .unwrap_or("provider_exit_failed");
         let mut result = json!({"status":"failed", "reason":reason});
         attach_rate_limit_error(&mut result);
@@ -1355,7 +1513,7 @@ mod tests {
                 state: worker_root.clone(),
                 worktrees: worker_root.clone(),
                 base: String::new(),
-                timeout: 10,
+                timeout: Some(10),
                 backend: None,
             };
             let mut cmd = Command::new("powershell.exe");
@@ -1406,7 +1564,7 @@ mod tests {
                     state: worker_root.clone(),
                     worktrees: worker_root.clone(),
                     base: String::new(),
-                    timeout: 2,
+                    timeout: Some(2),
                     backend: None,
                 };
                 let mut cmd = Command::new("powershell.exe");
@@ -1444,7 +1602,7 @@ mod tests {
     }
     #[cfg(windows)]
     #[test]
-    fn rapid_output_limit_retains_bounded_tails() {
+    fn large_logs_finish_and_remain_intact() {
         use super::*;
         let temp = tempfile::tempdir().unwrap();
         let root = temp.path();
@@ -1453,16 +1611,25 @@ mod tests {
             state: root.to_owned(),
             worktrees: root.to_owned(),
             base: String::new(),
-            timeout: 10,
+            timeout: None,
             backend: None,
         };
         let mut cmd = Command::new("powershell.exe");
-        cmd.args(["-NoProfile", "-Command", "[Console]::Out.Write(('x' * 3000000)); [Console]::Error.Write(('e' * 3000000)); Start-Sleep -Seconds 5"]);
-        assert_eq!(
-            host.execute(cmd, root, "flood", false, false, None)
-                .unwrap_err()
-                .0,
-            "output_limit"
+        cmd.args(["-NoProfile", "-Command", r#"[Console]::Out.WriteLine('{"type":"thread.started","thread_id":"t"}'); [Console]::Out.WriteLine('{"type":"turn.started"}'); 1..20000 | ForEach-Object { [Console]::Out.WriteLine('{"type":"item.completed","padding":"xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"}') }; [Console]::Out.WriteLine('{"type":"turn.completed"}'); [Console]::Error.Write(('e' * 1200000))"#]);
+        let (ok, out, _) = host.execute(cmd, root, "flood", true, false, None).unwrap();
+        assert!(ok);
+        let expected_stdout = format!(
+            "{{\"type\":\"thread.started\",\"thread_id\":\"t\"}}\r\n{{\"type\":\"turn.started\"}}\r\n{}{{\"type\":\"turn.completed\"}}\r\n",
+            "{\"type\":\"item.completed\",\"padding\":\"xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\"}\r\n".repeat(20_000),
+        );
+        assert!(expected_stdout.len() > MAX_OUTPUT as usize);
+        assert_eq!(fs::read(&out).unwrap(), expected_stdout.as_bytes());
+        let err = root.join("output").join(format!("{}.err", hash("flood")));
+        assert_eq!(fs::read(&err).unwrap(), vec![b'e'; 1_200_000]);
+        assert!(
+            workers::verified_receipt_file("codex", &out, "unused")
+                .unwrap()
+                .0
         );
         let record = value_file(
             &root
@@ -1470,29 +1637,8 @@ mod tests {
                 .join(format!("{}.json", hash("flood"))),
         )
         .unwrap();
-        assert_eq!(record["status"], "output_limit");
-        for ext in ["out", "err"] {
-            assert!(
-                output_len(
-                    &root
-                        .join("output")
-                        .join(format!("{}.{}", hash("flood"), ext))
-                ) <= 64 * 1024
-            );
-        }
-    }
-    #[test]
-    fn oversized_output_keeps_only_tail() {
-        use super::*;
-        let temp = tempfile::tempdir().unwrap();
-        let path = temp.path().join("output");
-        let mut bytes = vec![b'a'; 1024 * 1024];
-        bytes.extend_from_slice(b"tail");
-        fs::write(&path, bytes).unwrap();
-        retain_tail(&path).unwrap();
-        let retained = fs::read(path).unwrap();
-        assert_eq!(retained.len(), 64 * 1024);
-        assert!(retained.ends_with(b"tail"));
+        assert_eq!(record["status"], "completed");
+        assert_eq!(record["stdout_bytes"].as_u64().unwrap(), output_len(&out));
     }
     #[test]
     fn receipts_fail_closed_on_contradictions() {

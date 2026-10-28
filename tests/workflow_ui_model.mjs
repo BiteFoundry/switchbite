@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { artifactOrder, graphModel, outputChunks, streamsFor, waitReason, usableToolIds } from '../assets/workflow-ui/model.js';
+import { artifactOrder, graphModel, outputChunks, streamsFor, waitReason, usableToolIds, failureText } from '../assets/workflow-ui/model.js';
 
 test('independent branches stay ready together and dependencies track actual completion', () => {
   const tasks = [
@@ -47,4 +47,11 @@ test('remembered unavailable tools stay saved but are omitted from a new run', (
   const saved = new Set(['codex', 'grok']);
   assert.deepEqual(usableToolIds([{ id: 'codex', selectable: true }, { id: 'grok', selectable: false }], saved), ['codex']);
   assert.equal(saved.has('grok'), true);
+});
+test('failure identifies the stage and field without exposing the previous plan', () => {
+  const text = failureText({ stage: 'plan_validation', node_id: 'audit', field: 'routing.model', message: '모델을 확인하세요.', expected: 'string', prior_result: { secret: 'private-plan' } });
+  assert.match(text, /계획 검증/);
+  assert.match(text, /audit · routing.model/);
+  assert.match(text, /기대 형식: string/);
+  assert.ok(!text.includes('private-plan'));
 });

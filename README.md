@@ -8,7 +8,7 @@ can run configured local Codex and Claude workers through verification and
 integration. The coordinator supplies plans and handles actions that need its
 judgment or context.
 
-**v0.8.6-review.3 preview · Windows x64 · MIT · No Python runtime.**
+**v0.9.0-preview.3 · Windows x64 · MIT · No Python runtime.**
 
 Run `switchbite workflow app` to enter a Git project path and goal in the local web
 app. Select which detected CLI tools may participate; the saved selection limits
@@ -17,6 +17,22 @@ coordinator supplies the plan and bounded repairs;
 the existing judge and workflow engine route, execute, verify and integrate the
 tasks. The completed run shows its result worktree, branch and final commit.
 See [the web workflow guide](docs/workflow-ui.ko.md).
+
+Plans use the same schema in the coordinator and workflow engine. Model pins
+belong in `routing`; `requirements` contains exact capability IDs, while task
+instructions belong in `objective`. A rejected plan returns its node and field
+diagnostic to the coordinator for one automatic correction of the existing plan.
+
+CLI tasks have no default execution deadline. Set `host.timeout_seconds` to a
+positive number for an explicit deadline, or omit it/use `0` to run until the
+CLI completes or the user cancels. Raw stdout and stderr stay on disk; the web
+app reads a bounded tail without stopping a worker for producing more output.
+
+Codex workers load user configuration and keep the workspace sandbox and
+noninteractive approval policy. Claude workers load normal configuration with
+`acceptEdits`; SwitchBite allows Cargo build/check/test and npm/pnpm build/test
+commands. Other commands use the user's configured permissions, and requests
+that would prompt are denied. User deny rules and managed policies still apply.
 
 The live output panel follows coordinator, worker and verification output. It
 shows elapsed time, last output and owned-process status, with explicit controls

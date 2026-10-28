@@ -22,13 +22,18 @@ struct Run {
     coordinator: Mutex<Value>,
     active_action: Mutex<Option<Value>>,
     latest_coordinator_action: Mutex<Option<Value>>,
+    coordinator_feedback: Mutex<Option<Value>>,
     alive: AtomicBool,
     attempt: AtomicU64,
     tools: Vec<String>,
 }
 
+static CHECKPOINT_WRITE: Mutex<()> = Mutex::new(());
+static CONTROL: Mutex<()> = Mutex::new(());
+
 impl Run {
     fn checkpoint(&self) -> Result<(), Value> {
+        let _write = CHECKPOINT_WRITE.lock().map_err(|_| lock_error())?;
         let mut coordinator = self.coordinator.lock().map_err(|_| lock_error())?.clone();
         for key in ["provider", "model", "effort"] {
             coordinator[key] = self.candidate[key].clone();
@@ -39,7 +44,12 @@ impl Run {
             .map_err(|_| lock_error())?
             .clone();
         let action = latest.map(|a| json!({"id":a["id"],"kind":a["kind"],"task_id":a["task_id"],"coordinator_attempt":a["coordinator_attempt"]}));
-        let value = json!({"candidate_id":self.candidate["id"],"owner_pid":std::process::id(),"attempt":self.attempt.load(Ordering::Acquire),"coordinator":coordinator,"trace":{"action":action,"candidate":{"provider":self.candidate["provider"]},"active":self.active_action.lock().map_err(|_|lock_error())?.is_some()}});
+        let feedback = self
+            .coordinator_feedback
+            .lock()
+            .map_err(|_| lock_error())?
+            .clone();
+        let value = json!({"candidate_id":self.candidate["id"],"owner_pid":std::process::id(),"attempt":self.attempt.load(Ordering::Acquire),"coordinator":coordinator,"coordinator_feedback":feedback,"trace":{"action":action,"candidate":{"provider":self.candidate["provider"]},"active":self.active_action.lock().map_err(|_|lock_error())?.is_some()}});
         catalog::write_cache(
             &self.root.join(&self.id).join("web-session.json"),
             &serde_json::to_vec(&value).map_err(|_| lock_error())?,
@@ -63,7 +73,7 @@ pub(crate) fn recorded_state(workflow: &Workflow, run: &str) -> Result<Value, Va
 fn recorded(root: &Path, run: &str) -> Option<Value> {
     let path = root.join(run).join("web-session.json");
     let meta = std::fs::symlink_metadata(&path).ok()?;
-    if !meta.is_file() || meta.len() > 128 * 1024 {
+    if !meta.is_file() || meta.len() > 256 * 1024 {
         return None;
     }
     serde_json::from_slice(&std::fs::read(path).ok()?).ok()
@@ -127,14 +137,59 @@ fn friendly(value: &Value) -> Value {
         "execution_failed"
     };
     let message = value["message"].as_str().unwrap_or(match code {
-        "coordinator_artifact_invalid" | "coordinator_artifact_missing" | "invalid_receipt" => "조율자가 실행 가능한 작업 계획을 반환하지 못했습니다. 다시 시도해 계획을 새로 만드세요.",
+        "coordinator_plan_invalid" | "coordinator_artifact_invalid" | "invalid_receipt" => "계획 형식을 확인하지 못했습니다. 표시된 항목을 수정해 기존 계획으로 이어갑니다.",
+        "coordinator_artifact_missing" => "CLI가 종료됐지만 계획 결과를 찾지 못했습니다. 조율자 출력을 확인하세요.",
         "coordinator_review_invalid" | "coordinator_review_candidate_invalid" | "coordinator_review_snapshot_invalid" => "조율자가 유효한 모델 배정을 반환하지 못했습니다. 다시 시도하세요.",
-        "coordinator_execution_failed" => "조율자 CLI가 완료되지 않았습니다. 해당 CLI의 로그인과 사용 한도를 확인한 뒤 다시 시도하세요.",
+        "coordinator_execution_failed" => "조율자 CLI 실행이 완료되지 않았습니다. 실행 출력을 확인하세요.",
         "coordinator_context_too_large" => "이 작업의 문맥이 조율자 입력 한도를 넘었습니다. 더 작은 업무로 나눠 시작하세요.",
         "provider_key_missing" | "judge_unavailable" => "판단기 연결을 확인한 뒤 다시 시도하세요.",
         _ => "실행을 이어가지 못했습니다. 표시된 오류 코드와 프로젝트 상태를 확인한 뒤 다시 시도하세요.",
     });
-    error(code, message)
+    let stage = value["stage"].as_str().unwrap_or(match code {
+        "coordinator_plan_invalid" | "invalid_receipt" => "plan_validation",
+        "coordinator_artifact_invalid" | "coordinator_artifact_missing" => "result_collection",
+        "coordinator_execution_failed"
+        | "timeout"
+        | "process_failed"
+        | "provider_receipt_invalid" => "cli_execution",
+        "routing_held" | "input_needed" | "judge_unavailable" | "provider_key_missing" => "routing",
+        _ => "workflow",
+    });
+    let mut result = error(code, message);
+    for (key, text) in std::iter::once(("stage", Some(stage)))
+        .chain(["node_id", "field", "expected"].map(|key| (key, value[key].as_str())))
+    {
+        if let Some(text) = text {
+            result[key] = json!(text.chars().take(1000).collect::<String>());
+        }
+    }
+    result
+}
+
+// Keep the previous plan private; only the concrete diagnostic reaches browser status.
+fn coordinator_failure(run: &Run, action: &Value, detail: Value) -> Result<bool, Value> {
+    let mut saved = run.coordinator_feedback.lock().map_err(|_| lock_error())?;
+    let previous = saved
+        .as_ref()
+        .filter(|old| old["action_id"] == action["id"]);
+    let retries = previous
+        .and_then(|old| old["automatic_retries"].as_u64())
+        .unwrap_or(0);
+    let prior = detail
+        .get("prior_result")
+        .cloned()
+        .or_else(|| previous.and_then(|old| old.get("prior_result").cloned()));
+    let retry = detail["code"] == "coordinator_plan_invalid" && prior.is_some() && retries == 0;
+    *saved = Some(
+        json!({"action_id":action["id"],"error":friendly(&detail),"prior_result":prior,"automatic_retries":retries + u64::from(retry)}),
+    );
+    drop(saved);
+    if retry {
+        run.attempt.fetch_add(1, Ordering::AcqRel);
+        *run.coordinator.lock().map_err(|_| lock_error())? = json!({"status":"repairing_plan","stage":"plan_validation","recovery":friendly(&detail)});
+        run.checkpoint()?;
+    }
+    Ok(retry)
 }
 
 impl Workbench {
@@ -396,7 +451,7 @@ impl Workbench {
         {
             return Ok(handoff);
         }
-        let state = Workflow::new(root.clone()).start(&json!({"workspace":workspace,"goal":goal,"catalog":{"providers":selected},"max_parallel":max_parallel,"host":{"timeout_seconds":900}})).map_err(|e| e.to_value())?;
+        let state = Workflow::new(root.clone()).start(&json!({"workspace":workspace,"goal":goal,"catalog":{"providers":selected},"max_parallel":max_parallel,"host":{}})).map_err(|e| e.to_value())?;
         let run = Arc::new(Run {
             root,
             id: state["run_id"].as_str().unwrap().to_owned(),
@@ -404,6 +459,7 @@ impl Workbench {
             coordinator: Mutex::new(json!({"status":"planning"})),
             active_action: Mutex::new(None),
             latest_coordinator_action: Mutex::new(None),
+            coordinator_feedback: Mutex::new(None),
             alive: AtomicBool::new(false),
             attempt: AtomicU64::new(0),
             tools: selected,
@@ -553,12 +609,24 @@ impl Workbench {
             root,
             id: id.to_owned(),
             candidate,
-            coordinator: Mutex::new(json!({"status":"coordinating"})),
+            coordinator: Mutex::new(if saved["coordinator"]["error"].is_object() {
+                let mut coordinator = saved["coordinator"].clone();
+                coordinator["error"] = friendly(&coordinator["error"]);
+                coordinator
+            } else {
+                json!({"status":"coordinating"})
+            }),
             active_action: Mutex::new(None),
             latest_coordinator_action: Mutex::new(
                 saved["trace"]["action"]
                     .as_object()
                     .map(|_| saved["trace"]["action"].clone()),
+            ),
+            coordinator_feedback: Mutex::new(
+                saved
+                    .get("coordinator_feedback")
+                    .filter(|v| !v.is_null())
+                    .cloned(),
             ),
             alive: AtomicBool::new(false),
             attempt: AtomicU64::new(
@@ -574,7 +642,10 @@ impl Workbench {
         run.checkpoint()?;
         *current = Some(run.clone());
         drop(current);
-        if state["status"] == "running" {
+        if state["status"] == "running" && !saved["coordinator"]["error"].is_object() {
+            workflow
+                .clear_legacy_web_deadline(id)
+                .map_err(|e| e.to_value())?;
             self.spawn(run);
         }
         self.status()
@@ -675,6 +746,7 @@ impl Workbench {
     }
 
     pub fn control(&self, action: &str) -> Result<Value, Value> {
+        let _control = CONTROL.lock().map_err(|_| lock_error())?;
         let run = self
             .current
             .lock()
@@ -685,7 +757,18 @@ impl Workbench {
         let state = workflow.status(&run.id).map_err(|e| e.to_value())?;
         if action == "resume" && !run.alive.load(Ordering::Acquire) && state["status"] == "running"
         {
+            workflow
+                .clear_legacy_web_deadline(&run.id)
+                .map_err(|e| e.to_value())?;
             run.attempt.fetch_add(1, Ordering::AcqRel);
+            if let Some(feedback) = run
+                .coordinator_feedback
+                .lock()
+                .map_err(|_| lock_error())?
+                .as_mut()
+            {
+                feedback["automatic_retries"] = json!(0);
+            }
             *run.coordinator.lock().map_err(|_| lock_error())? = json!({"status":"planning"});
             if workflow
                 .request(&run.id)
@@ -770,17 +853,33 @@ fn drive(run: &Run, judge: Option<Arc<ConfiguredJudge>>) -> Result<(), Value> {
                     .and_then(|result| result);
                 match result {
                     Ok(result) => {
-                        workflow
-                            .observe(
-                                &run.id,
-                                &json!({"action_id":id,"event_id":format!("web:{id}"),"result":result}),
-                            )
-                            .map_err(|e| e.to_value())?;
-                        *run.coordinator.lock().map_err(|_| lock_error())? =
-                            json!({"status":"coordinating"});
+                        let accepted = workflow.observe(
+                            &run.id,
+                            &json!({"action_id":id,"event_id":format!("web:{id}"),"result":result}),
+                        );
+                        match accepted {
+                            Ok(_) => {
+                                *run.coordinator_feedback.lock().map_err(|_| lock_error())? = None;
+                                *run.coordinator.lock().map_err(|_| lock_error())? =
+                                    json!({"status":"coordinating"});
+                            }
+                            Err(error) => {
+                                let detail = if action["kind"] == "plan" {
+                                    json!({"code":"coordinator_plan_invalid","stage":"plan_validation","field":"plan","expected":"valid workflow DAG","prior_result":result,"cause":error.to_value()})
+                                } else {
+                                    error.to_value()
+                                };
+                                if !coordinator_failure(run, &action, detail.clone())?
+                                    && attention.is_none()
+                                {
+                                    attention = Some(detail);
+                                }
+                            }
+                        }
                     }
                     Err(error) => {
-                        if attention.is_none() {
+                        if !coordinator_failure(run, &action, error.clone())? && attention.is_none()
+                        {
                             attention = Some(error);
                         }
                     }
@@ -817,6 +916,15 @@ fn drive(run: &Run, judge: Option<Arc<ConfiguredJudge>>) -> Result<(), Value> {
                 .cloned()
             {
                 action["coordinator_attempt"] = json!(run.attempt.load(Ordering::Acquire));
+                if let Some(feedback) = run
+                    .coordinator_feedback
+                    .lock()
+                    .map_err(|_| lock_error())?
+                    .as_ref()
+                    && feedback["action_id"] == action["id"]
+                {
+                    action["payload"]["coordinator_feedback"] = feedback.clone();
+                }
                 let id = action["id"].as_str().ok_or_else(lock_error)?;
                 if workflow.claim(&run.id, id).map_err(|e| e.to_value())? {
                     *run.active_action.lock().map_err(|_| lock_error())? = Some(action.clone());
@@ -876,6 +984,43 @@ mod parallel_tests {
         fs, thread,
         time::{Duration, Instant},
     };
+
+    #[test]
+    fn plan_retry_keeps_existing_result_and_stops_after_one_automatic_repair() {
+        let tmp = tempfile::tempdir().unwrap();
+        fs::create_dir_all(tmp.path().join("test-run")).unwrap();
+        let run = Run {
+            root: tmp.path().to_owned(),
+            id: "test-run".into(),
+            candidate: json!({"id":"coordinator"}),
+            coordinator: Mutex::new(json!({})),
+            active_action: Mutex::new(None),
+            latest_coordinator_action: Mutex::new(None),
+            coordinator_feedback: Mutex::new(None),
+            alive: AtomicBool::new(true),
+            attempt: AtomicU64::new(0),
+            tools: vec![],
+        };
+        let action = json!({"id":"plan-1","kind":"plan"});
+        let prior = json!({"plan":{"nodes":[{"id":"audit","objective":"Keep this work"}]}});
+        let detail = json!({"code":"coordinator_plan_invalid","stage":"plan_validation","node_id":"audit","field":"depends_on","expected":"existing task IDs","prior_result":prior});
+        assert!(coordinator_failure(&run, &action, detail.clone()).unwrap());
+        assert_eq!(run.attempt.load(Ordering::Acquire), 1);
+        let saved = recorded(tmp.path(), "test-run").unwrap();
+        assert_eq!(saved["coordinator_feedback"]["prior_result"], prior);
+        assert_eq!(
+            saved["coordinator_feedback"]["error"]["field"],
+            "depends_on"
+        );
+        assert_eq!(run.coordinator.lock().unwrap()["status"], "repairing_plan");
+        assert!(friendly(&detail).get("prior_result").is_none());
+        assert!(!coordinator_failure(&run, &action, detail).unwrap());
+        assert_eq!(run.attempt.load(Ordering::Acquire), 1);
+        assert_eq!(
+            run.coordinator_feedback.lock().unwrap().as_ref().unwrap()["automatic_retries"],
+            1
+        );
+    }
 
     #[test]
     fn failed_initial_submission_survives_idle_info() {
@@ -998,6 +1143,7 @@ fn main() {{
             coordinator: Mutex::new(json!({})),
             active_action: Mutex::new(None),
             latest_coordinator_action: Mutex::new(None),
+            coordinator_feedback: Mutex::new(None),
             alive: AtomicBool::new(true),
             attempt: AtomicU64::new(0),
             tools: vec![],

@@ -8,20 +8,25 @@ use std::{path::PathBuf, sync::Arc};
 
 pub const INSTRUCTIONS: &str = "Coordinate the user's authorized work. Start with a workspace and a goal or a plan. Omit pool to discover available workers automatically; supply a factual pool to choose workers explicitly. Decompose a goal into bounded tasks when a plan action is returned; give each task an ID, objective, dependencies, acceptance checks and write paths. Execute independent work within reservations. Call next and act on its returned actions. With a host configuration or complete local worker metadata, next can drive supported host actions; otherwise perform them with your host and observe results. Observe plan or repair actions with a plan or task and stable action_id and event_id. Verify completed work and integrate it before unblocking dependants. Gather missing context and perform bounded repairs. Inspect unknown executions rather than launching duplicates. Continue until complete or an actionable input is needed.";
 
-pub fn tools() -> Vec<Tool> {
-    let strings = json!({"type":"array","maxItems":64,"items":{"type":"string","maxLength":1000}});
+/// Canonical workflow plan contract shared with coordinator outputs.
+pub fn plan_schema() -> Value {
     let node = json!({"type":"object","additionalProperties":false,"required":["id","objective"],"properties":{
         "id":{"type":"string","description":"Unique task ID in this plan; referenced by depends_on."},
         "objective":{"type":"string","description":"Bounded work with enough context for the assigned worker."},
         "depends_on":{"type":"array","items":{"type":"string"},"description":"Task IDs that must be verified and integrated first."},
         "role":{"type":"string","enum":["exploration","implementation","mockup","integration","review"]},
         "routing":{"type":"object","additionalProperties":false,"properties":{"candidate_id":{"type":"string"},"provider":{"type":"string"},"model":{"type":"string"},"effort":{"type":"string"}}},
-        "requirements":strings,"acceptance":{"type":"array","items":{"type":"string"},"description":"Observable task acceptance checks."},
+        "requirements":{"type":"array","maxItems":64,"items":{"type":"string","maxLength":1000},"description":"Exact capability IDs required of the worker; put natural-language instructions in objective."},"acceptance":{"type":"array","items":{"type":"string"},"description":"Observable task acceptance checks."},
         "outputs":{"type":"array","items":{"type":"string"},"description":"Output or artifact references. Use write_paths for repository ownership."},
         "write_paths":{"type":"array","items":{"type":"string"},"description":"Relative repository paths owned by this task; overlapping paths serialize work."},
         "context_refs":{"type":"array","items":{"type":"string"},"description":"Relevant context references."}
     }});
-    let plan = json!({"type":"object","additionalProperties":false,"required":["nodes"],"properties":{"nodes":{"type":"array","minItems":1,"maxItems":128,"items":node}}});
+    json!({"type":"object","additionalProperties":false,"required":["nodes"],"properties":{"nodes":{"type":"array","minItems":1,"maxItems":128,"items":node}}})
+}
+
+pub fn tools() -> Vec<Tool> {
+    let plan = plan_schema();
+    let node = plan["properties"]["nodes"]["items"].clone();
     let candidate = json!({"type":"object","additionalProperties":false,"required":["id","description","capabilities","available"],"properties":{
         "id":{"type":"string","description":"Exact unique worker/model/settings ID."},"description":{"type":"string","description":"Factual strengths and constraints."},
         "capabilities":{"type":"array","items":{"type":"string"}},"available":{"type":"boolean"},
@@ -38,7 +43,7 @@ pub fn tools() -> Vec<Tool> {
             "catalog":{"type":"object","additionalProperties":false,"properties":{"providers":{"type":"array","items":{"type":"string","enum":["claude","codex","cursor","opencode"]}},"refresh":{"type":"boolean"}}},
             "preferences":{"type":"string"},"max_parallel":{"type":"integer","minimum":1,"maximum":16,"default":2},"repair_rounds":{"type":"integer","minimum":0,"maximum":10,"default":2},
             "checks":{"type":"array","maxItems":32,"items":{"type":"object","additionalProperties":false,"required":["program"],"properties":{"program":{"type":"string"},"args":{"type":"array","items":{"type":"string"}}}}},
-            "host":{"type":"object","description":"Optional local host configuration. A host object or complete provider/executable/model/effort worker metadata enables local host actions; otherwise actions go to the coordinator.","properties":{"base":{"type":"string","description":"Git base reference; defaults to HEAD."},"timeout_seconds":{"type":"integer","minimum":1,"maximum":3600}}}
+            "host":{"type":"object","description":"Optional local host configuration. A host object or complete provider/executable/model/effort worker metadata enables local host actions; otherwise actions go to the coordinator.","properties":{"base":{"type":"string","description":"Git base reference; defaults to HEAD."},"timeout_seconds":{"type":"integer","minimum":0,"maximum":3600,"description":"Omit or use 0 for no deadline; a positive value sets the deadline in seconds."}}}
         }}},"examples":[{"request":{"workspace":"/path/to/project","goal":"Implement the approved feature"}}]});
     let observe = json!({"type":"object","additionalProperties":false,"required":["run_id","event"],"properties":{
         "run_id":{"type":"string"},"event":{"type":"object","additionalProperties":false,"required":["action_id","event_id","result"],"properties":{

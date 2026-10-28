@@ -61,9 +61,9 @@ jobs:
       - name: Check declared minimum compiler
         shell: pwsh
         run: |
-          rustup toolchain install 1.88.0 --profile minimal
+          rustup toolchain install 1.89.0 --profile minimal
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          cargo +1.88.0 check --all-targets --locked
+          cargo +1.89.0 check --all-targets --locked
 
   publish:
     if: startsWith(github.ref, 'refs/tags/')

@@ -16,6 +16,12 @@ export const COPY = {
 export const ROLES = { implementation: '구현', review: '검토', exploration: '조사',
   design: '설계', planning: '계획', testing: '검증', writing: '작성', mockup: '목업', integration: '통합' };
 export const label = value => COPY[value] || value || '대기';
+export function failureText(problem) {
+  if (!problem) return '';
+  const stages = { plan_validation: '계획 검증', result_collection: '계획 회수', cli_execution: 'CLI 실행', routing: '모델 배정', workflow: '작업 조율', integration: '결과 통합' };
+  const location = [problem.node_id, problem.field].filter(Boolean).join(' · ');
+  return [stages[problem.stage], location, problem.message || problem.code, problem.expected ? `기대 형식: ${problem.expected}` : ''].filter(Boolean).join(' — ');
+}
 export const usableToolIds = (tools, selected) => (tools || []).filter(tool => tool.selectable && selected.has(tool.id)).map(tool => tool.id);
 export const pathLabel = value => String(value || '').replace(/^\\\\\?\\/, '');
 export function duration(ms) {

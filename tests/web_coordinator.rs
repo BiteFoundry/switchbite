@@ -64,8 +64,19 @@ fn fake_worker(tmp: &Path) -> Value {
             std::fs::write("switchbite-observation.json", r#"{"status":"ready","candidate_id":"worker","reason_codes":["coordinator_review"],"summary":"Eligible worker"}"#).unwrap();
         } else {
             assert!(prompt.contains("independent review node"));
-            assert!(prompt.contains("arrays of strings"));
-            std::fs::write("switchbite-observation.json", r#"{"plan":{"nodes":[{"id":"build","objective":"Build","acceptance":"Build works"}]}}"#).unwrap();
+            assert!(prompt.contains("result_schema"));
+            assert!(prompt.contains("Exact capability IDs"));
+            if prompt.contains("RETRY_FIXTURE") && !prompt.contains("coordinator_plan_invalid") {
+                std::fs::write("switchbite-observation.json", r#"{"plan":{"nodes":[{"id":"build","objective":"Build","depends_on":["missing"]}]}}"#).unwrap();
+            } else {
+                if prompt.contains("RETRY_FIXTURE") {
+                    assert!(prompt.contains("prior_result"));
+                    assert!(prompt.contains("depends_on"));
+                    assert!(prompt.contains("missing"));
+                    assert!(prompt.contains("coordinator_plan_invalid"));
+                }
+                std::fs::write("switchbite-observation.json", r#"{"plan":{"nodes":[{"id":"build","objective":"Build","acceptance":"Build works"}]}}"#).unwrap();
+            }
         }
         println!("{{\"type\":\"thread.started\",\"thread_id\":\"t\"}}");
         println!("{{\"type\":\"turn.started\"}}");
@@ -165,4 +176,30 @@ fn coordinator_reviews_low_confidence_route_and_core_accepts_the_choice() {
         )
         .unwrap();
     assert_eq!(state["tasks"][0]["candidate"]["id"], "worker");
+}
+
+#[test]
+fn coordinator_retry_receives_previous_plan_and_diagnostic() {
+    let (tmp, run, mut action) = setup();
+    let candidate = fake_worker(tmp.path());
+    let root = tmp.path().join("state");
+    action["payload"]["fixture"] = json!("RETRY_FIXTURE");
+    let feedback = web_coordinator::fulfill(&root, &run, &action, &candidate).unwrap_err();
+    assert_eq!(feedback["code"], "coordinator_plan_invalid");
+    assert_eq!(feedback["node_id"], "build");
+    assert_eq!(feedback["field"], "depends_on");
+    assert_eq!(
+        feedback["prior_result"]["plan"]["nodes"][0]["depends_on"],
+        json!(["missing"])
+    );
+    action["coordinator_attempt"] = json!(1);
+    action["payload"]["coordinator_feedback"] = feedback;
+    let result = web_coordinator::fulfill(&root, &run, &action, &candidate).unwrap();
+    let registered = Workflow::new(root)
+        .observe(
+            &run,
+            &json!({"action_id":action["id"],"event_id":"corrected-plan","result":result}),
+        )
+        .unwrap();
+    assert_eq!(registered["tasks"][0]["id"], "build");
 }

@@ -302,6 +302,32 @@ impl Workflow {
         let _lock = self.lock()?;
         Ok(self.load(run_id)?.request)
     }
+    /// Remove the automatic 15-minute deadline from an inactive legacy Web run.
+    pub(crate) fn clear_legacy_web_deadline(&self, run_id: &str) -> Result<bool, WorkflowError> {
+        let _g = MUTATION.lock().map_err(|_| err("storage_error"))?;
+        let _lock = self.lock()?;
+        let mut state = self.load(run_id)?;
+        if state
+            .request
+            .pointer("/runtime/switchbite/version")
+            .and_then(Value::as_str)
+            == Some("0.9.0-preview.2")
+            && state
+                .request
+                .pointer("/catalog/providers")
+                .is_some_and(Value::is_array)
+            && state
+                .request
+                .pointer("/host/timeout_seconds")
+                .and_then(Value::as_u64)
+                == Some(900)
+        {
+            state.request["host"]["timeout_seconds"] = json!(0);
+            self.save(&mut state)?;
+            return Ok(true);
+        }
+        Ok(false)
+    }
     /// Re-probe automatic targets on an explicit reconnect/refresh. Active
     /// attempts retain their exact candidate; only outstanding routes change.
     pub fn refresh_catalog(&self, run_id: &str) -> Result<Value, WorkflowError> {
@@ -356,6 +382,36 @@ impl Workflow {
         self.schedule(&mut s);
         self.save(&mut s)?;
         Ok(Self::response(&s))
+    }
+    /// Worker capability IDs advertised in the factual pool and catalog.
+    pub(crate) fn known_capabilities(&self, run_id: &str) -> Result<Vec<Value>, WorkflowError> {
+        let _g = MUTATION.lock().map_err(|_| err("storage_error"))?;
+        let _lock = self.lock()?;
+        let state = self.load(run_id)?;
+        Ok(state
+            .catalog
+            .as_ref()
+            .and_then(|c| c.get("candidates"))
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .chain(
+                state
+                    .request
+                    .get("pool")
+                    .and_then(Value::as_array)
+                    .into_iter()
+                    .flatten(),
+            )
+            .flat_map(|candidate| {
+                candidate
+                    .get("capabilities")
+                    .and_then(Value::as_array)
+                    .into_iter()
+                    .flatten()
+                    .cloned()
+            })
+            .collect())
     }
     pub fn status(&self, run_id: &str) -> Result<Value, WorkflowError> {
         let _g = MUTATION.lock().map_err(|_| err("storage_error"))?;
@@ -945,6 +1001,11 @@ impl Workflow {
                 payload["execution_id"] = json!(ex);
             }
         }
+        if kind == "launch"
+            && let Some(goal) = s.request.get("goal")
+        {
+            payload["workflow_goal"] = goal.clone();
+        }
         if let Some(m) = extra.as_object() {
             for (k, v) in m {
                 payload[k] = v.clone();
@@ -1520,6 +1581,166 @@ fn path_overlap(a: &str, b: &str) -> bool {
     };
     a == "." || b == "." || a == b || a.starts_with(&(b.clone() + "/")) || b.starts_with(&(a + "/"))
 }
+/// Validate a coordinator plan without mutating a workflow or launching work.
+/// Diagnostics identify the field that needs correction.
+pub fn preflight_plan(plan: &Value) -> Result<(), Value> {
+    let diagnostic = |node: &Value, field: &str, expected: &str| json!({"code":"invalid_plan", "node_id":node.get("id"), "field":field, "expected":expected});
+    let obj = plan
+        .as_object()
+        .ok_or_else(|| diagnostic(&Value::Null, "plan", "object containing nodes"))?;
+    if let Some(key) = obj.keys().find(|k| k.as_str() != "nodes") {
+        return Err(diagnostic(
+            &Value::Null,
+            key,
+            "only nodes is allowed in plan",
+        ));
+    }
+    let nodes = plan
+        .get("nodes")
+        .and_then(Value::as_array)
+        .filter(|a| !a.is_empty() && a.len() <= 128)
+        .ok_or_else(|| diagnostic(&Value::Null, "nodes", "array of 1 to 128 nodes"))?;
+    let mut ids = BTreeSet::new();
+    for node in nodes {
+        let obj = node
+            .as_object()
+            .ok_or_else(|| diagnostic(node, "node", "object"))?;
+        for key in obj.keys() {
+            if ![
+                "id",
+                "objective",
+                "depends_on",
+                "requirements",
+                "acceptance",
+                "outputs",
+                "write_paths",
+                "role",
+                "context_refs",
+                "routing",
+            ]
+            .contains(&key.as_str())
+            {
+                return Err(diagnostic(
+                    node,
+                    key,
+                    "supported node field; model pins belong in routing",
+                ));
+            }
+        }
+        let name = text(node, "id", 128).map_err(|_| {
+            diagnostic(
+                node,
+                "id",
+                "unique task ID using letters, digits, -, _, . or : (maximum 128 bytes)",
+            )
+        })?;
+        if !id(name) || !ids.insert(name.to_owned()) {
+            return Err(diagnostic(node, "id", "unique valid task ID"));
+        }
+        text(node, "objective", 24000)
+            .map_err(|_| diagnostic(node, "objective", "nonempty string, maximum 24000 bytes"))?;
+        if let Some(pin) = node.get("routing") {
+            let pin = pin.as_object().filter(|p| !p.is_empty()).ok_or_else(|| {
+                diagnostic(
+                    node,
+                    "routing",
+                    "nonempty object containing candidate_id, provider, model or effort",
+                )
+            })?;
+            for (key, value) in pin {
+                if !["candidate_id", "provider", "model", "effort"].contains(&key.as_str()) {
+                    return Err(diagnostic(
+                        node,
+                        &format!("routing.{key}"),
+                        "candidate_id, provider, model or effort",
+                    ));
+                }
+                if value.as_str().is_none_or(|s| {
+                    s.trim().is_empty() || s.len() > if key == "candidate_id" { 128 } else { 256 }
+                }) {
+                    return Err(diagnostic(
+                        node,
+                        &format!("routing.{key}"),
+                        "nonempty bounded string",
+                    ));
+                }
+            }
+        }
+        for field in [
+            "depends_on",
+            "requirements",
+            "acceptance",
+            "outputs",
+            "write_paths",
+            "context_refs",
+        ] {
+            strings(node.get(field), 1000).map_err(|_| {
+                diagnostic(
+                    node,
+                    field,
+                    "array of at most 64 nonempty strings, each at most 1000 bytes",
+                )
+            })?;
+        }
+        for field in ["outputs", "write_paths"] {
+            for output in strings(node.get(field), 1000).unwrap() {
+                if output.starts_with("artifact:") || output.contains("://") {
+                    continue;
+                }
+                let path = output.replace('\\', "/");
+                if path == "." {
+                    continue;
+                }
+                let path = path.trim_end_matches('/');
+                if path.starts_with('/')
+                    || path.contains(':')
+                    || path
+                        .split('/')
+                        .any(|part| part.is_empty() || part == "." || part == "..")
+                {
+                    return Err(diagnostic(
+                        node,
+                        field,
+                        "relative project path or artifact reference",
+                    ));
+                }
+            }
+        }
+        if let Some(role) = node.get("role")
+            && ![
+                "exploration",
+                "implementation",
+                "mockup",
+                "integration",
+                "review",
+            ]
+            .contains(&role.as_str().unwrap_or(""))
+        {
+            return Err(diagnostic(
+                node,
+                "role",
+                "exploration, implementation, mockup, integration or review",
+            ));
+        }
+    }
+    for node in nodes {
+        for dep in strings(node.get("depends_on"), 128)
+            .map_err(|_| diagnostic(node, "depends_on", "task IDs of at most 128 bytes"))?
+        {
+            if !ids.contains(&dep) {
+                return Err(diagnostic(
+                    node,
+                    "depends_on",
+                    &format!("existing task ID; {dep} was not found"),
+                ));
+            }
+        }
+    }
+    validate_plan(plan)
+        .map_err(|_| diagnostic(&Value::Null, "depends_on", "acyclic task dependencies"))?;
+    Ok(())
+}
+
 fn validate_plan(plan: &Value) -> Result<Vec<Task>, WorkflowError> {
     if plan
         .as_object()
@@ -1704,6 +1925,78 @@ fn lock_file(file: &fs::File) -> Result<(), WorkflowError> {
 
 #[cfg(test)]
 mod review_session_tests {
+
+    #[test]
+    fn review_launch_includes_the_original_goal() {
+        use super::*;
+        let dir = tempfile::tempdir().unwrap();
+        let workflow = Workflow::new(dir.path().to_path_buf());
+        let goal = "Compare the page against the exact title and heading: A Very Specific Title";
+        let state = workflow.start(&json!({"workspace":"workspace","goal":goal,"pool":[{"id":"a","description":"worker","capabilities":[],"available":true}],"plan":{"nodes":[{"id":"review","objective":"Compare the requested exact text","role":"review"}]}})).unwrap();
+        let run = state["run_id"].as_str().unwrap();
+        let route = state["actions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|a| a["kind"] == "route")
+            .unwrap();
+        assert!(route["payload"].get("workflow_goal").is_none());
+        let state = workflow.observe(run, &json!({"action_id":route["id"],"event_id":"route","result":{"status":"ready","candidate_id":"a"}})).unwrap();
+        let prepare = state["actions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|a| a["kind"] == "prepare")
+            .unwrap();
+        assert!(prepare["payload"].get("workflow_goal").is_none());
+        let state = workflow.observe(run, &json!({"action_id":prepare["id"],"event_id":"prepare","result":{"status":"prepared","workspace":"w","branch":"b","integration_workspace":"i","integration_branch":"ib"}})).unwrap();
+        let launch = state["actions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|a| a["kind"] == "launch")
+            .unwrap();
+        assert_eq!(launch["payload"]["workflow_goal"], goal);
+        assert_eq!(
+            launch["payload"]["task"]["objective"],
+            "Compare the requested exact text"
+        );
+    }
+
+    #[test]
+    fn legacy_web_deadline_migration_is_narrow_and_preserves_runtime() {
+        use super::*;
+        for (version, timeout, providers, changed) in [
+            ("0.9.0-preview.2", 900, true, true),
+            ("0.9.0-preview.3", 900, true, false),
+            ("0.9.0-preview.2", 1200, true, false),
+            ("0.9.0-preview.2", 900, false, false),
+        ] {
+            let dir = tempfile::tempdir().unwrap();
+            let workflow = Workflow::new(dir.path().to_path_buf());
+            let initial = workflow
+                .start(&json!({"workspace":"workspace","goal":"test","pool":[]}))
+                .unwrap();
+            let run = initial["run_id"].as_str().unwrap();
+            let mut state = workflow.load(run).unwrap();
+            state.request["runtime"] =
+                json!({"switchbite":{"version":version},"backend":{"commit":"preserved"}});
+            state.request["host"] = json!({"timeout_seconds":timeout});
+            if providers {
+                state.request["catalog"] = json!({"providers":["codex"]});
+            }
+            workflow.save(&mut state).unwrap();
+            assert_eq!(workflow.clear_legacy_web_deadline(run).unwrap(), changed);
+            let request = workflow.request(run).unwrap();
+            assert_eq!(
+                request["host"]["timeout_seconds"],
+                if changed { 0 } else { timeout }
+            );
+            assert_eq!(request["runtime"]["switchbite"]["version"], version);
+            assert_eq!(request["runtime"]["backend"]["commit"], "preserved");
+            assert!(!workflow.clear_legacy_web_deadline(run).unwrap());
+        }
+    }
     use super::*;
 
     fn observe(
