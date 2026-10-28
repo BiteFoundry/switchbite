@@ -1,0 +1,65 @@
+{
+  "observed_on": "2026-10-28",
+  "switchbite": {
+    "version": "0.9.0-preview.2",
+    "runtime_source_commit": "05dd5db",
+    "binary_sha256": "b7116e93e7ed85f984c19b138eda8c04be84dd4c731923aa9e222861f04744ec",
+    "deployment": "local",
+    "url": "http://127.0.0.1:58431/"
+  },
+  "engine": {
+    "kind": "stackbite_upstream_adapter",
+    "stackbite_version": "0.5.75",
+    "stackbite_commit": "5866c4fa78e925cbac4d1c1dbedfa241099db7fb",
+    "sha256": "dcd388fe91ad6b966cd2a0cd112bba4f509e4560c81a3822bdac73b8cf33381e",
+    "bridge_version": "0.1.0",
+    "protocol_version": 1,
+    "scope": "provider-stream CLI process transport; native Room/Seat API integration is separate",
+    "release": "https://github.com/Shinick-Han/stackbite/releases/tag/v0.5.75",
+    "source_identity_metadata": "https://github.com/Shinick-Han/stackbite/releases/download/v0.5.75/stackbite-0.5.75-windows-x64-5866c4fa78e9.zip.signature.json"
+  },
+  "verification": {
+    "full_suite_passed": 257,
+    "full_suite_ignored": 2,
+    "full_suite_failed": 0,
+    "clippy_all_targets": "passed with -D warnings",
+    "release_build": "passed",
+    "standalone_adapter_tests_passed": 9,
+    "self_test": "stdin, stdout, stderr, both EOFs, nonzero child exit code passed",
+    "exec_bridge": "real adapter exec command preserved UTF-8 stdin/stdout/stderr and child exit code 7",
+    "run_pinning": "integration test switched the default engine between two workflow starts and confirmed the first run retained its recorded engine",
+    "source_cache_guard": "nested runtime home rejected before any cache directory was created",
+    "web_runtime_endpoint": "passed; offline state and absence of source path in response checked",
+    "aside_browser": "verified live status showing official latest 0.5.75, next-run engine 0.5.75 and 60-second checks",
+    "real_ai_turn_executed_for_this_change": false,
+    "paid_model_api_calls": 0
+  },
+  "background_poll": {
+    "first_checked_at": 1793158568,
+    "next_checked_at": 1793158628,
+    "interval_observed_seconds": 60,
+    "status": "current",
+    "activation_time_unchanged_on_same_release": true
+  },
+  "upstream_preservation": {
+    "repository": "C:/Users/user/source/WorkStackBite-merge/WorkBite",
+    "head_before_and_after": "295d54a13a7392125b2e754fd09a9960a933389c",
+    "git_status_unchanged": true,
+    "checked_source_files": 4,
+    "changed_checked_source_files": 0,
+    "original_installed_stackbite_or_sessions_modified": false,
+    "writes": "SwitchBite code and its own runtime home only"
+  },
+  "storage": {
+    "verified_workbite_task_binding": null,
+    "automatic_registration_performed": false,
+    "cache_location": ".switchbite/runtime-home",
+    "project_build_location": "target",
+    "retention": "existing paths preserved; no cleanup or relocation performed"
+  },
+  "logs": [
+    ".switchbite/latest-engine-tests-final.log",
+    ".switchbite/runtime-follow-release/readonly-and-poll-proof.json",
+    ".switchbite/runtime-home/stackbite-builds/*/build.log"
+  ]
+}

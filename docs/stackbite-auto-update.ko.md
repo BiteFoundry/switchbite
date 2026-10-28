@@ -46,3 +46,9 @@ switchbite runtime follow-stackbite --source C:\path\to\source --interval-second
 | `stackbite-engines/<버전-커밋-어댑터>/` | 작업별로 고정해 쓰는 실행 파일 |
 
 StackBite 구성 요소의 `LicenseRef-Proprietary` 표기는 유지한다. 이 기능은 SwitchBite에서만 구현한다.
+
+## 로컬 검증
+
+2026-10-28에 `0.5.75` 소스를 읽어 엔진을 빌드·적용했다. 전체 테스트 257개, 어댑터 테스트 9개, Clippy와 릴리스 빌드가 통과했다. 웹에서 60초 간격의 재확인을 관찰했고, 원본 StackBite 저장소의 HEAD·변경 목록과 확인한 소스 파일 4개의 해시가 그대로임을 확인했다. 이번 검증은 실제 모델 업무 실행을 새로 요청하지 않았다.
+
+[검증 기록](stackbite-auto-update-validation-2026-10-28.json). 로컬 웹 앱은 http://127.0.0.1:58431/ 에서 확인할 수 있다.
