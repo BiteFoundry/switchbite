@@ -1,64 +1,50 @@
-/* Work in motion · Operate — graph and worker output styles (module-contract.md §7.4–7.5, §8.3).
-   Added during integration: index.html links this file, but the graph/output task left none, so
-   absolute node positions, hidden descriptions and output wrapping had no rules. Reads --wim-* tokens
-   with fallbacks; owns only .wim-graph* and .wim-out*. */
-
-/* ── Graph ─────────────────────────────────────────────────────────────── */
-.wim-graph { display: grid; gap: var(--wim-sp-3, 12px); min-width: 0; }
-.wim-graph__summary { color: var(--wim-ink-2, #bdbab2); font-size: var(--wim-fs-2, .8125rem); font-variant-numeric: tabular-nums; }
-.wim-graph__canvas { position: relative; overflow: auto; contain: layout paint; padding: 6px; }
-.wim-graph__edges { position: absolute; left: 6px; top: 6px; overflow: visible; pointer-events: none; }
-.wim-graph[data-layout="stacked"] .wim-graph__edges { display: none; }
-.wim-graph__nodes { position: relative; }
-.wim-graph[data-layout="stacked"] .wim-graph__nodes { display: grid; gap: 8px; }
-
-.wim-graph__node {
-  display: grid; grid-template-columns: auto minmax(0, 1fr); align-content: center; column-gap: 6px; row-gap: 2px;
-  padding: 4px 10px; text-align: left; cursor: pointer;
-  font: 400 var(--wim-fs-2, .8125rem)/1.35 var(--wim-font-sans, system-ui, sans-serif);
-  color: var(--wim-ink, #ecebe6); background: var(--wim-surface-2, #202326);
-  border: 1px solid var(--wim-line-strong, #4b5056); border-radius: var(--wim-radius, 6px);
-  transition: border-color var(--wim-dur-1, 120ms) var(--wim-ease, ease), background-color var(--wim-dur-1, 120ms) var(--wim-ease, ease);
+/* Work in motion · Operate — graph and worker output styles. */
+.wim-graph { display: grid; gap: 10px; min-width: 0; }
+.wim-graph__toolbar { display: flex; align-items: center; flex-wrap: wrap; gap: 6px; }
+.wim-graph__control, .wim-graph__role-actions button, .wim-graph__edgelist-items button {
+  min-height: 36px; padding: 6px 10px; color: var(--wim-ink, #ecebe6); background: #202326;
+  border: 1px solid var(--wim-line-strong, #4b5056); border-radius: 6px; font: inherit; cursor: pointer;
 }
-.wim-graph[data-layout="ranked"] .wim-graph__node { position: absolute; width: 168px; height: 56px; }
-.wim-graph[data-layout="stacked"] .wim-graph__node { min-height: 56px; }
-.wim-graph__node:hover { background: #2a2d31; }
-.wim-graph__glyph { grid-row: 1; font-weight: 600; }
-.wim-graph__title { grid-row: 1; min-width: 0; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.wim-graph__meta { grid-column: 1 / -1; color: var(--wim-ink-2, #bdbab2); font-size: var(--wim-fs-1, .75rem); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.wim-graph__status { font-weight: 600; }
-.wim-graph__deps { display: none; grid-column: 1 / -1; color: var(--wim-ink-3, #95928a); font-family: var(--wim-font-mono, monospace); font-size: var(--wim-fs-1, .75rem); overflow-wrap: anywhere; }
-.wim-graph[data-layout="stacked"] .wim-graph__deps { display: block; }
-.wim-graph[data-layout="stacked"] .wim-graph__title { white-space: normal; }
-
-.wim-graph__node[data-status="waiting_dependency"] { border-style: dashed; }
-.wim-graph__node[data-status="waiting_dependency"] .wim-graph__glyph,
-.wim-graph__node[data-status="ready"] .wim-graph__glyph { color: var(--wim-st-wait, #a9a49b); }
-.wim-graph__node[data-status="routing_hold"] { border: 2px dotted var(--wim-st-hold, #c3a6ff); }
-.wim-graph__node[data-status="routing_hold"] .wim-graph__glyph { color: var(--wim-st-hold, #c3a6ff); }
-.wim-graph__node[data-status="running"] { border-color: var(--wim-st-run, #7cb8ff); box-shadow: inset 3px 0 0 var(--wim-st-run, #7cb8ff); }
-.wim-graph__node[data-status="running"] .wim-graph__glyph { color: var(--wim-st-run, #7cb8ff); }
-.wim-graph__node[data-status="failed"] { border: 2px solid var(--wim-st-fail, #ff8a80); }
-.wim-graph__node[data-status="failed"] .wim-graph__glyph { color: var(--wim-st-fail, #ff8a80); }
-.wim-graph__node[data-status="completed"] .wim-graph__glyph { color: var(--wim-st-ok, #7fd1a8); }
-.wim-graph__node[aria-pressed="true"] { border-color: var(--wim-accent, #f0b429); background: #2a2414; }
-
-.wim-graph__edge { fill: none; stroke: var(--wim-ink-3, #95928a); stroke-width: 1.5; transition: stroke var(--wim-dur-2, 200ms) var(--wim-ease, ease); }
-.wim-graph__edge[data-state="satisfied"] { stroke: var(--wim-st-ok, #7fd1a8); }
-.wim-graph__edge[data-state="pending"] { stroke-dasharray: 4 4; }
-.wim-graph__edge[data-state="blocked"] { stroke: var(--wim-st-fail, #ff8a80); stroke-dasharray: 2 3; }
-.wim-graph__edge[data-related="true"] { stroke-width: 2.5; }
-.wim-graph__marker--arrow path { fill: var(--wim-ink-3, #95928a); }
-.wim-graph__marker--arrow[data-state="satisfied"] path { fill: var(--wim-st-ok, #7fd1a8); }
-.wim-graph__marker--blocked path { fill: none; stroke: var(--wim-st-fail, #ff8a80); stroke-width: 1.5; }
-
-.wim-graph__edgelist { font-size: var(--wim-fs-2, .8125rem); color: var(--wim-ink-2, #bdbab2); }
-.wim-graph__edgelist-summary { cursor: pointer; min-height: 32px; display: list-item; padding: 4px 0; }
-.wim-graph__edgelist-items { display: grid; gap: 2px; padding-left: 16px; font-family: var(--wim-font-mono, monospace); overflow-wrap: anywhere; }
-.wim-graph__edgelist-item[data-state="blocked"] { color: var(--wim-st-fail, #ff8a80); }
-.wim-graph__edgelist-item[data-state="satisfied"] { color: var(--wim-st-ok, #7fd1a8); }
-.wim-graph__empty { padding: var(--wim-sp-5, 24px) var(--wim-sp-4, 16px); border: 1px dashed var(--wim-line-strong, #4b5056); border-radius: var(--wim-radius, 6px); color: var(--wim-ink-2, #bdbab2); text-align: center; }
-.wim-graph__vh, .wim-graph__descs { position: absolute !important; width: 1px; height: 1px; margin: -1px; padding: 0; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; border: 0; }
+.wim-graph__control:hover:not(:disabled), .wim-graph__role-actions button:hover { background: #303033; border-color: #c18a35; }
+.wim-graph__control:disabled, .wim-graph__role-actions button:disabled { opacity: .5; cursor: not-allowed; }
+.wim-graph__control:focus-visible, .wim-graph__node-head:focus-visible, .wim-graph__port:focus-visible, .wim-graph__edge:focus-visible, .wim-graph__role-input:focus-visible { outline: 2px solid #f0b429; outline-offset: 2px; }
+.wim-graph__summary, .wim-graph__hint, .wim-graph__zoom { margin: 0; color: var(--wim-ink-2, #bdbab2); font-size: .8125rem; }
+.wim-graph__canvas { position: relative; overflow: auto; max-height: 640px; min-height: 240px; background: #151719; border: 1px solid #34383c; border-radius: 8px; }
+.wim-graph__stage { position: relative; transform-origin: top left; }
+.wim-graph__nodes { position: absolute; inset: 0; pointer-events: none; }
+.wim-graph__edges { position: absolute; inset: 0; overflow: visible; }
+.wim-graph__node { position: absolute; width: 220px; height: 150px; box-sizing: border-box; color: var(--wim-ink, #ecebe6); background: #202326; border: 1px solid #4b5056; border-radius: 8px; pointer-events: auto; }
+.wim-graph__node:has(.wim-graph__node-head[aria-pressed="true"]) { border-color: #f0b429; background: #292419; }
+.wim-graph__node[data-status="failed"] { border-color: #ff8a80; }
+.wim-graph__node[data-status="running"] { border-color: #7cb8ff; }
+.wim-graph__node-head { display: grid; gap: 5px; width: 100%; min-height: 55px; padding: 9px 14px; text-align: left; color: inherit; background: transparent; border: 0; cursor: grab; touch-action: none; }
+.wim-graph__node-head:active { cursor: grabbing; }
+.wim-graph__title { font-weight: 650; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.wim-graph__meta { color: #bdbab2; font-size: .75rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.wim-graph__role { padding: 0 14px 8px; }
+.wim-graph__role-input { display: block; box-sizing: border-box; resize: none; width: 100%; height: 44px; padding: 5px 7px; color: #ecebe6; background: #151719; border: 1px solid #555a5e; border-radius: 4px; font: inherit; font-size: .75rem; }
+.wim-graph__role-input::placeholder { color: #bdbab2; }
+.wim-graph__role-actions { display: flex; justify-content: flex-end; gap: 5px; margin-top: 4px; }
+.wim-graph__role-actions button { min-height: 28px; padding: 2px 8px; font-size: .75rem; }
+.wim-graph__port { position: absolute; top: calc(50% - 22px); width: 44px; height: 44px; padding: 0; background: transparent; border: 0; cursor: crosshair; touch-action: none; }
+.wim-graph__port::after { content: ''; display: block; width: 12px; height: 12px; margin: auto; border: 2px solid #f0b429; border-radius: 50%; background: #202326; }
+.wim-graph__port--in { left: -22px; } .wim-graph__port--out { right: -22px; }
+.wim-graph__port[data-valid="true"]::after { background: #f0b429; box-shadow: 0 0 0 4px #f0b42940; }
+.wim-graph__port[hidden], .wim-graph__role[hidden] { display: none; }
+.wim-graph__edge { fill: none; stroke: transparent; stroke-width: 20; pointer-events: stroke; cursor: pointer; }
+.wim-graph__edge-line { fill: none; stroke: #aaa59b; stroke-width: 2; pointer-events: none; }
+.wim-graph__edge-line[data-state="pending"] { stroke-dasharray: 6 4; }
+.wim-graph__edge-line[data-state="satisfied"] { stroke: #7fd1a8; }
+.wim-graph__edge-line[data-state="blocked"] { stroke: #ff8a80; }
+.wim-graph__edge-line[data-selected="true"] { stroke: #f0b429; stroke-width: 4; }
+.wim-graph__feedback { margin: 0; color: #f0c979; font-size: .8125rem; }
+.wim-graph__feedback:empty { display: none; }
+.wim-graph__port:disabled::after { border-color: #77746d; }
+.wim-graph__ghost { fill: none; stroke: #f0b429; stroke-width: 2; stroke-dasharray: 6 4; pointer-events: none; }
+.wim-graph__edgelist { color: #bdbab2; font-size: .8125rem; }
+.wim-graph__edgelist-summary { cursor: pointer; min-height: 32px; }
+.wim-graph__edgelist-items { display: flex; flex-wrap: wrap; gap: 6px; padding: 0; list-style: none; }
+.wim-graph__empty { padding: 24px 16px; border: 1px dashed #4b5056; border-radius: 6px; color: #bdbab2; text-align: center; }
 
 /* ── Worker output ─────────────────────────────────────────────────────── */
 .wim-out { display: grid; gap: 6px; min-width: 0; }

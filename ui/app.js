@@ -1,6 +1,6 @@
 import { createGraph } from './graph.js';
 import { createOutputView } from './worker-output.js';
-import { ACTIVE, label, pathLabel, duration, graphModel, taskView, streamsFor, waitReason, outputChunks, artifactOrder, usableToolIds, failureText, feedbackView, dependencyChoices } from './model.js';
+import { ACTIVE, label, pathLabel, duration, graphModel, taskView, streamsFor, waitReason, outputChunks, artifactOrder, usableToolIds, failureText, feedbackView, dependencyChoices, scaffoldFor, updateDraftEdge } from './model.js';
 
 const { token, appMode, publicPreview = false, publicApi, publicInfo } = globalThis.switchbite;
 const $ = id => document.getElementById(id);
@@ -13,6 +13,7 @@ let busy = false, polling = false, formDirty = false, currentRun = null, resultK
 let coordinatorOutput = null, coordinatorOutputId = null, recoveryKey = null;
 let feedbackRequest = null, feedbackSending = false;
 let dependencyDraft = null, dependencySending = false;
+let draftWorkers = [], draftProject = null, boardBusy = false, pendingBoard = null, pendingLayout = null, roleAssignmentPending = false;
 let selectedModel = null;
 const setText = (node, text) => { const value = String(text ?? ''); if (node.textContent !== value) node.textContent = value; };
 const element = (tag, className, text) => { const node = document.createElement(tag); if (className) node.className = className; if (text != null) node.textContent = text; return node; };
@@ -42,6 +43,84 @@ function setBusy(value) {
   for (const id of ['wim-btn-pause', 'wim-btn-resume', 'wim-btn-cancel']) $(id).disabled = publicPreview || value || !state.run_id || !ACTIVE.has(state.status);
   $('wim-tools-refresh').disabled = value;
   for (const input of $('wim-tools-list').querySelectorAll('input')) input.disabled = value || input.dataset.selectable !== 'true';
+}
+const draftingBoard = () => appMode && composing && !ACTIVE.has(state.status);
+const draftStorageKey = project => 'switchbite:worker-draft:' + project;
+function saveDraftBoard() {
+  try { if (draftProject) localStorage.setItem(draftStorageKey(draftProject), JSON.stringify(scaffoldFor(draftWorkers))); } catch { /* current board remains available */ }
+}
+function loadDraftBoard() {
+  const project = $('wim-input-workspace').value.trim() || info?.workspace || '';
+  if (project === draftProject) return;
+  if (draftProject) collectDraftRoles();
+  draftProject = project; draftWorkers = [];
+  try {
+    const stored = JSON.parse(localStorage.getItem(draftStorageKey(project)));
+    if (Array.isArray(stored?.nodes) && stored.nodes.length <= 128) draftWorkers = stored.nodes.filter(n => typeof n.id === 'string' && typeof n.objective === 'string' && Array.isArray(n.depends_on)).map(n => ({...n,status:'draft'}));
+  } catch { /* start with an empty board */ }
+}
+function boardNotice(message) { setText($('wim-board-status'), message); }
+function collectDraftRoles() {
+  const changes = graph.getRoleDrafts();
+  draftWorkers = draftWorkers.map(t => Object.hasOwn(changes,t.id) ? {...t,objective:changes[t.id]} : t);
+  saveDraftBoard();
+}
+async function flushRoleEdits(changes) {
+  for (const [task_id,objective] of Object.entries(changes)) state = await api('/api/workers',{run_id:state.run_id,operation:'edit',task_id,objective});
+}
+function renderBoard() {
+  const drafting = draftingBoard(); if (drafting) loadDraftBoard();
+  const planning = pendingBoard?.runId === state.run_id && !(state.tasks || []).length;
+  const tasks = drafting ? draftWorkers : planning ? pendingBoard.nodes : state.tasks || [];
+  const editable = drafting ? tasks.map(t => t.id) : planning ? [] : state.editable_task_ids || [];
+  const hints = Object.fromEntries(tasks.map(t => [t.id, t.objective || '']));
+  if (!drafting) for (const [id,text] of Object.entries(state.role_hints || {})) if (text || (state.draft_task_ids || []).includes(id)) hints[id] = text;
+  graph.update({...graphModel(tasks), scope: drafting ? `draft:${draftProject}` : state.run_id || 'public-preview',
+    canEdit: !publicPreview && appMode && (drafting || ['running','paused'].includes(state.status)) && !planning,
+    canAdd: !publicPreview && appMode && (drafting || ['running','paused'].includes(state.status)) && !planning,
+    editableTaskIds: editable, roleHints: hints, draftTaskIds: drafting ? tasks.map(t=>t.id) : state.draft_task_ids || [],
+    removableTaskIds: drafting ? tasks.map(t=>t.id) : state.draft_task_ids || [], busy: busy || boardBusy});
+  if (pendingLayout?.runId === state.run_id && tasks.length) { graph.setPositions(pendingLayout.positions); pendingLayout = null; }
+  if (!planning && pendingBoard?.runId === state.run_id && tasks.length) pendingBoard = null;
+  if (roleAssignmentPending && !drafting && !planning && tasks.length && !(state.draft_task_ids || []).length && !(state.feedback || []).some(f=>f.kind==='assign_roles' && f.status==='pending')) {
+    roleAssignmentPending = false;
+    boardNotice(state.status==='paused' ? '역할 배정을 마쳤습니다. 구성을 확인하고 이 계획으로 시작하세요.' : '역할 배정을 마쳤습니다. 변경한 구성으로 진행합니다.');
+  }
+  $('wim-workers').hidden = drafting;
+}
+async function mutateWorker(operation, taskId, objective) {
+  if (busy || boardBusy) return;
+  if (draftingBoard()) {
+    loadDraftBoard();
+    if (operation === 'add') {
+      if (draftWorkers.length >= 128) { boardNotice('한 구성에 작업자는 128개까지 추가할 수 있습니다.'); return; }
+      let n=1; while (draftWorkers.some(t=>t.id===`worker-${n}`)) n++;
+      draftWorkers.push({id:`worker-${n}`,objective:'',depends_on:[],status:'draft'});
+    } else if (operation === 'edit') draftWorkers = draftWorkers.map(t=>t.id===taskId ? {...t,objective} : t);
+    else if (operation === 'remove') draftWorkers = draftWorkers.filter(t=>t.id!==taskId).map(t=>({...t,depends_on:(t.depends_on||[]).filter(id=>id!==taskId)}));
+    else if (operation === 'assign_roles') { await submitWork(true); return; }
+    saveDraftBoard(); renderBoard(); boardNotice(operation === 'edit' ? '역할을 저장했습니다.' : operation === 'remove' ? '작업자를 삭제했습니다.' : '카드를 끌어 배치하고 역할을 입력하거나, 이 구성으로 역할을 배정하세요.'); return;
+  }
+  const roleEdits = operation === 'assign_roles' ? graph.getRoleDrafts() : {};
+  boardBusy = true; renderBoard();
+  try {
+    await flushRoleEdits(roleEdits);
+    state = await api('/api/workers',{run_id:state.run_id,operation,...(taskId?{task_id:taskId}:{}),...(objective===undefined?{}:{objective})});
+    if(operation==='assign_roles') roleAssignmentPending=true;
+    boardNotice(operation === 'assign_roles' ? '카드와 연결을 유지하며 역할을 배정하고 있습니다.' : operation === 'edit' ? '역할을 저장했습니다.' : operation === 'remove' ? '미배정 작업자를 삭제했습니다.' : '작업자를 추가했습니다. 역할을 입력하거나 역할 배정을 실행하세요.'); render();
+  } catch (error) { boardNotice(error.message); }
+  finally { boardBusy = false; renderBoard(); }
+}
+async function connectWorkers({from,to,operation}) {
+  if (busy || boardBusy) return;
+  if (draftingBoard()) {
+    try { draftWorkers = updateDraftEdge(draftWorkers,from,to,operation); saveDraftBoard(); renderBoard(); boardNotice(operation==='remove'?'연결을 삭제했습니다.':`${from} 완료 후 ${to}가 실행됩니다.`); }
+    catch (error) { boardNotice(error.message); } return;
+  }
+  boardBusy = true; renderBoard();
+  try { state = await api('/api/dependencies',{run_id:state.run_id,task_id:to,predecessor_id:from,operation}); dependencyDraft=null; boardNotice(operation==='remove'?'연결을 삭제했습니다.':`${from} 완료 후 ${to}가 실행됩니다.`); render(); }
+  catch (error) { boardNotice(error.message); }
+  finally { boardBusy=false; renderBoard(); }
 }
 function validCoordinators() { const usable = usableToolIds(info?.tools, selectedTools); return (info?.coordinators || []).filter(candidate => usable.includes(candidate.provider)); }
 function coordinatorOptions() {
@@ -192,7 +271,6 @@ function renderDependencies() {
   const details = $('wim-dependencies'), tasks = state.tasks || [];
   details.hidden = publicPreview || !appMode || !tasks.length || !['running', 'paused'].includes(state.status);
   if (details.hidden) return;
-  if (state.plan_review_pending && details.dataset.reviewRun !== state.run_id) { details.open = true; details.dataset.reviewRun = state.run_id; }
   $('wim-plan-review-help').hidden = !state.plan_review_pending;
   const select = $('wim-dependency-task'), task = tasks.find(t => t.id === selectedTask) || tasks.find(t => (state.editable_task_ids || []).includes(t.id)) || tasks[0];
   const signature = JSON.stringify([state.run_id, tasks.map(t => [t.id, t.objective]), task.id]);
@@ -306,13 +384,14 @@ function resetViews() {
 }
 function render() {
   if (currentRun !== (state.run_id || null)) { currentRun = state.run_id || null; resetViews(); }
+  if (draftingBoard()) loadDraftBoard();
   const active = ACTIVE.has(state.status), tasks = state.tasks || [];
-  const status = activity.run_id === state.run_id && ['blocked', 'needs_attention', 'needs_input'].includes(activity.health?.status) ? activity.health.status : state.status;
+  const status = draftingBoard() ? 'composing' : activity.run_id === state.run_id && ['blocked', 'needs_attention', 'needs_input'].includes(activity.health?.status) ? activity.health.status : state.status;
   root.dataset.runStatus = status;
   const labelNode = $('wim-run-status').querySelector('.wim-status__label');
   $('wim-run-status').dataset.status = status; setText(labelNode, label(status));
   setText($('wim-run-status').querySelector('.wim-status__glyph'), status === 'completed' ? '✓' : ACTIVE.has(status) ? '●' : '–');
-  const done = state.progress?.done || 0, total = state.progress?.total || 0;
+  const done = draftingBoard() ? 0 : state.progress?.done || 0, total = draftingBoard() ? draftWorkers.length : state.progress?.total || 0;
   $('wim-run-progress').max = Math.max(1, total); $('wim-run-progress').value = done;
   setText($('wim-run-progress-label'), `완료 ${done}/${total}`);
   const running = new Set((activity.streams || []).filter(s => s.task_id && s.process_alive === true).map(s => s.task_id)).size;
@@ -341,7 +420,7 @@ function render() {
     selectedTools = new Set(submission.tools || []); selectedModel = submission.coordinator_id; renderTools();
     $('wim-start-form').hidden = false; goalBytes();
   }
-  graph.update(graphModel(tasks)); renderCards(); renderCoordinator(); renderFeedback(); renderDependencies(); renderPool(); renderResult(); setBusy(busy);
+  renderCards(); renderCoordinator(); renderFeedback(); renderDependencies(); renderPool(); renderResult(); setBusy(busy); renderBoard();
 }
 function renderResult() {
   const result = state.result, visible = state.status === 'completed' && result && !composing;
@@ -383,8 +462,10 @@ function renderResult() {
   }).catch(error => { if (resultKey === signature) files.append(element('li', '', error.message)); });
 }
 async function control(action) {
-  if (busy) return; setBusy(true);
-  try { state = await api('/api/control', { action }); render(); }
+  if (busy || boardBusy) return;
+  const roleEdits = action === 'resume' ? graph.getRoleDrafts() : {};
+  setBusy(true); renderBoard();
+  try { await flushRoleEdits(roleEdits); state = await api('/api/control', { action }); render(); }
   catch (error) { notice(error.message); } finally { setBusy(false); poll(); }
 }
 async function retryTask(id) {
@@ -421,22 +502,28 @@ async function poll() {
 
 $('wim-input-goal').addEventListener('input', () => { formDirty = true; goalBytes(); });
 $('wim-input-coordinator').addEventListener('change', event => { selectedModel = event.target.value; });
-$('wim-start-form').addEventListener('submit', async event => {
-  event.preventDefault(); if (!appMode || busy || ACTIVE.has(state.status)) return;
+async function submitWork(assignOnly = false) {
+  if (!appMode || busy || ACTIVE.has(state.status)) return;
+  if(draftingBoard()) { loadDraftBoard(); collectDraftRoles(); }
   const workspace = $('wim-input-workspace').value.trim(), goal = $('wim-input-goal').value.trim();
   const maxParallel = Number($('wim-input-parallel').value);
   if (!workspace || !goal || new TextEncoder().encode(goal).length > 24000) { notice('프로젝트 경로와 업무를 24,000바이트 이내로 입력하세요.'); return; }
   const tools = usableToolIds(info?.tools, selectedTools);
   if (!tools.length || !validCoordinators().some(c => c.id === $('wim-input-coordinator').value)) { notice('사용할 도구와 조율자를 선택하세요.'); return; }
   if (!Number.isInteger(maxParallel) || maxParallel < 1 || maxParallel > 16) { notice('동시 작업 수는 1~16 사이의 정수로 입력하세요.'); return; }
-  setBusy(true); notice('계획과 작업 실행을 시작합니다…');
+  const scaffold = draftWorkers.length ? scaffoldFor(draftWorkers) : null, positions = graph.getPositions();
+  setBusy(true); renderBoard(); notice(assignOnly ? '카드 구성을 유지하며 역할을 배정합니다…' : '계획과 작업 실행을 시작합니다…');
   try {
-    state = await api('/api/start', { workspace, goal, tools, coordinator_id: $('wim-input-coordinator').value, max_parallel: maxParallel, review_plan: $('wim-review-plan').checked });
+    state = await api('/api/start', { workspace, goal, tools, coordinator_id: $('wim-input-coordinator').value, max_parallel: maxParallel, review_plan: assignOnly || $('wim-review-plan').checked, ...(scaffold ? {scaffold} : {}) });
     if (state.handoff?.url) { const url = new URL(state.handoff.url); if (url.protocol !== 'http:' || url.hostname !== '127.0.0.1') throw Error('새 앱 주소를 확인하지 못했습니다.'); location.assign(url.href); return; }
-    composing = false; formDirty = false; notice(''); render();
+    if (scaffold) { pendingBoard={runId:state.run_id,nodes:draftWorkers.map(t=>({...t}))}; pendingLayout={runId:state.run_id,positions}; try {localStorage.removeItem(draftStorageKey(draftProject));}catch{} draftWorkers=[]; }
+    roleAssignmentPending = assignOnly;
+    composing = false; formDirty = false; boardNotice(assignOnly?'카드 수와 연결은 그대로 두고 역할과 실행 세부사항을 채웁니다.':''); notice(''); render();
   } catch (error) { notice(error.message); }
-  finally { setBusy(false); poll(); }
-});
+  finally { setBusy(false); renderBoard(); poll(); }
+}
+$('wim-start-form').addEventListener('submit', event => { event.preventDefault(); submitWork(false); });
+$('wim-input-workspace').addEventListener('change', () => { if(draftingBoard()){loadDraftBoard();renderBoard();} });
 $('wim-btn-pause').addEventListener('click', () => control('pause'));
 $('wim-review-plan').addEventListener('change', () => setText($('wim-btn-start'), $('wim-review-plan').checked ? '계획 만들기' : '작업 시작'));
 $('wim-dependency-task').addEventListener('change', event => { dependencyDraft = null; setText($('wim-dependency-status'), ''); selectTask(event.target.value); });
@@ -473,7 +560,12 @@ $('wim-parallel-form').addEventListener('submit', async event => {
   try { state = await api('/api/parallelism', { max_parallel: Number($('wim-live-parallel').value) }); render(); }
   catch (error) { notice(error.message); } finally { setBusy(false); }
 });
-root.addEventListener('wim:select-task', event => selectTask(event.detail.taskId, true));
+root.addEventListener('wim:select-task', event => { if(!draftingBoard()) selectTask(event.detail.taskId, Boolean(event.detail.openOutput)); });
+root.addEventListener('wim:add-worker', () => mutateWorker('add'));
+root.addEventListener('wim:remove-worker', event => mutateWorker('remove',event.detail.taskId));
+root.addEventListener('wim:edit-worker', event => mutateWorker('edit',event.detail.taskId,event.detail.objective));
+root.addEventListener('wim:assign-roles', () => mutateWorker('assign_roles'));
+root.addEventListener('wim:connect-tasks', event => connectWorkers(event.detail));
 document.addEventListener('selectionchange', () => { if (!document.getSelection()?.isCollapsed) return; renderCards(); renderCoordinator(); });
 
 async function init() {

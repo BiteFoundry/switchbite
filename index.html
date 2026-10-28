@@ -135,10 +135,11 @@
 
       <section id="wim-graph" class="wim-panel wim-graph-panel" aria-labelledby="wim-graph-title">
         <h2 id="wim-graph-title" class="wim-panel__title">작업 흐름</h2>
-        <p class="wim-help">작업을 선택하면 담당 모델과 실행 출력을 확인할 수 있습니다.</p>
+        <p class="wim-help">작업자를 추가해 역할을 입력하고, 카드 연결점을 이어 순서를 정하세요. 카드 배치는 끌어서 바꾸거나 자동 정렬할 수 있습니다.</p>
         <div id="wim-graph-mount" class="wim-graph-mount"></div>
+        <p id="wim-board-status" class="wim-help" role="status" aria-live="polite"></p>
         <details id="wim-dependencies" class="wim-dependencies" hidden>
-          <summary>작업 순서 직접 지정</summary>
+          <summary>선행 작업 목록으로 설정</summary>
           <p id="wim-plan-review-help" class="wim-help" hidden>계획이 준비됐습니다. 선행 작업을 조정하거나 이 계획으로 시작하세요.</p>
           <form id="wim-dependency-form">
             <label for="wim-dependency-task">작업</label>
