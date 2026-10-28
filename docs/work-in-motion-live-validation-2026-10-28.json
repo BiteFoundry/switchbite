@@ -1,0 +1,81 @@
+{
+  "observed_on": "2026-10-28",
+  "implementation_commit": "d1f21eeac7cec332126aec4a6b022841f6ae5692",
+  "switchbite_version": "0.9.0-preview.2",
+  "deployment": {
+    "scope": "local",
+    "url": "http://127.0.0.1:58431/",
+    "binary_sha256": "4118ce70f70f70b04dcb631ee784a8e21aeb45dceca1e206bbbdf3cd9ecc3839",
+    "next_run_stackbite_engine": "0.5.75",
+    "displayed_run": "run-1793116621484147900-56208",
+    "displayed_run_status": "completed",
+    "displayed_run_tasks": 8,
+    "displayed_historical_engine": "0.5.54",
+    "historical_engine_preserved": true
+  },
+  "implementation": {
+    "visual_reference": "user-approved Work-in-motion-mockup-2026-10-28 HTML/CSS",
+    "runtime": "Rust host, embedded HTML/CSS/ES modules; no Python or Node service dependency",
+    "data": "existing workflow, tool inventory, process output and runtime update APIs",
+    "new_dependencies": 0,
+    "new_artifact_endpoints": ["GET /api/artifacts", "GET /api/artifacts/text?path=...", "POST /api/artifacts/preview"],
+    "preview": "Separate loopback origin; relative static assets remain inside the canonical result workspace",
+    "source_write_scope": "SwitchBite only"
+  },
+  "verification": {
+    "rust_tests_passed": 259,
+    "rust_tests_ignored": 2,
+    "rust_tests_failed": 0,
+    "frontend_mapping_tests_passed": 5,
+    "clippy_all_targets": "passed with -D warnings",
+    "release_build": "passed",
+    "browser": {
+      "aside": ["actual completed DAG and task output", "requested and observed worker model", "HTML preview button opened the actual result"],
+      "responsive_capture": "isolated headless Chromium; Aside has no viewport resizing API",
+      "desktop_width": 1440,
+      "mobile_width": 375,
+      "horizontal_page_overflow": false,
+      "runtime_exceptions": [],
+      "graph_nodes": 8,
+      "task_cards": 8,
+      "worker_output_characters": 1373,
+      "invalid_project_submission": "server rejected the missing path; form input was retained",
+      "relative_preview_module_http_status": 200,
+      "new_paid_ai_task_submitted": false,
+      "clipboard_write_independently_verified": false
+    },
+    "artifact_guards": ["undeclared file rejected", "parent path and hidden metadata rejected", "preview Host checked", "preview relative JS served"],
+    "unavailable_tool_regression": "saved selection retained; unavailable tools excluded from new-run submission"
+  },
+  "design_review": {
+    "disposition": "ship",
+    "scope": "approved mockup adoption, captured UI and visible real API integration",
+    "material_fixes_owed": 0,
+    "independent_comp_ceiling_assessed": false,
+    "design_system_record": ".impeccable/design.json",
+    "detector": "ran once; static URL resolution warning documented and mechanical stripe/width-transition findings addressed"
+  },
+  "upstream_observation": {
+    "stackbite_source_writes_issued": false,
+    "upstream_git_worktree_status_unchanged": true,
+    "checked_source_hashes_unchanged": 4,
+    "head_at_observation": "653b7fc3",
+    "head_differs_from_earlier_engine_task_baseline": true
+  },
+  "evidence": [
+    ".impeccable/review/desktop.png",
+    ".impeccable/review/mobile.png",
+    ".impeccable/review/mobile-top.png",
+    ".impeccable/review/desktop-form.png",
+    ".impeccable/review/browser-proof.json",
+    ".switchbite/ui-tests.log",
+    ".switchbite/ui-deployed-proof.json",
+    ".switchbite/ui-source-preservation.json"
+  ],
+  "storage": {
+    "verified_workbite_task_binding": null,
+    "automatic_registration_performed": false,
+    "retained_existing_outputs": ["target", ".switchbite"],
+    "generated_review_evidence": ".impeccable/review"
+  }
+}
