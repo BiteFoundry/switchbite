@@ -1,0 +1,67 @@
+{
+  "verified_at": "2026-10-28T17:09:05.8501066+09:00",
+  "release": {
+    "tag": "v0.9.0-preview.5",
+    "runtime_source_commit": "a173c9fdb6b6af9f1c54e784b4db6596e5a22a3d",
+    "draft": false,
+    "tag_commit": "a173c9fdb6b6af9f1c54e784b4db6596e5a22a3d",
+    "prerelease": true,
+    "url": "https://github.com/BiteFoundry/switchbite/releases/tag/v0.9.0-preview.5"
+  },
+  "channel": {
+    "bundle_id": "v0.9.0-preview.5-windows-x64",
+    "url": "https://github.com/BiteFoundry/switchbite/releases/download/runtime-preview/channel-windows-x64.json",
+    "sha256": "455478014c334be44045db32274bfeac717ffca5b3c7df55bead24b21cd18b8a"
+  },
+  "ci": {
+    "cancellation_test_repeats_passed": 8,
+    "conclusion": "success",
+    "node_tests_passed": 10,
+    "rust_tests_failed": 0,
+    "url": "https://github.com/BiteFoundry/switchbite/actions/runs/40653098280",
+    "rust_tests_passed": 309,
+    "test_fix": "Use the same stable host receipt event ID when the test and driver deliver the same durable result; no runtime code change.",
+    "run_id": 40653098280,
+    "rust_tests_ignored": 2,
+    "initial_failed_run": 40651940232
+  },
+  "pages": {
+    "url": "https://bitefoundry.github.io/switchbite/",
+    "pages_commit": "13284b96dfd4d55856f3ae9c212fd39b7a397791",
+    "conclusion": "success",
+    "source_commit": "7ca242e0649ebbad926753768ad6f03ba4356e3e",
+    "run_id": 40651988995
+  },
+  "feature_e2e": {
+    "effort": "high",
+    "provider": "codex",
+    "browser_edit": "b depends_on a",
+    "fixture_source_commit": "7ca242e0649ebbad926753768ad6f03ba4356e3e",
+    "plan_review": "paused before worker dispatch",
+    "completed_tasks": 2,
+    "run_id": "run-1793173023024053600-53360",
+    "production_files_unchanged_since_fixture": true,
+    "model": "gpt-6.1-terra",
+    "outputs": "Alpha and Beta verified"
+  },
+  "verified": {
+    "stackbite_engine_version": "0.5.75",
+    "original_stackbite_modified": false,
+    "installed_hashes": "matched",
+    "anonymous_version_manifest_http": 200,
+    "active_channel": "GitHub runtime-preview",
+    "fresh_public_channel_install": "passed",
+    "local_app": "http://127.0.0.1:58431/",
+    "preserved_progress": "8/8 completed",
+    "new_plan_review_option_seen_in_aside": true,
+    "preserved_run": "run-1793162389339754200-52752",
+    "uploaded_asset_digests": 8,
+    "switchbite_version": "0.9.0-preview.5",
+    "protocol_version": 1
+  },
+  "runtime_assets": {
+    "stackbite_sha256": "dcd388fe91ad6b966cd2a0cd112bba4f509e4560c81a3822bdac73b8cf33381e",
+    "archive_sha256": "0bc01a475acffdc470fd22797d769bdcca7793945845417518e6aaff6ccd73e8",
+    "switchbite_sha256": "1bd67a9af85c0ffb416dbaa178869c6720df9d0f3cbeba10ddf2a157b15a3f03"
+  }
+}

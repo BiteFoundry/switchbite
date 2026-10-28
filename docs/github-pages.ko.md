@@ -26,3 +26,11 @@
 - [배포 실행](https://github.com/BiteFoundry/switchbite/actions/runs/40647800636): 성공. Pages API `built`, 공개 `build.json`의 소스 커밋 일치.
 - Aside에서 공개 미리보기 로드를 확인했다. Node 테스트 9개 통과. 공개 페이지는 작성된 예시 데이터만 사용한다.
 - [Windows preview.4](https://github.com/BiteFoundry/switchbite/releases/tag/v0.9.0-preview.4)와 자동 업데이트 채널도 게시했다. 공개 채널에서 새 디렉터리에 설치해 버전·실행 파일 해시·프로토콜을 확인했다.
+
+## preview.5 게시 확인
+
+- UI 소스: `7ca242e0649ebbad926753768ad6f03ba4356e3e`.
+- Pages 커밋: `13284b96dfd4d55856f3ae9c212fd39b7a397791`.
+- [배포 실행](https://github.com/BiteFoundry/switchbite/actions/runs/40651988995): 성공. 공개 `build.json`의 소스 커밋 일치.
+- [Windows preview.5](https://github.com/BiteFoundry/switchbite/releases/tag/v0.9.0-preview.5)와 공개 자동 업데이트 채널 게시·신규 설치 검증 완료. 로컬 앱에서도 새 계획 확인 옵션과 기존 완료 결과를 확인했다.
+- [의존 관계 직접 지정 사용법](manual-dependencies.ko.md). 공개 Pages는 예시 UI이며 실제 설정·CLI 실행은 로컬 앱에서 수행한다.
