@@ -133,7 +133,9 @@ fn main() {
     let state = engine
         .observe(
             &run,
-            &json!({"action_id":launch["id"],"event_id":"native-stopped","result":receipt}),
+            // advance() can already have delivered this host's durable receipt.
+            // Re-delivery must use its stable event ID, as the real driver does.
+            &json!({"action_id":launch["id"],"event_id":format!("host:{}",launch["id"].as_str().unwrap()),"result":receipt}),
         )
         .unwrap();
     assert_ne!(state["tasks"][0]["status"], "done");
