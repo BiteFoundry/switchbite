@@ -1,0 +1,180 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="description" content="SwitchBite — AI 도구 선택, 작업 분해와 모델 배정, 병렬 진행과 실행 출력을 한 화면에서 확인합니다."><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>SwitchBite · Work in motion</title>
+<link rel="icon" href="data:,">
+<link rel="stylesheet" href="./ui/styles.css">
+<link rel="stylesheet" href="./ui/graph-output.css"><link rel="stylesheet" href="./ui/live.css">
+<style>.public-entry{padding:20px var(--wim-pad);border-bottom:1px solid var(--wim-line);display:flex;gap:12px 24px;align-items:center;flex-wrap:wrap}.public-entry p{flex:1;font-size:1rem;font-weight:600}.public-entry div{display:flex;gap:8px;flex-wrap:wrap}.public-entry a{text-decoration:none;display:inline-flex;align-items:center}.public-entry small{flex-basis:100%;color:var(--wim-ink-2)}.public-entry code{overflow-wrap:anywhere}.wim-connection[data-connected="preview"]{color:var(--wim-accent)}@media(max-width:639px){.public-entry{align-items:stretch}.public-entry div,.public-entry a{width:100%}.public-entry a{justify-content:center}}</style></head>
+<body>
+<h1 class="wim-vh">SwitchBite 작업 실행</h1><div id="wim-app" class="wim-shell" data-run-status="idle">
+
+
+  <header id="wim-topbar" class="wim-topbar">
+    <div class="wim-topbar__id">
+      <span class="wim-brand"><span class="wim-brand__mark" aria-hidden="true">▤</span>SwitchBite <span class="wim-brand__mode">Work in motion.</span></span>
+      <span id="wim-connection" class="wim-connection" role="status">연결 중</span>
+    </div>
+    <span id="wim-run-status" class="wim-status" role="status">
+      <span class="wim-status__glyph" aria-hidden="true">–</span>
+      <span class="wim-status__label">대기 중</span>
+    </span>
+    <div class="wim-topbar__progress">
+      <progress id="wim-run-progress" max="1" value="0" aria-labelledby="wim-run-progress-label"></progress>
+      <span id="wim-run-progress-label" class="wim-num">완료 0/0</span>
+    </div>
+    <span class="wim-topbar__meta">
+      <span>실행 중 <span id="wim-run-clock" class="wim-num">0</span>개</span>
+      <span id="wim-workspace-tail" class="wim-path wim-topbar__tail"></span>
+    </span>
+    <div class="wim-topbar__controls">
+      <button id="wim-btn-pause" class="wim-btn" type="button">일시정지</button>
+      <button id="wim-btn-resume" class="wim-btn" type="button" hidden>이어서 실행</button>
+      <button id="wim-btn-cancel" class="wim-btn" type="button">작업 취소</button>
+      <button id="wim-btn-results" class="wim-btn" type="button" hidden>결과 보기</button><button id="wim-btn-reset" class="wim-btn" type="button" hidden>새 작업</button>
+    </div>
+  </header>
+
+  <section class="public-entry" aria-label="SwitchBite 사용"><p>도구를 고르고, 업무를 맡기고, 병렬 진행을 확인하세요.</p><div><a class="wim-btn wim-btn--primary" href="http://127.0.0.1:58431/" rel="noopener noreferrer">내 PC의 앱 열기</a><a class="wim-btn" href="https://github.com/BiteFoundry/switchbite/tree/feature/automatic-model-pool" target="_blank" rel="noopener noreferrer">코드·사용법</a></div><small>로컬 실행: <code>switchbite workflow app --port 58431</code></small></section><div class="wim-banner"><span id="wim-runtime">엔진 연결 확인 중</span><span id="wim-engine-updates"></span></div>
+
+  <p id="wim-ui-message" class="wim-ui-message" role="status" hidden></p><div id="wim-attention" class="wim-attention" role="region" aria-label="확인 필요" hidden>
+    <span class="wim-attention__glyph" aria-hidden="true">✕</span>
+    <p id="wim-attention-message"></p>
+    <button id="wim-btn-attention" class="wim-btn" type="button">실패한 작업 보기</button>
+  </div>
+
+  <div class="wim-layout">
+    <aside id="wim-rail" class="wim-rail" aria-label="실행 설정과 조율자">
+
+      <section class="wim-panel wim-start" aria-labelledby="wim-start-title">
+        <h2 id="wim-start-title" class="wim-panel__title">새 작업 시작</h2>
+        <form id="wim-start-form" novalidate>
+          <div class="wim-field">
+            <label for="wim-input-workspace">작업 경로</label>
+            <input id="wim-input-workspace" name="workspace" type="text" dir="ltr" spellcheck="false" autocomplete="off" aria-describedby="wim-error-workspace">
+            <p id="wim-error-workspace" class="wim-field__error" hidden></p>
+          </div>
+          <div class="wim-field">
+            <div class="wim-field__row">
+              <label for="wim-input-goal">목표</label>
+              <span id="wim-goal-bytes" class="wim-num wim-field__hint">0 / 24,000바이트</span>
+            </div>
+            <textarea id="wim-input-goal" name="goal" rows="4" aria-describedby="wim-error-goal wim-goal-bytes"></textarea>
+            <p id="wim-error-goal" class="wim-field__error" hidden></p>
+          </div>
+          <fieldset id="wim-tools" class="wim-field wim-fieldset" aria-describedby="wim-error-tools">
+            <legend>도구</legend>
+            <div id="wim-tools-list" class="wim-field__checks"></div><button id="wim-tools-refresh" type="button" class="wim-btn wim-btn--link">도구 다시 찾기</button><p id="wim-tools-status" class="wim-help" role="status"></p>
+            <p id="wim-error-tools" class="wim-field__error" hidden></p>
+          </fieldset>
+          <div class="wim-field">
+            <label for="wim-input-coordinator">조율자</label>
+            <select id="wim-input-coordinator" name="coordinatorId" aria-describedby="wim-error-coordinatorId"></select>
+            <p id="wim-error-coordinatorId" class="wim-field__error" hidden></p>
+          </div>
+          <div class="wim-field">
+            <label for="wim-input-parallel">동시 실행 수</label>
+            <input id="wim-input-parallel" name="maxParallel" type="number" min="1" max="16" step="1" value="3" inputmode="numeric" aria-describedby="wim-error-maxParallel wim-start-help">
+            <p id="wim-error-maxParallel" class="wim-field__error" hidden></p>
+          </div>
+          <p id="wim-start-help" class="wim-help">선택한 CLI의 기존 로그인으로 프로젝트에서 새 작업을 실행합니다.</p>
+          <div id="wim-start-error" class="wim-start-error" role="alert"></div>
+          <button id="wim-btn-start" class="wim-btn wim-btn--primary" type="submit"><span aria-hidden="true">▶</span> 작업 시작</button>
+        </form>
+
+        <div id="wim-context" class="wim-context" hidden>
+          <h2 class="wim-panel__title">실행 정보</h2>
+          <dl class="wim-context__list">
+            <div><dt>작업 경로</dt><dd><code id="wim-context-workspace" class="wim-path"></code></dd></div>
+            <div><dt>목표</dt><dd><p id="wim-context-goal" class="wim-context__goal"></p>
+              <button id="wim-btn-goal-more" class="wim-btn wim-btn--link" type="button" aria-expanded="false">전체 보기</button></dd></div>
+            <div><dt>도구</dt><dd id="wim-context-tools"></dd></div>
+            <div><dt>동시 실행 수</dt><dd id="wim-context-parallel" class="wim-num"></dd></div>
+          </dl>
+          <form id="wim-parallel-form" class="wim-parallel" hidden><label for="wim-live-parallel">동시 실행 수</label><input id="wim-live-parallel" type="number" min="1" max="16" value="3" required><button class="wim-btn" type="submit">적용</button></form>
+        </div>
+      </section>
+
+      <section id="wim-coordinator" class="wim-panel wim-coord" aria-labelledby="wim-coordinator-title">
+        <div class="wim-coord__head">
+          <span class="wim-coord__glyph" aria-hidden="true">◆</span>
+          <h2 id="wim-coordinator-title" class="wim-panel__title" tabindex="-1">조율자</h2>
+        </div>
+        <p id="wim-coordinator-identity" class="wim-coord__identity wim-path">선택한 조율자가 여기에 표시됩니다</p>
+        <p id="wim-coordinator-status" class="wim-coord__status">작업 경로와 목표를 입력하면 조율자가 계획을 세웁니다.</p>
+        <ol id="wim-coordinator-plan" class="wim-plan" aria-label="조율자 계획"></ol>
+        <div id="wim-coordinator-output"></div>
+        <p class="wim-help">조율자가 작업을 나누고, 선택한 도구와 모델 안에서 담당자를 배정합니다.</p>
+      </section>
+
+      <section id="wim-pool" class="wim-panel wim-pool" aria-labelledby="wim-pool-title">
+        <h2 id="wim-pool-title" class="wim-panel__title">모델 풀</h2>
+        <ul id="wim-pool-list" class="wim-pool__list"></ul>
+      </section>
+    </aside>
+
+    <main id="wim-main" class="wim-main">
+      <section id="wim-result" class="wim-panel wim-result" aria-labelledby="wim-result-title" hidden>
+        <h2 id="wim-result-title" class="wim-panel__title" tabindex="-1">결과 요약</h2>
+        <div id="wim-result-body"></div>
+      </section>
+
+      <section id="wim-graph" class="wim-panel wim-graph-panel" aria-labelledby="wim-graph-title">
+        <h2 id="wim-graph-title" class="wim-panel__title">작업 흐름</h2>
+        <p class="wim-help">작업을 선택하면 담당 모델과 실행 출력을 확인할 수 있습니다.</p>
+        <div id="wim-graph-mount" class="wim-graph-mount"></div>
+      </section>
+
+      <section id="wim-workers" class="wim-panel wim-workers" aria-labelledby="wim-workers-title">
+        <h2 id="wim-workers-title" class="wim-panel__title">작업자</h2>
+        <ol id="wim-worker-list" class="wim-worker-list"></ol>
+        <p id="wim-workers-empty" class="wim-empty">계획이 만들어지면 작업과 담당 모델이 여기에 표시됩니다.</p>
+      </section>
+    </main>
+  </div>
+
+  <div id="wim-live" class="wim-vh" aria-live="polite"></div>
+
+  <template id="wim-tpl-worker-card">
+    <li class="wim-card" data-task-id="" data-status="" data-selected="false" data-expanded="false">
+      <article>
+        <button class="wim-card__toggle" type="button" aria-expanded="false">
+          <span data-slot="status" class="wim-status"><span class="wim-status__glyph" aria-hidden="true"></span><span class="wim-status__label"></span></span>
+          <span data-slot="title" class="wim-card__title"></span>
+          <span data-slot="task-id" class="wim-path wim-card__id"></span>
+        </button>
+        <div class="wim-card__meta">
+          <span data-slot="difficulty" class="wim-diff"></span>
+          <span data-slot="model" class="wim-model-chip"></span>
+          <span data-slot="elapsed" class="wim-num wim-card__elapsed"></span>
+        </div>
+        <p data-slot="reason" class="wim-card__reason"></p>
+        <p data-slot="preview" class="wim-card__preview"></p>
+        <div class="wim-card__bodywrap">
+          <div class="wim-card__body" data-slot="body" hidden>
+            <dl data-slot="assignment" class="wim-card__assignment"></dl>
+            <div data-slot="attempts" class="wim-card__attempts" role="group" aria-label="시도"></div>
+            <div data-slot="output" class="wim-card__outputs"></div>
+            <button data-action="retry" class="wim-btn" type="button" hidden>다시 시도</button>
+          </div>
+        </div>
+      </article>
+    </li>
+  </template>
+
+  <template id="wim-tpl-pool-row">
+    <li class="wim-pool__row" data-candidate-id="" data-availability="">
+      <span data-slot="provider" class="wim-pool__provider"></span>
+      <span data-slot="model" class="wim-model-chip"></span>
+      <span data-slot="tier" class="wim-pool__tier"></span>
+      <span data-slot="availability" class="wim-pool__avail"></span>
+      <span data-slot="assignment" class="wim-pool__assign wim-path"></span>
+    </li>
+  </template>
+</div>
+
+<script type="module">import {api,info} from './preview.js';globalThis.switchbite={token:'',appMode:false,publicPreview:true,publicApi:api,publicInfo:info};await import('./ui/app.js');</script>
+</body>
+</html>

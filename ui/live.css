@@ -1,0 +1,48 @@
+/* Live API additions inherit the approved mockup's visual system. */
+::selection { background: var(--wim-accent); color: var(--wim-accent-ink); }
+input, textarea { caret-color: var(--wim-accent); }
+* { scrollbar-color: var(--wim-line-strong) var(--wim-surface); scrollbar-width: thin; }
+.wim-banner { gap: 8px 24px; flex-wrap: wrap; }
+.wim-banner::before { content: none; }
+.wim-connection { font-size: var(--wim-fs-1); color: var(--wim-st-ok); white-space: nowrap; }
+.wim-connection[data-connected="false"] { color: var(--wim-accent); }
+.wim-field__check { align-items: start; }
+.wim-field__check span { display: grid; gap: 2px; }
+.wim-field__check small { color: var(--wim-ink-2); font-size: var(--wim-fs-1); }
+.wim-field__check strong { font-weight: 600; }
+.wim-coord #wim-coordinator-output { margin-top: 16px; }
+.wim-coord .wim-out__pre { max-height: 260px; }
+.wim-plan { max-height: 240px; overflow: auto; }
+.wim-plan__item { display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+.wim-card__title { overflow-wrap: anywhere; }
+.wim-card[data-expanded="true"] .wim-card__title { display: block; -webkit-line-clamp: unset; }
+.wim-card__preview { min-height: 1.5em; }
+.wim-parallel { display: flex; gap: 8px; align-items: center; margin-top: 16px; flex-wrap: wrap; }
+.wim-parallel input { width: 72px; padding: 8px; color: var(--wim-ink); background: var(--wim-bg); border: 1px solid var(--wim-line-strong); border-radius: var(--wim-radius); }
+.wim-artifacts { display: grid; gap: 12px; margin-top: 20px; }
+.wim-artifacts li { display: flex; gap: 8px 16px; align-items: center; flex-wrap: wrap; padding-bottom: 12px; border-bottom: 1px solid var(--wim-line); }
+.wim-artifacts li > span { flex: 1; min-width: 180px; }
+.wim-artifact-details { margin-top: 16px; }
+.wim-artifact-details summary { cursor: pointer; color: var(--wim-ink-2); padding: 8px 0; }
+.wim-ui-message { margin: 0; padding: 12px var(--wim-pad); color: var(--wim-accent); background: var(--wim-surface); border-bottom: 1px solid var(--wim-line); }
+.wim-artifact-text { flex-basis: 100%; max-height: 420px; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; font: var(--wim-fs-2)/1.6 var(--wim-font-mono); background: var(--wim-bg); padding: 16px; margin: 0; }
+.wim-pool__row[data-availability] { border-left-width: 1px; border-left-style: solid; }
+.wim-pool__tier:empty { display: none; }
+.wim-result { scroll-margin-top: 90px; }
+.wim-topbar { overflow: clip; }
+@media (max-width: 639px) {
+  .wim-topbar { grid-template-columns: minmax(0, 1fr) auto; gap: 8px; padding: 12px 16px; }
+  .wim-topbar__id { display: flex; flex-wrap: nowrap; gap: 12px; }
+  .wim-brand { display: flex; flex-wrap: wrap; column-gap: 6px; align-items: baseline; font-size: 14px; line-height: 1.5; }
+  .wim-brand__mark { margin-right: 0; }
+  .wim-brand__mode { font-size: 12px; white-space: nowrap; }
+  .wim-topbar .wim-topbar__progress { grid-column: 1 / -1; width: 100%; }
+  .wim-topbar .wim-topbar__meta { grid-column: 1 / -1; justify-self: stretch; width: 100%; flex-wrap: nowrap; }
+  .wim-topbar__meta > span:first-child { flex-shrink: 0; }
+  .wim-topbar__tail { flex: 1; width: 0; min-width: 0; direction: ltr; text-align: left; }
+  .wim-banner { font-size: 12px; line-height: 1.6; }
+  .wim-artifacts li > span { min-width: 0; flex-basis: 100%; }
+  .wim-graph__canvas { max-height: 480px; }
+  .wim-graph[data-layout="stacked"] .wim-graph__title { display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+  .wim-result { scroll-margin-top: 170px; }
+}
