@@ -221,6 +221,92 @@ fn workflow_start_records_the_git_base_at_submission() {
     assert_eq!(status["runtime"]["project"]["base_commit"], base);
 }
 
+#[test]
+fn followed_engine_changes_only_new_runs_and_never_writes_the_source_checkout() {
+    let temp = tempfile::tempdir().unwrap();
+    let home = temp.path().join("runtime");
+    let repo = temp.path().join("repo");
+    fs::create_dir(&repo).unwrap();
+    for args in [
+        vec!["init"],
+        vec!["config", "user.name", "Test"],
+        vec!["config", "user.email", "test@example.invalid"],
+        vec!["commit", "--allow-empty", "-m", "base"],
+    ] {
+        assert!(
+            Command::new("git")
+                .current_dir(&repo)
+                .args(args)
+                .output()
+                .unwrap()
+                .status
+                .success()
+        );
+    }
+    let binary = fixture(temp.path());
+    fs::create_dir_all(&home).unwrap();
+    write_json(
+        &home.join("stackbite-follow.json"),
+        &json!({"enabled":true}),
+    );
+    let request = temp.path().join("request.json");
+    write_json(
+        &request,
+        &json!({"workspace":repo,"pool":[{"id":"worker","description":"worker","capabilities":[],"available":true}],"plan":{"nodes":[{"id":"one","objective":"one","outputs":["one.txt"]}]}}),
+    );
+    let mut versions = Vec::new();
+    for version in ["one", "two"] {
+        let folder = home.join("stackbite-engines").join(version);
+        fs::create_dir_all(&folder).unwrap();
+        let executable = folder.join(binary.file_name().unwrap());
+        fs::copy(&binary, &executable).unwrap();
+        write_json(
+            &home.join("stackbite-current.json"),
+            &json!({"version":version,"executable":executable,"sha256":sha(&executable)}),
+        );
+        let state = success(
+            command(&home)
+                .current_dir(&repo)
+                .args(["workflow", "start", "--request-file"])
+                .arg(&request)
+                .output()
+                .unwrap(),
+        );
+        assert_eq!(state["runtime"]["backend"]["executable"], json!(executable));
+        versions.push(state);
+    }
+    let old = success(
+        command(&home)
+            .current_dir(&repo)
+            .args([
+                "workflow",
+                "status",
+                versions[0]["run_id"].as_str().unwrap(),
+            ])
+            .output()
+            .unwrap(),
+    );
+    assert_eq!(old["runtime"]["backend"], versions[0]["runtime"]["backend"]);
+    assert_ne!(
+        old["runtime"]["backend"]["executable"],
+        versions[1]["runtime"]["backend"]["executable"]
+    );
+
+    // Even an uncreated nested cache must be rejected before creating follow configuration.
+    let forbidden = repo.join("updater-cache");
+    let rejected = command(&forbidden)
+        .args(["runtime", "follow-stackbite", "--source"])
+        .arg(&repo)
+        .output()
+        .unwrap();
+    assert!(!rejected.status.success());
+    assert!(
+        String::from_utf8_lossy(&rejected.stderr)
+            .contains("runtime_home_must_be_outside_stackbite_source")
+    );
+    assert!(!forbidden.exists());
+}
+
 // Invoked as a subprocess so environment configuration is never shared with other tests.
 #[test]
 fn handoff_helper() {

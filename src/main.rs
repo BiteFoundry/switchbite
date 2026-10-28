@@ -613,20 +613,27 @@ fn main() {
         let result = match args.as_slice() {
             [_, command] if command == "status" => switchbite::runtime_bundle::status(),
             [_, command] if command == "sync" => switchbite::runtime_bundle::sync().map(|v| v.unwrap_or(serde_json::json!({"status":"unconfigured"}))),
+            [_, command] if command == "stackbite-status" => switchbite::engine_updates::status(),
+            [_, command] if command == "check-stackbite" => switchbite::engine_updates::check(),
+            [_, command, flag, source] if command == "follow-stackbite" && flag == "--source" => switchbite::engine_updates::configure(std::path::Path::new(source), 60),
+            [_, command, flag, source, interval_flag, interval] if command == "follow-stackbite" && flag == "--source" && interval_flag == "--interval-seconds" => interval.parse::<u64>().map_err(Into::into).and_then(|interval| switchbite::engine_updates::configure(std::path::Path::new(source), interval)),
             [_, command, flag, source] if command == "configure" && flag == "--manifest" => switchbite::runtime_bundle::configure(source),
-            _ => Err("Usage: switchbite runtime status|sync|configure --manifest ABSOLUTE_PATH_OR_HTTPS_URL".into()),
+            _ => Err("Usage: switchbite runtime status|sync|configure --manifest SOURCE | follow-stackbite --source ABS_REPOSITORY [--interval-seconds 60] | stackbite-status | check-stackbite".into()),
         };
         match result {
             Ok(value) => println!("{value}"),
-            Err(_) => {
-                eprintln!(
-                    "Runtime configuration or update failed; check the manifest and engine files."
-                );
+            Err(error) => {
+                eprintln!("Runtime update failed: {error}");
                 std::process::exit(1);
             }
         }
         return;
     }
+    let _engine_updates = if args.first().is_some_and(|arg| arg == "serve") {
+        switchbite::engine_updates::watch().ok().flatten()
+    } else {
+        None
+    };
     match switchbite::runtime_bundle::launch_current(&args) {
         Ok(Some(status)) => std::process::exit(status.code().unwrap_or(1)),
         Ok(None) => {}

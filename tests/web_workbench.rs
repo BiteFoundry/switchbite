@@ -166,6 +166,12 @@ fn web_submission_runs_real_workflow_with_isolated_fake_provider() {
         .unwrap();
     let (_, info) = http(port, "GET", "/api/app", "", "", "");
     let info: Value = serde_json::from_str(&info).unwrap();
+    let (code, runtime) = http(port, "GET", "/api/runtime", "", "", "");
+    assert_eq!(code, 200);
+    let runtime: Value = serde_json::from_str(&runtime).unwrap();
+    assert_eq!(runtime["enabled"], false);
+    assert_eq!(runtime["offline"], true);
+    assert!(runtime.get("source_repository").is_none());
     assert_eq!(http(port, "GET", "/api/activity", "", "", "").0, 403);
     assert_eq!(info["tools"].as_array().unwrap().len(), 6);
     assert_eq!(info["connection"]["mode"], "native_cli_new_session");

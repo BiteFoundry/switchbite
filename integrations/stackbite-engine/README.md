@@ -1,4 +1,15 @@
-# Switchbite isolated clone engine
+# SwitchBite StackBite execution adapter
+
+Automatic release following builds this adapter as an independent Cargo project
+under SwitchBite's runtime home. The official source commit is exported to a
+separate snapshot and consumed as a path dependency, without editing the source
+checkout. Build-time `SWITCHBITE_STACKBITE_VERSION` and
+`SWITCHBITE_STACKBITE_COMMIT` record the exact release identity in `capabilities`.
+`self-test` checks the actual child transport's stdin, both output streams, EOFs
+and exit status before the new engine becomes eligible for new runs.
+
+See [automatic updates](../../docs/stackbite-auto-update.ko.md). The remaining
+description records the original isolated-clone build and legacy Seat server.
 
 License provenance: this crate is built in the StackBite source workspace and
 inherits its `LicenseRef-Proprietary` designation. SwitchBite's MIT license does

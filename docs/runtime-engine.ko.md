@@ -1,6 +1,6 @@
 # SwitchBite 런타임 엔진
 
-이 구성은 SwitchBite `0.9.0-preview.1` 웹 앱과 독립된 StackBite 복제본 기반 엔진을 함께 사용한다. 복제본의 StackBite 앱 기준 버전은 `0.5.54`, 브리지 버전은 `0.1.0`, 브리지 프로토콜은 `1`이다. 기존 StackBite 설치와 그 상태는 변경하지 않는다.
+초기 프리뷰 번들은 SwitchBite `0.9.0-preview.1` 웹 앱과 StackBite `0.5.54` 기반 엔진을 함께 제공한다. 브리지 버전은 `0.1.0`, 프로토콜은 `1`이다. [공식 최신 릴리스 자동 연동](stackbite-auto-update.ko.md)을 설정하면 SwitchBite가 별도로 빌드한 최신 실행 컴포넌트가 새 작업의 엔진으로 선택된다.
 
 SwitchBite가 준비한 작업 디렉터리에서 엔진 프로세스를 실행하고, 엔진은 기존 `stackbite-provider-stream`을 통해 제공자 CLI의 출력과 오류 출력을 전달한다. SwitchBite는 기존 프로세스 기록, 취소, 출력 제한과 제공자별 완료 검증을 사용한다. 별도 데몬이나 SSE 서버는 필요하지 않다. 브리지는 Codex, Claude, Cursor, OpenCode, Antigravity의 기존 실행 어댑터를 지원한다. Grok 실행 어댑터는 포함하지 않는다.
 

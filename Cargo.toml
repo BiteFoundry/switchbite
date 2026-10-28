@@ -1,8 +1,8 @@
 [package]
 name = "switchbite"
-version = "0.9.0-preview.1"
+version = "0.9.0-preview.2"
 edition = "2024"
-rust-version = "1.88"
+rust-version = "1.89"
 description = "The decision layer for your agents: portable worker and model-pool routing over MCP"
 license = "MIT"
 repository = "https://github.com/BiteFoundry/switchbite"

@@ -116,7 +116,7 @@ fn view(state: &Value) -> Value {
         let runtime = &state["runtime"];
         result["runtime"] = json!({
             "switchbite":{"version":safe_string(&runtime["switchbite"]["version"],128),"commit":safe_string(&runtime["switchbite"]["commit"],64)},
-            "backend":{"kind":safe_string(&runtime["backend"]["kind"],128),"version":safe_string(&runtime["backend"]["version"],128),"protocol_version":runtime["backend"]["protocol_version"].as_u64().map(|n| n.to_string()).unwrap_or_else(|| safe_string(&runtime["backend"]["protocol_version"],128))},
+            "backend":{"kind":safe_string(&runtime["backend"]["kind"],128),"version":safe_string(&runtime["backend"]["version"],128),"commit":safe_string(&runtime["backend"]["commit"],64),"protocol_version":runtime["backend"]["protocol_version"].as_u64().map(|n| n.to_string()).unwrap_or_else(|| safe_string(&runtime["backend"]["protocol_version"],128))},
             "project":{"workspace":safe_string(&runtime["project"]["workspace"],1024),"base_commit":safe_string(&runtime["project"]["base_commit"],64)}
         });
     }
@@ -367,6 +367,16 @@ fn handle(
                 ),
             }
         }
+        "GET /api/runtime HTTP/1.1" if app.is_some() => {
+            let value = crate::engine_updates::status()
+                .unwrap_or_else(|_| json!({"status":"error","error":"runtime_status_unavailable"}));
+            response(
+                &mut stream,
+                "200 OK",
+                "application/json",
+                &value.to_string(),
+            )
+        }
         "POST /api/start HTTP/1.1" if app.is_some() => {
             let body =
                 serde_json::from_slice(&data[head_end..head_end + length]).unwrap_or(Value::Null);
@@ -583,6 +593,7 @@ pub fn serve_app_resume(
     resume: Option<&str>,
     coordinator: Option<&str>,
 ) -> Result<(), AnyError> {
+    let _engine_updates = crate::engine_updates::watch()?;
     let app = Arc::new(Workbench::new(workspace, judge).map_err(|value| value.to_string())?);
     let workflow = Workflow::new(workspace.join(".switchbite/workflow"));
     let token = random_token()?;

@@ -1,5 +1,4 @@
-//! Private isolated-clone adapter. This is a structured print runner, not the
-//! installed Stackbite daemon, native hooks, or a model onboarding protocol.
+//! SwitchBite-owned process adapter over an unchanged StackBite provider-stream dependency.
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
@@ -855,10 +854,64 @@ fn bridge_exec(args: &[String]) -> Result<i32> {
 
 fn main() {
     let args: Vec<String> = env::args().skip(1).collect();
+    if args.first().map(String::as_str) == Some("--transport-fixture") {
+        let mut input = Vec::new();
+        std::io::stdin().read_to_end(&mut input).unwrap();
+        std::io::stdout().write_all(&input).unwrap();
+        std::io::stderr().write_all(b"switchbite-stderr\n").unwrap();
+        std::process::exit(7);
+    }
+    if args.first().map(String::as_str) == Some("self-test") {
+        let outcome = (|| -> Result<()> {
+            let mut command = Command::new(env::current_exe().map_err(|_| "self_test_failed")?);
+            command.arg("--transport-fixture");
+            let mut transport = ChildTransport::spawn(command).map_err(|_| "self_test_failed")?;
+            if !transport.write_line(b"switchbite-stdout\n").is_written() {
+                return Err("self_test_failed");
+            }
+            transport.close_input();
+            let (mut stdout, mut stderr) = (Vec::new(), Vec::new());
+            let (mut out_eof, mut err_eof, mut exit) = (false, false, None);
+            let started = Instant::now();
+            while started.elapsed() < Duration::from_secs(5) {
+                match transport.recv(Duration::from_millis(20)) {
+                    Some(Chunk::Data(Stream::Stdout, bytes)) => stdout.extend(bytes),
+                    Some(Chunk::Data(Stream::Stderr, bytes)) => stderr.extend(bytes),
+                    Some(Chunk::Eof(Stream::Stdout)) => out_eof = true,
+                    Some(Chunk::Eof(Stream::Stderr)) => err_eof = true,
+                    Some(Chunk::ReadError(..)) => return Err("self_test_failed"),
+                    None => (),
+                }
+                if exit.is_none() {
+                    exit = transport.try_exit().map_err(|_| "self_test_failed")?;
+                }
+                if out_eof && err_eof && exit.is_some() {
+                    break;
+                }
+            }
+            if !out_eof
+                || !err_eof
+                || exit.and_then(|e| e.code) != Some(7)
+                || stdout != b"switchbite-stdout\n"
+                || stderr != b"switchbite-stderr\n"
+            {
+                return Err("self_test_failed");
+            }
+            println!(
+                "{}",
+                json!({"status":"passed","checks":["stdin","stdout","stderr","eof","exit_code"]})
+            );
+            Ok(())
+        })();
+        if outcome.is_err() {
+            std::process::exit(1);
+        }
+        return;
+    }
     if args.first().map(String::as_str) == Some("capabilities") {
         println!(
             "{}",
-            json!({"kind":"stackbite_private_clone","version":env!("CARGO_PKG_VERSION"),"stackbite_version":serde_json::from_str::<Value>(include_str!("../../../../package.json")).ok().and_then(|v| v["version"].as_str().map(str::to_owned)),"protocol":1,"protocol_version":1,"providers":BRIDGE_PROVIDERS,"raw_streams":true,"session_isolation":"fresh_per_task"})
+            json!({"kind":"stackbite_upstream_adapter","version":env!("CARGO_PKG_VERSION"),"stackbite_version":option_env!("SWITCHBITE_STACKBITE_VERSION").unwrap_or("unknown"),"stackbite_commit":option_env!("SWITCHBITE_STACKBITE_COMMIT").unwrap_or("unknown"),"protocol":1,"protocol_version":1,"providers":BRIDGE_PROVIDERS,"raw_streams":true,"session_isolation":"fresh_per_task"})
         );
         return;
     }

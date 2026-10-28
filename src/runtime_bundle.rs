@@ -15,7 +15,7 @@ const MAX_MANIFEST: u64 = 64 * 1024;
 const MAX_BINARY: u64 = 256 * 1024 * 1024;
 static INSTALL: Mutex<()> = Mutex::new(());
 
-fn home() -> Result<PathBuf> {
+pub(crate) fn home() -> Result<PathBuf> {
     if let Some(path) = std::env::var_os("SWITCHBITE_RUNTIME_HOME") {
         let path = PathBuf::from(path);
         if !path.is_absolute() {
@@ -203,6 +203,11 @@ pub fn default_backend() -> Result<Option<Value>> {
             json!({"type":"stackbite","executable":PathBuf::from(value)}),
         ));
     }
+    if let Some(engine) = crate::engine_updates::selected()? {
+        return Ok(Some(
+            json!({"type":"stackbite","executable":engine["executable"]}),
+        ));
+    }
     let value = status()?;
     Ok(value["stackbite"]["executable"]
         .as_str()
@@ -246,7 +251,7 @@ pub fn run_runtime_metadata(request: &Value) -> Result<Value> {
         );
         let caps = crate::adapters::stackbite_backend::capabilities(path)
             .map_err(|_| "stackbite_backend_unavailable")?;
-        json!({"kind":"stackbite_private_clone","version":caps["stackbite_version"].as_str().unwrap_or_else(|| caps["version"].as_str().unwrap_or("unknown")),"bridge_version":caps["version"],"protocol_version":caps["protocol_version"],"executable":path,"sha256":digest(path)?,"providers":caps["providers"],"session_isolation":caps["session_isolation"]})
+        json!({"kind":caps["kind"].as_str().unwrap_or("stackbite_private_clone"),"version":caps["stackbite_version"].as_str().unwrap_or_else(|| caps["version"].as_str().unwrap_or("unknown")),"commit":caps["stackbite_commit"],"bridge_version":caps["version"],"protocol_version":caps["protocol_version"],"executable":path,"sha256":digest(path)?,"providers":caps["providers"],"session_isolation":caps["session_isolation"]})
     } else {
         json!({"kind":"native_cli","version":env!("CARGO_PKG_VERSION"),"protocol_version":1})
     };

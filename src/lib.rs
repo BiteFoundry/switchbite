@@ -15,6 +15,7 @@ pub mod activity;
 pub mod adapters;
 pub mod agent;
 pub mod catalog;
+pub mod engine_updates;
 pub mod evaluation;
 pub mod local_laya;
 pub mod route_context;
