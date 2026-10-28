@@ -1,6 +1,6 @@
 import { createGraph } from './graph.js';
 import { createOutputView } from './worker-output.js';
-import { ACTIVE, label, pathLabel, duration, graphModel, taskView, streamsFor, waitReason, outputChunks, artifactOrder, usableToolIds, failureText, feedbackView } from './model.js';
+import { ACTIVE, label, pathLabel, duration, graphModel, taskView, streamsFor, waitReason, outputChunks, artifactOrder, usableToolIds, failureText, feedbackView, dependencyChoices } from './model.js';
 
 const { token, appMode, publicPreview = false, publicApi, publicInfo } = globalThis.switchbite;
 const $ = id => document.getElementById(id);
@@ -12,6 +12,7 @@ let selectedTools = new Set(), selectedTask = null, composing = true;
 let busy = false, polling = false, formDirty = false, currentRun = null, resultKey = null;
 let coordinatorOutput = null, coordinatorOutputId = null, recoveryKey = null;
 let feedbackRequest = null, feedbackSending = false;
+let dependencyDraft = null, dependencySending = false;
 let selectedModel = null;
 const setText = (node, text) => { const value = String(text ?? ''); if (node.textContent !== value) node.textContent = value; };
 const element = (tag, className, text) => { const node = document.createElement(tag); if (className) node.className = className; if (text != null) node.textContent = text; return node; };
@@ -177,13 +178,62 @@ function renderFeedback() {
   }
 }
 function selectTask(id, scroll = false) {
+  if (selectedTask !== id) dependencyDraft = null;
   selectedTask = id; graph.setSelected(id);
+  renderDependencies();
   for (const [taskId, card] of cards) card.node.dataset.selected = String(taskId === id);
   if (id && cards.has(id)) {
     const card = cards.get(id); expandCard(card, true);
     if (scroll) card.node.scrollIntoView({ block: 'nearest', behavior: 'auto' });
     poll();
   }
+}
+function renderDependencies() {
+  const details = $('wim-dependencies'), tasks = state.tasks || [];
+  details.hidden = publicPreview || !appMode || !tasks.length || !['running', 'paused'].includes(state.status);
+  if (details.hidden) return;
+  if (state.plan_review_pending && details.dataset.reviewRun !== state.run_id) { details.open = true; details.dataset.reviewRun = state.run_id; }
+  $('wim-plan-review-help').hidden = !state.plan_review_pending;
+  const select = $('wim-dependency-task'), task = tasks.find(t => t.id === selectedTask) || tasks.find(t => (state.editable_task_ids || []).includes(t.id)) || tasks[0];
+  const signature = JSON.stringify([state.run_id, tasks.map(t => [t.id, t.objective]), task.id]);
+  if (select.dataset.signature !== signature) {
+    select.replaceChildren(...tasks.map(t => { const option = element('option', '', `${t.id} — ${t.objective}`); option.value = t.id; return option; }));
+    select.value = task.id; select.dataset.signature = signature;
+  }
+  const editable = (state.editable_task_ids || []).includes(task.id), manual = Object.hasOwn(state.dependency_overrides || {}, task.id);
+  if (!dependencyDraft || dependencyDraft.task !== task.id || dependencyDraft.run !== state.run_id || !dependencyDraft.dirty) {
+    dependencyDraft = { run: state.run_id, task: task.id, values: new Set(task.depends_on || []), dirty: false };
+  }
+  const checks = $('wim-dependency-checks'), candidates = dependencyChoices(tasks, task.id);
+  const key = JSON.stringify([task.id, candidates.map(t => [t.id, t.objective])]);
+  if (checks.dataset.signature !== key) {
+    checks.dataset.signature = key;
+    checks.replaceChildren(...candidates.map(t => {
+      const row = element('label', 'wim-field__check'), input = element('input'); input.type = 'checkbox'; input.value = t.id; input.checked = dependencyDraft.values.has(t.id);
+      const text = element('span', '', `${t.id} — ${t.objective}`); row.append(input, text);
+      input.addEventListener('change', () => { if (input.checked) dependencyDraft.values.add(t.id); else dependencyDraft.values.delete(t.id); dependencyDraft.dirty = true; });
+      return row;
+    }));
+    if (!candidates.length) checks.append(element('p', 'wim-help', '선행 작업으로 지정할 다른 작업이 없습니다.'));
+  }
+  for (const input of checks.querySelectorAll('input')) input.checked = dependencyDraft.values.has(input.value);
+  $('wim-dependency-options').disabled = dependencySending || !editable;
+  $('wim-dependency-save').disabled = dependencySending || !editable;
+  $('wim-dependency-auto').hidden = !manual;
+  $('wim-dependency-auto').disabled = dependencySending || !editable;
+  select.disabled = dependencySending;
+  setText($('wim-dependency-mode'), !editable ? '이미 시작했거나 완료된 작업입니다. 아직 시작하지 않은 작업을 선택하세요.' : manual ? '직접 지정 · 이후 재계획에서도 이 관계를 유지합니다.' : '조율자 자동 · 적용하면 이 작업의 선행 관계를 직접 지정합니다.');
+}
+async function saveDependencies(automatic) {
+  if (dependencySending || !dependencyDraft) return;
+  const request = {run_id: dependencyDraft.run, task_id: dependencyDraft.task, depends_on: automatic ? null : [...dependencyDraft.values]};
+  selectedTask = request.task_id; graph.setSelected(selectedTask);
+  dependencySending = true; renderDependencies();
+  try {
+    state = await api('/api/dependencies', request); dependencyDraft = null;
+    setText($('wim-dependency-status'), automatic ? '자동 지정을 요청했습니다. 조율자가 남은 계획에 반영합니다.' : '선행 작업을 적용했습니다. 도표에 반영됐습니다.'); render();
+  } catch (error) { setText($('wim-dependency-status'), error.message); }
+  finally { dependencySending = false; renderDependencies(); }
 }
 function expandCard(card, expanded) {
   card.expanded = expanded; card.body.hidden = !expanded;
@@ -252,7 +302,7 @@ function renderCards() {
 function resetViews() {
   for (const card of cards.values()) { card.view?.destroy(); card.node.remove(); }
   cards.clear(); outputCache.clear(); coordinatorOutput?.destroy(); coordinatorOutput = null; coordinatorOutputId = null;
-  selectedTask = null; graph.setSelected(null); resultKey = null;
+  selectedTask = null; dependencyDraft = null; graph.setSelected(null); resultKey = null;
 }
 function render() {
   if (currentRun !== (state.run_id || null)) { currentRun = state.run_id || null; resetViews(); }
@@ -269,6 +319,7 @@ function render() {
   setText($('wim-run-clock'), running); setText($('wim-workspace-tail'), pathLabel(state.workspace || info?.workspace));
   $('wim-btn-pause').hidden = !active || state.status === 'paused'; $('wim-btn-resume').hidden = state.status !== 'paused' && !state.attention;
   $('wim-btn-cancel').hidden = !active;
+  setText($('wim-btn-resume'), state.plan_review_pending ? '이 계획으로 시작' : '재개');
   $('wim-btn-reset').hidden = !appMode || !state.run_id || active;
   setText($('wim-btn-reset'), composing ? '완료된 작업 보기' : '새 작업');
   $('wim-btn-results').hidden = state.status !== 'completed' || !state.result || composing;
@@ -286,10 +337,11 @@ function render() {
     const submission = state.startup_submission; recoveryKey = JSON.stringify(submission); composing = true;
     $('wim-input-workspace').value = pathLabel(submission.workspace); $('wim-input-goal').value = submission.goal || '';
     $('wim-input-parallel').value = submission.max_parallel || 3;
+    $('wim-review-plan').checked = Boolean(submission.review_plan);
     selectedTools = new Set(submission.tools || []); selectedModel = submission.coordinator_id; renderTools();
     $('wim-start-form').hidden = false; goalBytes();
   }
-  graph.update(graphModel(tasks)); renderCards(); renderCoordinator(); renderFeedback(); renderPool(); renderResult(); setBusy(busy);
+  graph.update(graphModel(tasks)); renderCards(); renderCoordinator(); renderFeedback(); renderDependencies(); renderPool(); renderResult(); setBusy(busy);
 }
 function renderResult() {
   const result = state.result, visible = state.status === 'completed' && result && !composing;
@@ -379,13 +431,17 @@ $('wim-start-form').addEventListener('submit', async event => {
   if (!Number.isInteger(maxParallel) || maxParallel < 1 || maxParallel > 16) { notice('동시 작업 수는 1~16 사이의 정수로 입력하세요.'); return; }
   setBusy(true); notice('계획과 작업 실행을 시작합니다…');
   try {
-    state = await api('/api/start', { workspace, goal, tools, coordinator_id: $('wim-input-coordinator').value, max_parallel: maxParallel });
+    state = await api('/api/start', { workspace, goal, tools, coordinator_id: $('wim-input-coordinator').value, max_parallel: maxParallel, review_plan: $('wim-review-plan').checked });
     if (state.handoff?.url) { const url = new URL(state.handoff.url); if (url.protocol !== 'http:' || url.hostname !== '127.0.0.1') throw Error('새 앱 주소를 확인하지 못했습니다.'); location.assign(url.href); return; }
     composing = false; formDirty = false; notice(''); render();
   } catch (error) { notice(error.message); }
   finally { setBusy(false); poll(); }
 });
 $('wim-btn-pause').addEventListener('click', () => control('pause'));
+$('wim-review-plan').addEventListener('change', () => setText($('wim-btn-start'), $('wim-review-plan').checked ? '계획 만들기' : '작업 시작'));
+$('wim-dependency-task').addEventListener('change', event => { dependencyDraft = null; setText($('wim-dependency-status'), ''); selectTask(event.target.value); });
+$('wim-dependency-form').addEventListener('submit', event => { event.preventDefault(); saveDependencies(false); });
+$('wim-dependency-auto').addEventListener('click', () => saveDependencies(true));
 $('wim-btn-resume').addEventListener('click', () => control('resume'));
 $('wim-btn-cancel').addEventListener('click', () => control('cancel'));
 $('wim-btn-reset').addEventListener('click', () => { composing = !composing; if (composing && !formDirty) $('wim-input-goal').value = ''; notice(''); render(); goalBytes(); if (composing) $('wim-input-goal').focus(); });

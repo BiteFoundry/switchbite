@@ -55,3 +55,15 @@ input, textarea { caret-color: var(--wim-accent); }
   .wim-graph[data-layout="stacked"] .wim-graph__title { display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
   .wim-result { scroll-margin-top: 170px; }
 }
+
+.wim-dependencies { margin-top: var(--wim-space-4, 16px); padding-top: var(--wim-space-4, 16px); border-top: 1px solid var(--wim-line); }
+.wim-dependencies > summary { cursor: pointer; font-weight: 600; min-height: 44px; align-content: center; }
+.wim-dependencies form { display: grid; gap: 12px; padding-top: 12px; }
+.wim-dependencies select { width: 100%; min-width: 0; min-height: 44px; background: var(--wim-bg); color: var(--wim-ink); border: 1px solid var(--wim-line); border-radius: 6px; padding: 8px; }
+.wim-dependencies fieldset { border: 0; padding: 0; min-width: 0; }
+.wim-dependencies legend { margin-bottom: 8px; font-weight: 600; }
+#wim-dependency-checks { display: grid; gap: 4px; max-height: 280px; overflow: auto; }
+#wim-dependency-checks label { min-height: 44px; padding: 8px; align-items: flex-start; overflow-wrap: anywhere; }
+#wim-dependency-checks input { flex: 0 0 auto; margin-top: 4px; }
+.wim-dependency-actions { display: flex; flex-wrap: wrap; gap: 8px; }
+.wim-dependency-actions button { min-height: 44px; }
