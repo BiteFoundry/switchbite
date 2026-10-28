@@ -1,6 +1,7 @@
 // View models derived only from recorded workflow and process state.
 export const ACTIVE = new Set(['running', 'planning', 'paused']);
 export const COPY = {
+  replanning: '계획 조정 중', replan: '계획 조정', repairing_plan: '계획 형식 수정 중',
   idle: '새 작업 대기', planning: '계획 중', running: '실행 중', paused: '일시정지',
   completed: '완료', cancelled: '취소됨', blocked: '선행 작업 확인 필요',
   held: '배정 확인 필요', failed: '실패', unknown: '상태 확인 중',
@@ -16,6 +17,17 @@ export const COPY = {
 export const ROLES = { implementation: '구현', review: '검토', exploration: '조사',
   design: '설계', planning: '계획', testing: '검증', writing: '작성', mockup: '목업', integration: '통합' };
 export const label = value => COPY[value] || value || '대기';
+export function feedbackView(report) {
+  const source = report.source === 'user' ? '사용자' : report.source === 'worker' ? `작업자${report.task_id ? ` · ${report.task_id}` : ''}` : '실행 상태';
+  const changes = [['added', '추가'], ['changed', '변경'], ['removed', '제거']].flatMap(([key, title]) => report.changes?.[key]?.length ? [`${title}: ${report.changes[key].join(', ')}`] : []);
+  return { id: report.id, source, status: report.status === 'processed' ? '답변 완료' : '조율 대기', message: report.message || '', reply: report.reply || '', changes: changes.join(' · ') };
+}
+export function failureText(problem) {
+  if (!problem) return '';
+  const stages = { plan_validation: '계획 검증', result_collection: '계획 회수', cli_execution: 'CLI 실행', routing: '모델 배정', workflow: '작업 조율', integration: '결과 통합' };
+  const location = [problem.node_id, problem.field].filter(Boolean).join(' · ');
+  return [stages[problem.stage], location, problem.message || problem.code, problem.expected ? `기대 형식: ${problem.expected}` : ''].filter(Boolean).join(' — ');
+}
 export const usableToolIds = (tools, selected) => (tools || []).filter(tool => tool.selectable && selected.has(tool.id)).map(tool => tool.id);
 export const pathLabel = value => String(value || '').replace(/^\\\\\?\\/, '');
 export function duration(ms) {
